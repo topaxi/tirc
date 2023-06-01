@@ -13,13 +13,20 @@ use tokio::{
     sync::mpsc::{self, Sender},
     time::Instant,
 };
-use tui::widgets::{Block, Borders};
+use tui::{
+    style::{Color, Style},
+    widgets::{Block, Borders, List, ListItem},
+};
 
 #[tokio::main]
 async fn main() -> Result<(), failure::Error> {
     enable_raw_mode()?;
 
-    let (tx, mut rx) = mpsc::channel(10);
+    let mut terminal = tirc::tui::Terminal::new()?;
+
+    terminal.clear()?;
+
+    let (tx, mut rx) = mpsc::channel(16);
 
     let input_sender = tx.clone();
     let irc_sender = tx.clone();
@@ -27,6 +34,8 @@ async fn main() -> Result<(), failure::Error> {
     let input_handle = tokio::spawn(async move { handle_input(input_sender).await });
 
     let irc_handle = tokio::spawn(async move { connect_irc(irc_sender).await });
+
+    let mut messages: Vec<Message> = Vec::new();
 
     loop {
         match rx.recv().await {
@@ -42,13 +51,13 @@ async fn main() -> Result<(), failure::Error> {
                 }
             }
             Some(Event::Message(message)) => {
-                println!("{:?}", message);
+                messages.push(message);
             }
             Some(Event::Tick) => {}
             None => {}
         }
 
-        render_ui()?;
+        render_ui(&messages)?;
     }
 
     disable_raw_mode()?;
@@ -91,14 +100,28 @@ async fn handle_input(tx: Sender<Event<KeyEvent>>) -> Result<(), failure::Error>
     }
 }
 
-fn render_ui() -> Result<(), failure::Error> {
+fn render_ui(messages: &Vec<Message>) -> Result<(), failure::Error> {
     let mut terminal = tirc::tui::Terminal::new()?;
 
     terminal.draw(|f| {
         let size = f.size();
-        let block = Block::default().title("Block").borders(Borders::NONE);
+        let messages: Vec<_> = messages
+            .iter()
+            .rev()
+            .take(size.height as usize)
+            .map(|message| {
+                ListItem::new(message.to_string()).style(Style::default().fg(Color::White))
+            })
+            .rev()
+            .collect();
 
-        f.render_widget(block, size);
+        let list = List::new(messages).block(
+            Block::default()
+                .title("irc.topaxi.ch")
+                .borders(Borders::NONE),
+        );
+
+        f.render_widget(list, size);
     })?;
 
     Ok(())
