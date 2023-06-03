@@ -1,5 +1,5 @@
 extern crate tui;
 
-mod terminal;
+mod ui;
 
-pub use self::terminal::Terminal;
+pub use self::ui::Ui;

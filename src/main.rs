@@ -2,30 +2,18 @@ extern crate irc;
 
 use std::time::Duration;
 
-use crossterm::{
-    event::{self, Event as CrosstermEvent, KeyCode, KeyEvent},
-    terminal::{disable_raw_mode, enable_raw_mode},
-};
+use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent};
 use futures::prelude::*;
 use irc::client::prelude::*;
 
+use tirc::ui;
 use tokio::{
     sync::mpsc::{self, Sender},
     time::Instant,
 };
-use tui::{
-    style::{Color, Style},
-    widgets::{Block, Borders, List, ListItem},
-};
 
 #[tokio::main]
 async fn main() -> Result<(), failure::Error> {
-    enable_raw_mode()?;
-
-    let mut terminal = tirc::tui::Terminal::new()?;
-
-    terminal.clear()?;
-
     let (tx, mut rx) = mpsc::channel(16);
 
     let input_sender = tx.clone();
@@ -35,32 +23,37 @@ async fn main() -> Result<(), failure::Error> {
 
     let irc_handle = tokio::spawn(async move { connect_irc(irc_sender).await });
 
-    let mut messages: Vec<Message> = Vec::new();
+    let mut state = ui::State::new();
+    let mut ui = tirc::tui::Ui::new()?;
+
+    ui.initialize_terminal()?;
 
     loop {
         match rx.recv().await {
             Some(Event::Input(event)) => {
                 println!("{:?}", event);
 
-                match event.code {
-                    KeyCode::Char('q') => {
-                        // TODO: Broadcast quit to irc
-                        break;
+                match state.mode {
+                    ui::Mode::Normal => {
+                        match event.code {
+                            KeyCode::Char('q') => {
+                                // TODO: Broadcast quit to irc
+                                break;
+                            }
+                            _ => {}
+                        }
                     }
-                    _ => {}
+                    ui::Mode::Insert => {}
                 }
             }
             Some(Event::Message(message)) => {
-                messages.push(message);
+                state.push_message(message);
             }
-            Some(Event::Tick) => {}
-            None => {}
+            Some(Event::Tick) | None => {}
         }
 
-        render_ui(&messages)?;
+        ui.render(&state.get_messages())?;
     }
-
-    disable_raw_mode()?;
 
     let res = tokio::try_join!(input_handle, irc_handle);
 
@@ -98,33 +91,6 @@ async fn handle_input(tx: Sender<Event<KeyEvent>>) -> Result<(), failure::Error>
             }
         }
     }
-}
-
-fn render_ui(messages: &Vec<Message>) -> Result<(), failure::Error> {
-    let mut terminal = tirc::tui::Terminal::new()?;
-
-    terminal.draw(|f| {
-        let size = f.size();
-        let messages: Vec<_> = messages
-            .iter()
-            .rev()
-            .take(size.height as usize)
-            .map(|message| {
-                ListItem::new(message.to_string()).style(Style::default().fg(Color::White))
-            })
-            .rev()
-            .collect();
-
-        let list = List::new(messages).block(
-            Block::default()
-                .title("irc.topaxi.ch")
-                .borders(Borders::NONE),
-        );
-
-        f.render_widget(list, size);
-    })?;
-
-    Ok(())
 }
 
 async fn connect_irc(tx: Sender<Event<KeyEvent>>) -> Result<(), failure::Error> {
