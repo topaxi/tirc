@@ -980,6 +980,7 @@ dependencies = [
  "irc",
  "ratatui",
  "tokio",
+ "tui-input",
 ]
 
 [[package]]
@@ -1099,6 +1100,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0955b8137a1df6f1a2e9a37d8a6656291ff0297c1a97c24e0d8425fe2312f79a"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "tui-input"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c0f17f46cee09b40dca10deac554e020fc2052c14f20192728cee884288227b"
+dependencies = [
+ "crossterm",
+ "unicode-width",
 ]
 
 [[package]]

@@ -3,13 +3,14 @@ use tokio::sync::Mutex;
 
 pub enum Mode {
     Normal,
+    Command,
     Insert,
 }
 
 pub struct State {
     pub mode: Mode,
-    current_buffer: Mutex<String>,
-    messages: Vec<Message>,
+    pub current_buffer: Mutex<String>,
+    pub messages: Vec<Message>,
 }
 
 impl State {
@@ -23,9 +24,5 @@ impl State {
 
     pub fn push_message(&mut self, message: Message) {
         self.messages.push(message);
-    }
-
-    pub fn get_messages(&self) -> &Vec<Message> {
-        &self.messages
     }
 }

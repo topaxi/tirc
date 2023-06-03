@@ -10,4 +10,5 @@ irc = { git = "https://github.com/aatxe/irc.git", branch = "develop" }
 tokio = { version = "1.28.2", features = ["full"] }
 crossterm = { version = "0.26.1", features = ["serde"] }
 tui = { version="0.21.0", package = "ratatui" }
+tui-input = { version = "*", features = ["crossterm"] }
 anyhow = "1.0.71"

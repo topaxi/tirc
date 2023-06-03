@@ -11,6 +11,7 @@ use tokio::{
     sync::mpsc::{self, Sender},
     time::Instant,
 };
+use tui_input::backend::crossterm::EventHandler;
 
 #[tokio::main]
 async fn main() -> Result<(), failure::Error> {
@@ -29,21 +30,45 @@ async fn main() -> Result<(), failure::Error> {
     ui.initialize_terminal()?;
 
     loop {
+        ui.render(&state)?;
+
         match rx.recv().await {
             Some(Event::Input(event)) => {
-                println!("{:?}", event);
-
                 match state.mode {
-                    ui::Mode::Normal => {
-                        match event.code {
-                            KeyCode::Char('q') => {
-                                // TODO: Broadcast quit to irc
-                                break;
-                            }
-                            _ => {}
+                    ui::Mode::Normal => match event.code {
+                        KeyCode::Char('q') => {
+                            // TODO: Broadcast quit to irc
+                            break;
                         }
-                    }
-                    ui::Mode::Insert => {}
+                        KeyCode::Char('i') => {
+                            state.mode = ui::Mode::Insert;
+                        }
+                        KeyCode::Char(':') => {
+                            state.mode = ui::Mode::Command;
+                        }
+                        _ => {}
+                    },
+                    ui::Mode::Command | ui::Mode::Insert => match event.code {
+                        KeyCode::Esc => {
+                            state.mode = ui::Mode::Normal;
+
+                            ui.input.reset();
+                        }
+                        KeyCode::Enter => {
+                            match state.mode {
+                                ui::Mode::Command => {
+                                    state.mode = ui::Mode::Normal;
+                                }
+                                ui::Mode::Insert => {}
+                                _ => {}
+                            }
+
+                            ui.input.reset();
+                        }
+                        _ => {
+                            ui.input.handle_event(&CrosstermEvent::Key(event));
+                        }
+                    },
                 }
             }
             Some(Event::Message(message)) => {
@@ -51,8 +76,6 @@ async fn main() -> Result<(), failure::Error> {
             }
             Some(Event::Tick) | None => {}
         }
-
-        ui.render(&state.get_messages())?;
     }
 
     let res = tokio::try_join!(input_handle, irc_handle);
