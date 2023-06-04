@@ -17,7 +17,7 @@ async fn main() -> Result<(), failure::Error> {
     let input_sender = tx.clone();
     let irc_sender = tx.clone();
 
-    let input_handle = tokio::spawn(async move { handle_input(input_sender).await });
+    let input_handle = tokio::spawn(async move { poll_input(input_sender).await });
 
     let irc_handle = tokio::spawn(async move { connect_irc(irc_sender).await });
 
@@ -30,55 +30,49 @@ async fn main() -> Result<(), failure::Error> {
         ui.render(&state)?;
 
         match rx.recv().await {
-            Some(Event::Input(event)) => {
-                match state.mode {
-                    ui::Mode::Normal => match event.code {
-                        KeyCode::Char('q') => {
-                            // TODO: Broadcast quit to irc
-                            break;
-                        }
-                        KeyCode::Char('i') => {
-                            state.mode = ui::Mode::Insert;
-                        }
-                        KeyCode::Char(':') => {
-                            state.mode = ui::Mode::Command;
-                        }
-                        _ => {}
-                    },
-                    ui::Mode::Command | ui::Mode::Insert => match event.code {
-                        KeyCode::Esc => {
-                            state.mode = ui::Mode::Normal;
+            Some(Event::Input(event)) => match state.mode {
+                ui::Mode::Normal => match event.code {
+                    KeyCode::Char('i') => {
+                        state.mode = ui::Mode::Insert;
+                    }
+                    KeyCode::Char(':') => {
+                        state.mode = ui::Mode::Command;
+                    }
+                    _ => {}
+                },
+                ui::Mode::Command | ui::Mode::Insert => match event.code {
+                    KeyCode::Esc => {
+                        state.mode = ui::Mode::Normal;
 
-                            ui.input.reset();
-                        }
-                        KeyCode::Enter => {
-                            match state.mode {
-                                ui::Mode::Command => {
-                                    state.mode = ui::Mode::Normal;
+                        ui.input.reset();
+                    }
+                    KeyCode::Enter => {
+                        match state.mode {
+                            ui::Mode::Command => {
+                                state.mode = ui::Mode::Normal;
 
-                                    let value = ui.input.value();
+                                let value = ui.input.value();
 
-                                    match value {
-                                        "q" | "quit" => {
-                                            input_handle.abort();
-                                            irc_handle.abort();
-                                            break;
-                                        }
-                                        _ => {}
+                                match value {
+                                    "q" | "quit" => {
+                                        input_handle.abort();
+                                        irc_handle.abort();
+                                        break;
                                     }
+                                    _ => {}
                                 }
-                                ui::Mode::Insert => {}
-                                _ => {}
                             }
+                            ui::Mode::Insert => {}
+                            _ => {}
+                        }
 
-                            ui.input.reset();
-                        }
-                        _ => {
-                            ui.input.handle_event(&CrosstermEvent::Key(event));
-                        }
-                    },
-                }
-            }
+                        ui.input.reset();
+                    }
+                    _ => {
+                        ui.input.handle_event(&CrosstermEvent::Key(event));
+                    }
+                },
+            },
             Some(Event::Message(message)) => {
                 state.push_message(message);
             }
@@ -101,7 +95,7 @@ enum Event<I> {
     Tick,
 }
 
-async fn handle_input(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), failure::Error> {
+async fn poll_input(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), failure::Error> {
     let tick_rate = Duration::from_millis(200);
     let mut last_tick = Instant::now();
 
