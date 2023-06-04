@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent};
 use futures::prelude::*;
-use irc::client::prelude::*;
+use irc::client::{prelude::*, ClientStream};
 
 use tirc::ui;
 use tokio::{sync::mpsc, time::Instant};
@@ -12,6 +12,11 @@ use tui_input::backend::crossterm::EventHandler;
 
 #[tokio::main]
 async fn main() -> Result<(), failure::Error> {
+    let mut irc = create_irc_client().await?;
+    let stream = irc.stream()?;
+
+    irc.identify()?;
+
     let (tx, mut rx) = mpsc::channel(16);
 
     let input_sender = tx.clone();
@@ -19,7 +24,7 @@ async fn main() -> Result<(), failure::Error> {
 
     let input_handle = tokio::spawn(async move { poll_input(input_sender).await });
 
-    let irc_handle = tokio::spawn(async move { connect_irc(irc_sender).await });
+    let irc_handle = tokio::spawn(async move { connect_irc(stream, irc_sender).await });
 
     let mut state = ui::State::new();
     let mut ui = tirc::tui::Ui::new()?;
@@ -55,14 +60,18 @@ async fn main() -> Result<(), failure::Error> {
 
                                 match value {
                                     "q" | "quit" => {
+                                        irc.send_quit("tirc")?;
                                         input_handle.abort();
-                                        irc_handle.abort();
                                         break;
                                     }
                                     _ => {}
                                 }
                             }
-                            ui::Mode::Insert => {}
+                            ui::Mode::Insert => {
+                                let message = ui.input.value();
+
+                                irc.send_privmsg("#test", message)?;
+                            }
                             _ => {}
                         }
 
@@ -84,7 +93,13 @@ async fn main() -> Result<(), failure::Error> {
 
     Ok(match res {
         Ok((_, _)) => Ok(()),
-        Err(e) => Err(e),
+        Err(e) => {
+            if e.is_cancelled() {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }
     }?)
 }
 
@@ -118,22 +133,27 @@ async fn poll_input(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), failure::Er
     }
 }
 
-async fn connect_irc(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), failure::Error> {
+async fn create_irc_client() -> Result<Client, failure::Error> {
     let config = Config {
         nickname: Some(format!("topaxci")),
         server: Some(format!("irc.topaxi.ch")),
         port: Some(6697),
         use_tls: Some(true),
         dangerously_accept_invalid_certs: Some(true),
+        channels: [format!("#test")].to_vec(),
+        version: Some(format!("tirc v0.1.0 - https://github.com/topaxi/tirc")),
         ..Default::default()
     };
 
-    let mut client = Client::from_config(config).await?;
+    let client = Client::from_config(config).await?;
 
-    client.identify()?;
+    Ok(client)
+}
 
-    let mut stream = client.stream()?;
-
+async fn connect_irc(
+    mut stream: ClientStream,
+    tx: mpsc::Sender<Event<KeyEvent>>,
+) -> Result<(), failure::Error> {
     while let Some(message) = stream.next().await.transpose()? {
         tx.send(Event::Message(message)).await?;
     }
