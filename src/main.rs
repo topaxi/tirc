@@ -119,9 +119,9 @@ async fn poll_input(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), failure::Er
             .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_secs(0));
 
-        if event::poll(timeout).expect("poll works") {
-            if let CrosstermEvent::Key(key) = event::read().expect("can read events") {
-                tx.send(Event::Input(key)).await.expect("can send events");
+        if event::poll(timeout)? {
+            if let CrosstermEvent::Key(key) = event::read()? {
+                tx.send(Event::Input(key)).await?;
             }
         }
 
