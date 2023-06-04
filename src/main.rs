@@ -7,10 +7,7 @@ use futures::prelude::*;
 use irc::client::prelude::*;
 
 use tirc::ui;
-use tokio::{
-    sync::mpsc::{self, Sender},
-    time::Instant,
-};
+use tokio::{sync::mpsc, time::Instant};
 use tui_input::backend::crossterm::EventHandler;
 
 #[tokio::main]
@@ -58,6 +55,17 @@ async fn main() -> Result<(), failure::Error> {
                             match state.mode {
                                 ui::Mode::Command => {
                                     state.mode = ui::Mode::Normal;
+
+                                    let value = ui.input.value();
+
+                                    match value {
+                                        "q" | "quit" => {
+                                            input_handle.abort();
+                                            irc_handle.abort();
+                                            break;
+                                        }
+                                        _ => {}
+                                    }
                                 }
                                 ui::Mode::Insert => {}
                                 _ => {}
@@ -93,7 +101,7 @@ enum Event<I> {
     Tick,
 }
 
-async fn handle_input(tx: Sender<Event<KeyEvent>>) -> Result<(), failure::Error> {
+async fn handle_input(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), failure::Error> {
     let tick_rate = Duration::from_millis(200);
     let mut last_tick = Instant::now();
 
@@ -116,7 +124,7 @@ async fn handle_input(tx: Sender<Event<KeyEvent>>) -> Result<(), failure::Error>
     }
 }
 
-async fn connect_irc(tx: Sender<Event<KeyEvent>>) -> Result<(), failure::Error> {
+async fn connect_irc(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), failure::Error> {
     let config = Config {
         nickname: Some(format!("topaxci")),
         server: Some(format!("irc.topaxi.ch")),
