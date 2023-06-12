@@ -56,13 +56,19 @@ async fn main() -> Result<(), failure::Error> {
                             ui::Mode::Command => {
                                 state.mode = ui::Mode::Normal;
 
-                                let value = ui.input.value();
+                                let command: Vec<&str> = ui.input.value().splitn(2, ' ').collect();
 
-                                match value {
-                                    "q" | "quit" => {
+                                match command[..] {
+                                    ["q" | "quit"] => {
                                         irc.send_quit("tirc")?;
                                         input_handle.abort();
                                         break;
+                                    }
+                                    ["j" | "join", channel] => {
+                                        irc.send_join(channel)?;
+                                    }
+                                    ["p" | "part", channel] => {
+                                        irc.send_part(channel)?;
                                     }
                                     _ => {}
                                 }
