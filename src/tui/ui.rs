@@ -1,4 +1,8 @@
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use std::io::{self, Stdout};
 use tui;
 use tui::backend::CrosstermBackend;
@@ -31,6 +35,12 @@ impl Ui {
         enable_raw_mode()?;
 
         self.terminal.clear()?;
+
+        execute!(
+            self.terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableMouseCapture
+        )?;
 
         Ok(())
     }
@@ -106,5 +116,12 @@ impl Ui {
 impl Drop for Ui {
     fn drop(&mut self) {
         disable_raw_mode().unwrap();
+
+        execute!(
+            self.terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )
+        .unwrap();
     }
 }
