@@ -32,7 +32,7 @@ async fn main() -> Result<(), failure::Error> {
     ui.initialize_terminal()?;
 
     loop {
-        ui.render(&state)?;
+        ui.render(&irc, &state)?;
 
         match rx.recv().await {
             Some(Event::Input(event)) => match state.mode {

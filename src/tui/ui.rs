@@ -3,6 +3,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use irc::client::Client;
 use std::io::{self, Stdout};
 use tui;
 use tui::backend::CrosstermBackend;
@@ -48,10 +49,17 @@ impl Ui {
     fn get_layout(&self) -> Layout {
         return Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(2)].as_ref());
+            .constraints(
+                [
+                    Constraint::Min(0),
+                    Constraint::Length(1),
+                    Constraint::Length(2),
+                ]
+                .as_ref(),
+            );
     }
 
-    pub fn render(&mut self, state: &State) -> Result<(), failure::Error> {
+    pub fn render(&mut self, irc: &Client, state: &State) -> Result<(), failure::Error> {
         let layout = self.get_layout();
 
         self.terminal.draw(|f| {
@@ -89,8 +97,16 @@ impl Ui {
                 .scroll((0, scroll as u16))
                 .block(Block::default().borders(Borders::TOP));
 
+            let channels = match irc.list_channels() {
+                Some(channels) => channels,
+                None => vec![],
+            };
+
+            let channel_bar = Paragraph::new(format!("Channels: {}", channels.join(" ")));
+
             f.render_widget(list, chunks[0]);
-            f.render_widget(input, chunks[1]);
+            f.render_widget(channel_bar, chunks[1]);
+            f.render_widget(input, chunks[2]);
 
             match state.mode {
                 Mode::Normal => {}
@@ -99,11 +115,11 @@ impl Ui {
                     // Make the cursor visible and ask tui-rs to put it at the specified coordinates after rendering
                     f.set_cursor(
                         // Put cursor past the end of the input text
-                        chunks[1].x
+                        chunks[2].x
                             + ((self.input.visual_cursor()).max(scroll) - scroll) as u16
                             + prefix_len as u16,
                         // Move one line down, from the border to the input line
-                        chunks[1].y + 1,
+                        chunks[2].y + 1,
                     )
                 }
             }
