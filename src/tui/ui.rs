@@ -10,26 +10,39 @@ use tui::backend::CrosstermBackend;
 use tui::layout::{Constraint, Direction, Layout};
 use tui::style::{Color, Style};
 use tui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
 use crate::ui::Mode;
 use crate::ui::State;
 
-pub struct Ui {
+pub struct Tui {
     terminal: tui::Terminal<CrosstermBackend<Stdout>>,
-    pub input: Input,
+    input: Input,
 }
 
-impl Ui {
-    pub fn new() -> io::Result<Ui> {
+impl Tui {
+    pub fn new() -> io::Result<Tui> {
         let stdout = io::stdout();
         let backend = CrosstermBackend::new(stdout);
         let terminal = tui::Terminal::new(backend)?;
 
-        Ok(Ui {
+        Ok(Tui {
             terminal,
             input: Input::default(),
         })
+    }
+
+    pub fn input(&self) -> &Input {
+        &self.input
+    }
+
+    pub fn reset_input(&mut self) {
+        self.input.reset();
+    }
+
+    pub fn handle_event(&mut self, event: &crossterm::event::Event) {
+        self.input.handle_event(event);
     }
 
     pub fn initialize_terminal(&mut self) -> Result<(), failure::Error> {
@@ -129,7 +142,7 @@ impl Ui {
     }
 }
 
-impl Drop for Ui {
+impl Drop for Tui {
     fn drop(&mut self) {
         disable_raw_mode().unwrap();
 

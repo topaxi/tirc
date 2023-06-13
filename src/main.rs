@@ -2,13 +2,12 @@ extern crate irc;
 
 use std::time::Duration;
 
-use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent};
+use crossterm::event::{self, Event as CrosstermEvent, KeyEvent};
 use futures::prelude::*;
 use irc::client::{prelude::*, ClientStream};
 
-use tirc::ui;
+use tirc::ui::{self, Event, InputHandler};
 use tokio::{sync::mpsc, time::Instant};
-use tui_input::backend::crossterm::EventHandler;
 
 #[tokio::main]
 async fn main() -> Result<(), failure::Error> {
@@ -27,82 +26,24 @@ async fn main() -> Result<(), failure::Error> {
     let irc_handle = tokio::spawn(async move { connect_irc(stream, irc_sender).await });
 
     let mut state = ui::State::new();
-    let mut ui = tirc::tui::Ui::new()?;
+    let tui = tirc::tui::Tui::new()?;
 
-    ui.initialize_terminal()?;
+    let mut input_handler = InputHandler::new(irc, tui);
+
+    input_handler.ui_mut().initialize_terminal()?;
 
     loop {
-        ui.render(&irc, &state)?;
+        input_handler.render_ui(&state)?;
 
         match rx.recv().await {
-            Some(Event::Input(event)) => match state.mode {
-                ui::Mode::Normal => match event.code {
-                    KeyCode::Char('i') => {
-                        state.mode = ui::Mode::Insert;
-                    }
-                    KeyCode::Char(':') => {
-                        state.mode = ui::Mode::Command;
-                    }
-                    _ => {}
-                },
-                ui::Mode::Command | ui::Mode::Insert => match event.code {
-                    KeyCode::Esc => {
-                        state.mode = ui::Mode::Normal;
-
-                        ui.input.reset();
-                    }
-                    KeyCode::Enter => {
-                        match state.mode {
-                            ui::Mode::Command => {
-                                state.mode = ui::Mode::Normal;
-
-                                let command: Vec<&str> = ui.input.value().splitn(2, ' ').collect();
-
-                                match command[..] {
-                                    ["m" | "msg", target_and_message] => {
-                                        let target_and_message: Vec<&str> =
-                                            target_and_message.splitn(2, ' ').collect();
-
-                                        if target_and_message.len() == 2 {
-                                            irc.send_privmsg(
-                                                target_and_message[0],
-                                                target_and_message[1],
-                                            )?;
-                                        }
-                                    }
-                                    ["q" | "quit"] => {
-                                        irc.send_quit("tirc")?;
-                                        input_handle.abort();
-                                        break;
-                                    }
-                                    ["j" | "join", channel] => {
-                                        irc.send_join(channel)?;
-                                    }
-                                    ["p" | "part", channel] => {
-                                        irc.send_part(channel)?;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            ui::Mode::Insert => {
-                                let message = ui.input.value();
-
-                                irc.send_privmsg("#test", message)?;
-                            }
-                            _ => {}
-                        }
-
-                        ui.input.reset();
-                    }
-                    _ => {
-                        ui.input.handle_event(&CrosstermEvent::Key(event));
-                    }
-                },
+            Some(event) => match input_handler.handle_event(&mut state, event) {
+                Ok(_) => {}
+                Err(_) => {
+                    input_handle.abort();
+                    break;
+                }
             },
-            Some(Event::Message(message)) => {
-                state.push_message(message);
-            }
-            Some(Event::Tick) | None => {}
+            None => {}
         }
     }
 
@@ -118,13 +59,6 @@ async fn main() -> Result<(), failure::Error> {
             }
         }
     }?)
-}
-
-#[derive(Debug)]
-enum Event<I> {
-    Input(I),
-    Message(Message),
-    Tick,
 }
 
 async fn poll_input(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), failure::Error> {
