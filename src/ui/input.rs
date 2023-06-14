@@ -32,6 +32,36 @@ impl InputHandler {
         Ok(())
     }
 
+    fn handle_command(&mut self, state: &mut State) -> Result<(), anyhow::Error> {
+        state.mode = Mode::Normal;
+
+        let command: Vec<&str> = self.ui.input().value().splitn(2, ' ').collect();
+
+        match command[..] {
+            ["m" | "msg", target_and_message] => {
+                let target_and_message: Vec<&str> = target_and_message.splitn(2, ' ').collect();
+
+                if target_and_message.len() == 2 {
+                    self.irc
+                        .send_privmsg(target_and_message[0], target_and_message[1])?;
+                }
+            }
+            ["q" | "quit"] => {
+                self.irc.send_quit("tirc")?;
+                return Err(anyhow::Error::msg("quit"));
+            }
+            ["j" | "join", channel] => {
+                self.irc.send_join(channel)?;
+            }
+            ["p" | "part", channel] => {
+                self.irc.send_part(channel)?;
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
     pub fn handle_event(
         &mut self,
         state: &mut State,
@@ -57,35 +87,7 @@ impl InputHandler {
                     KeyCode::Enter => {
                         match state.mode {
                             Mode::Command => {
-                                state.mode = Mode::Normal;
-
-                                let command: Vec<&str> =
-                                    self.ui.input().value().splitn(2, ' ').collect();
-
-                                match command[..] {
-                                    ["m" | "msg", target_and_message] => {
-                                        let target_and_message: Vec<&str> =
-                                            target_and_message.splitn(2, ' ').collect();
-
-                                        if target_and_message.len() == 2 {
-                                            self.irc.send_privmsg(
-                                                target_and_message[0],
-                                                target_and_message[1],
-                                            )?;
-                                        }
-                                    }
-                                    ["q" | "quit"] => {
-                                        self.irc.send_quit("tirc")?;
-                                        return Err(anyhow::Error::msg("quit"));
-                                    }
-                                    ["j" | "join", channel] => {
-                                        self.irc.send_join(channel)?;
-                                    }
-                                    ["p" | "part", channel] => {
-                                        self.irc.send_part(channel)?;
-                                    }
-                                    _ => {}
-                                }
+                                self.handle_command(state)?;
                             }
                             Mode::Insert => {
                                 let message = self.ui.input().value();
