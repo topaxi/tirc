@@ -12,3 +12,7 @@ crossterm = { version = "0.26.1", features = ["serde"] }
 tui = { version="0.21.0", package = "ratatui" }
 tui-input = { version = "*", features = ["crossterm"] }
 anyhow = "1.0.71"
+mlua = { version = "0.8.9", features = ["luajit52", "serde", "async", "serialize"] }
+xdg = "2.5.0"
+serde = "1.0.164"
+indoc = "2.0.1"

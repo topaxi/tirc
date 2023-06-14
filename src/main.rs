@@ -4,8 +4,11 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event as CrosstermEvent, KeyEvent};
 use futures::prelude::*;
+use indoc::indoc;
 use irc::client::{prelude::*, ClientStream};
 
+use mlua::{Lua, LuaSerdeExt};
+use serde::Deserialize;
 use tirc::ui::{self, Event, InputHandler};
 use tokio::{sync::mpsc, time::Instant};
 
@@ -84,19 +87,107 @@ async fn poll_input(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), failure::Er
     }
 }
 
+#[inline]
+fn bool_true() -> bool {
+    true
+}
+
+#[inline]
+fn default_port() -> u16 {
+    6697
+}
+
+#[derive(Deserialize, Debug)]
+struct ServerConfig {
+    host: String,
+
+    #[serde(default = "default_port")]
+    port: u16,
+
+    #[serde(default = "bool_true")]
+    use_tls: bool,
+
+    #[serde(default)]
+    accept_invalid_cert: bool,
+
+    nickname: Vec<String>,
+
+    #[serde(default)]
+    autojoin: Vec<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct TircConfig {
+    servers: Vec<ServerConfig>,
+}
+
+fn get_default_config() -> &'static str {
+    let default_config = indoc! {"
+        local config = {}
+
+        config.servers = {
+          {
+            host = 'irc.topaxi.ch',
+            nickname = { 'Rincewind', 'Twoflower' },
+            port = 6697,
+            use_tls = true,
+            autojoin = { '#tirc' },
+          },
+        }
+
+        return config
+    "};
+
+    default_config
+}
+
+async fn load_config() -> Result<TircConfig, failure::Error> {
+    let config_filename =
+        xdg::BaseDirectories::with_prefix("tirc")?.place_config_file("init.lua")?;
+
+    if !config_filename.exists() {
+        std::fs::create_dir_all(
+            config_filename
+                .parent()
+                .expect("Unable to create config directory"),
+        )?;
+
+        std::fs::write(config_filename.clone(), get_default_config())?;
+    }
+
+    let config_lua_code = std::fs::read_to_string(config_filename)?;
+
+    let lua = Lua::new();
+    let value = lua.load(&config_lua_code).call(())?;
+    let config: TircConfig = lua.from_value(value)?;
+
+    Ok(config)
+}
+
 async fn create_irc_client() -> Result<Client, failure::Error> {
-    let config = Config {
-        nickname: Some(format!("topaxci")),
-        server: Some(format!("irc.topaxi.ch")),
-        port: Some(6697),
-        use_tls: Some(true),
-        dangerously_accept_invalid_certs: Some(true),
-        channels: [format!("#test")].to_vec(),
+    let config = load_config().await?;
+
+    let server_config = config.servers.get(0).expect("No server config found");
+
+    let client_config = Config {
+        nickname: Some(
+            server_config
+                .nickname
+                .get(0)
+                .expect("No nickname found")
+                .clone(),
+        ),
+        alt_nicks: server_config.nickname[1..].to_vec(),
+        server: Some(server_config.host.clone()),
+        port: Some(server_config.port),
+        use_tls: Some(server_config.use_tls),
+        dangerously_accept_invalid_certs: Some(server_config.accept_invalid_cert),
+        channels: server_config.autojoin.clone(),
         version: Some(format!("tirc v0.1.0 - https://github.com/topaxi/tirc")),
         ..Default::default()
     };
 
-    let client = Client::from_config(config).await?;
+    let client = Client::from_config(client_config).await?;
 
     Ok(client)
 }
