@@ -26,11 +26,11 @@ async fn main() -> Result<(), failure::Error> {
     let irc_handle = tokio::spawn(async move { connect_irc(stream, irc_sender).await });
 
     let mut state = ui::State::new();
-    let tui = tirc::tui::Tui::new()?;
+    let mut tui = tirc::tui::Tui::new()?;
+
+    tui.initialize_terminal()?;
 
     let mut input_handler = InputHandler::new(irc, tui);
-
-    input_handler.ui_mut().initialize_terminal()?;
 
     loop {
         input_handler.render_ui(&state)?;

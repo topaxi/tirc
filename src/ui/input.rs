@@ -26,10 +26,6 @@ impl InputHandler {
         &self.ui
     }
 
-    pub fn ui_mut(&mut self) -> &mut Tui {
-        &mut self.ui
-    }
-
     pub fn render_ui(&mut self, state: &State) -> Result<(), failure::Error> {
         self.ui.render(&self.irc, &state)?;
 
