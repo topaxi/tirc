@@ -18,6 +18,8 @@ async fn main() -> Result<(), failure::Error> {
     let mut irc = create_irc_client().await?;
     let stream = irc.stream()?;
 
+    irc.send_cap_req(&[Capability::MultiPrefix])?;
+
     irc.identify()?;
 
     let (tx, mut rx) = mpsc::channel(16);
