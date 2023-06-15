@@ -1,4 +1,4 @@
-use crossterm::event::{Event as CrosstermEvent, KeyCode};
+use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
 use irc::{client::prelude::Client, proto::Message};
 
 use crate::tui::Tui;
@@ -32,7 +32,7 @@ impl InputHandler {
             None => vec![],
         };
 
-        let mut buffers = state.buffers.lock().unwrap();
+        let buffers = &mut state.buffers;
 
         for channel in channels {
             if buffers.get(&channel).is_none() {
@@ -59,6 +59,9 @@ impl InputHandler {
                 let target_and_message: Vec<&str> = target_and_message.splitn(2, ' ').collect();
 
                 if target_and_message.len() == 2 {
+                    state.create_buffer_if_not_exists(&target_and_message[0]);
+                    state.set_current_buffer(&target_and_message[0]);
+
                     self.irc
                         .send_privmsg(target_and_message[0], target_and_message[1])?;
                 }
@@ -84,47 +87,54 @@ impl InputHandler {
         state: &mut State,
         event: Event<crossterm::event::KeyEvent>,
     ) -> Result<(), anyhow::Error> {
-        match event {
-            Event::Input(event) => match state.mode {
-                Mode::Normal => match event.code {
-                    KeyCode::Char('i') => {
-                        state.mode = Mode::Insert;
-                    }
-                    KeyCode::Char(':') => {
-                        state.mode = Mode::Command;
-                    }
-                    _ => {}
-                },
-                Mode::Command | Mode::Insert => match event.code {
-                    KeyCode::Esc => {
-                        state.mode = Mode::Normal;
-
-                        self.ui.reset_input();
-                    }
-                    KeyCode::Enter => {
-                        match state.mode {
-                            Mode::Command => {
-                                self.handle_command(state)?;
-                            }
-                            Mode::Insert => {
-                                let message = self.ui.input().value();
-
-                                self.irc.send_privmsg("#test", message)?;
-                            }
-                            _ => {}
-                        }
-
-                        self.ui.reset_input();
-                    }
-                    _ => {
-                        self.ui.handle_event(&CrosstermEvent::Key(event));
-                    }
-                },
+        match (state.mode, event) {
+            (_, Event::Input(event)) if event == KeyEvent::from(KeyCode::Tab) => {
+                state.next_buffer();
+            }
+            (_, Event::Input(event))
+                if event == KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT) =>
+            {
+                state.previous_buffer();
+            }
+            (Mode::Normal, Event::Input(event)) => match event.code {
+                KeyCode::Char('i') => {
+                    state.mode = Mode::Insert;
+                }
+                KeyCode::Char(':') => {
+                    state.mode = Mode::Command;
+                }
+                _ => {}
             },
-            Event::Message(message) => {
+            (Mode::Command | Mode::Insert, Event::Input(event)) => match event.code {
+                KeyCode::Esc => {
+                    state.mode = Mode::Normal;
+
+                    self.ui.reset_input();
+                }
+                KeyCode::Enter => {
+                    match state.mode {
+                        Mode::Command => {
+                            self.handle_command(state)?;
+                        }
+                        Mode::Insert => {
+                            let message = self.ui.input().value();
+                            let current_buffer = &state.current_buffer;
+
+                            self.irc.send_privmsg(current_buffer, message)?;
+                        }
+                        _ => {}
+                    }
+
+                    self.ui.reset_input();
+                }
+                _ => {
+                    self.ui.handle_event(&CrosstermEvent::Key(event));
+                }
+            },
+            (_, Event::Message(message)) => {
                 state.push_message(message);
             }
-            Event::Tick => {}
+            (_, Event::Tick) => {}
         }
 
         Ok(())

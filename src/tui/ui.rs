@@ -4,11 +4,12 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use irc::client::Client;
+use irc::proto::Message;
 use std::io::{self, Stdout};
 use tui;
 use tui::backend::CrosstermBackend;
 use tui::layout::{Constraint, Direction, Layout};
-use tui::style::{Color, Style};
+use tui::style::{Color, Modifier, Style};
 use tui::text::{Line, Span};
 use tui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use tui_input::backend::crossterm::EventHandler;
@@ -79,9 +80,14 @@ impl Tui {
         self.terminal.draw(|f| {
             let size = f.size();
             let chunks = layout.split(size);
+            let current_buffer_name = &state.current_buffer;
+            let buffers = &state.buffers;
 
-            let messages: Vec<_> = state
-                .get_messages()
+            let current_buffer_messages: &Vec<Message> = buffers
+                .get(current_buffer_name.to_string().as_str())
+                .unwrap();
+
+            let messages: Vec<_> = current_buffer_messages
                 .iter()
                 .rev()
                 .map(|message| {
@@ -110,16 +116,25 @@ impl Tui {
                 .scroll((0, scroll as u16))
                 .block(Block::default().borders(Borders::TOP));
 
-            let channels: Vec<Span> = (*state.buffers.lock().unwrap())
+            let buffers: Vec<Span> = state
+                .buffers
                 .keys()
                 .into_iter()
-                .flat_map(|str| [Span::raw(str.to_owned()), Span::raw(" ")])
+                .flat_map(|str| {
+                    let mut style = Style::default();
+
+                    if str.to_string() == current_buffer_name.to_string() {
+                        style = style.add_modifier(Modifier::BOLD);
+                    }
+
+                    [Span::styled(str.to_owned(), style), Span::raw(" ")]
+                })
                 .collect();
 
-            let channel_bar = Paragraph::new(Line::from(channels));
+            let buffer_bar = Paragraph::new(Line::from(buffers));
 
             f.render_widget(list, chunks[0]);
-            f.render_widget(channel_bar, chunks[1]);
+            f.render_widget(buffer_bar, chunks[1]);
             f.render_widget(input, chunks[2]);
 
             match state.mode {
