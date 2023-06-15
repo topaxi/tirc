@@ -27,6 +27,8 @@ impl InputHandler {
     }
 
     pub fn sync_state(&mut self, state: &mut State) -> Result<(), failure::Error> {
+        state.nickname = self.irc.current_nickname().to_string();
+
         let channels = match self.irc.list_channels() {
             Some(channels) => channels,
             None => vec![],

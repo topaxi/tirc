@@ -12,14 +12,14 @@ pub enum Mode {
 #[derive(Debug)]
 pub struct State {
     pub mode: Mode,
+    pub nickname: String,
     pub current_buffer: String,
     pub buffers: IndexMap<String, Vec<Message>>,
-    messages: Vec<Message>,
 }
 
 impl State {
     pub fn new() -> State {
-        let default_buffer_name = String::from("(status)");
+        let default_buffer_name = State::get_default_buffer_name();
 
         let buffers: IndexMap<String, Vec<Message>> = {
             let mut buffers = IndexMap::new();
@@ -29,10 +29,14 @@ impl State {
 
         State {
             mode: Mode::Normal,
+            nickname: String::new(),
             current_buffer: default_buffer_name,
             buffers,
-            messages: Vec::new(),
         }
+    }
+
+    fn get_default_buffer_name() -> String {
+        String::from("(status)")
     }
 
     fn get_buffer_name_by_index(&self, index: usize) -> String {
@@ -78,18 +82,16 @@ impl State {
 
     pub fn push_message(&mut self, message: Message) {
         match message.response_target() {
-            Some(target) => {
-                self.create_buffer_if_not_exists(target);
-                let buffers = &mut self.buffers;
-                let buffer_messages = buffers.get_mut(target).unwrap();
-
-                buffer_messages.push(message);
+            Some(response_target) if response_target != self.nickname => {
+                self.create_buffer_if_not_exists(response_target);
+                self.buffers.get_mut(response_target).unwrap().push(message);
             }
-            None => self.messages.push(message),
+            _ => {
+                self.buffers
+                    .get_mut(&State::get_default_buffer_name())
+                    .unwrap()
+                    .push(message);
+            }
         }
-    }
-
-    pub fn get_messages(&self) -> &Vec<Message> {
-        &self.messages
     }
 }
