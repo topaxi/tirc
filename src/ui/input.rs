@@ -1,4 +1,4 @@
-use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event as CrosstermEvent, KeyCode};
 use irc::{client::prelude::Client, proto::Message};
 
 use crate::tui::Tui;
@@ -83,19 +83,38 @@ impl InputHandler {
         Ok(())
     }
 
+    fn key_code_is_digit(key_code: KeyCode) -> bool {
+        match key_code {
+            KeyCode::Char(char) => char.is_digit(10),
+            _ => false,
+        }
+    }
+
+    fn get_key_code_as_digit(key_code: KeyCode) -> u8 {
+        match key_code {
+            KeyCode::Char(char) => char.to_digit(10).unwrap() as u8,
+            _ => 0,
+        }
+    }
+
     pub fn handle_event(
         &mut self,
         state: &mut State,
         event: Event<crossterm::event::KeyEvent>,
     ) -> Result<(), anyhow::Error> {
         match (state.mode, event) {
-            (_, Event::Input(event)) if event == KeyEvent::from(KeyCode::Tab) => {
+            (_, Event::Input(event)) if event.code == KeyCode::Tab => {
                 state.next_buffer();
             }
-            (_, Event::Input(event))
-                if event == KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT) =>
-            {
+            (_, Event::Input(event)) if event.code == KeyCode::BackTab => {
                 state.previous_buffer();
+            }
+            (_, Event::Input(event)) if InputHandler::key_code_is_digit(event.code) => {
+                let index = InputHandler::get_key_code_as_digit(event.code) as usize;
+
+                if index < state.buffers.len() {
+                    state.set_current_buffer_index(index);
+                }
             }
             (Mode::Normal, Event::Input(event)) => match event.code {
                 KeyCode::Char('i') => {

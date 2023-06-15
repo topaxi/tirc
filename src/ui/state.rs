@@ -48,6 +48,7 @@ impl State {
     fn get_current_buffer_index(&self) -> usize {
         let buffers = &self.buffers;
         let current_buffer_name = &self.current_buffer;
+
         buffers
             .keys()
             .position(|name| name == current_buffer_name)
@@ -66,6 +67,10 @@ impl State {
         let current_buffer_index = self.get_current_buffer_index();
         let previous_buffer_index = (current_buffer_index + buffers.len() - 1) % buffers.len();
         self.current_buffer = self.get_buffer_name_by_index(previous_buffer_index);
+    }
+
+    pub fn set_current_buffer_index(&mut self, index: usize) {
+        self.current_buffer = self.get_buffer_name_by_index(index);
     }
 
     pub fn set_current_buffer(&mut self, buffer_name: &str) {
