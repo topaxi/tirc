@@ -1,5 +1,6 @@
 extern crate irc;
 
+use std::path::Path;
 use std::time::Duration;
 
 use crossterm::event::{self, Event as CrosstermEvent, KeyEvent};
@@ -7,7 +8,7 @@ use futures::prelude::*;
 use indoc::indoc;
 use irc::client::{prelude::*, ClientStream};
 
-use mlua::{Lua, LuaSerdeExt};
+use mlua::{Lua, LuaSerdeExt, Table};
 use serde::Deserialize;
 use tirc::ui::{self, Event, InputHandler};
 use tokio::{sync::mpsc, time::Instant};
@@ -144,21 +145,39 @@ fn get_default_config() -> &'static str {
 async fn load_config() -> Result<TircConfig, failure::Error> {
     let config_filename =
         xdg::BaseDirectories::with_prefix("tirc")?.place_config_file("init.lua")?;
+    let config_dirname = config_filename
+        .parent()
+        .expect("Unable to create config directory");
 
     if !config_filename.exists() {
-        std::fs::create_dir_all(
-            config_filename
-                .parent()
-                .expect("Unable to create config directory"),
-        )?;
+        std::fs::create_dir_all(&config_dirname)?;
 
-        std::fs::write(config_filename.clone(), get_default_config())?;
+        std::fs::write(&config_filename, get_default_config())?;
     }
 
-    let config_lua_code = std::fs::read_to_string(config_filename)?;
+    let config_lua_code = std::fs::read_to_string(&config_filename)?;
 
     let lua = Lua::new();
-    let value = lua.load(&config_lua_code).call(())?;
+
+    let globals = lua.globals();
+
+    let package: Table = globals.get("package")?;
+    let package_path: String = package.get("path")?;
+    let mut path_array: Vec<String> = package_path.split(";").map(|s| s.to_owned()).collect();
+
+    fn prefix_path(array: &mut Vec<String>, path: &Path) {
+        array.insert(0, format!("{}/?.lua", path.display()));
+        array.insert(1, format!("{}/?/init.lua", path.display()));
+    }
+
+    prefix_path(&mut path_array, config_dirname);
+
+    package.set("path", path_array.join(";"))?;
+
+    let value = lua
+        .load(&config_lua_code)
+        .set_name(config_filename.display().to_string())?
+        .call(())?;
     let config: TircConfig = lua.from_value(value)?;
 
     Ok(config)
