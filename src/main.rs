@@ -18,7 +18,16 @@ async fn main() -> Result<(), failure::Error> {
     let mut irc = create_irc_client().await?;
     let stream = irc.stream()?;
 
-    irc.send_cap_req(&[Capability::MultiPrefix])?;
+    irc.send_cap_req(&[
+        Capability::EchoMessage,
+        Capability::MultiPrefix,
+        Capability::ExtendedJoin,
+        Capability::AwayNotify,
+        Capability::ChgHost,
+        Capability::AccountNotify,
+        Capability::ServerTime,
+        Capability::UserhostInNames,
+    ])?;
 
     irc.identify()?;
 

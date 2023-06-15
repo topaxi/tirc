@@ -58,14 +58,13 @@ impl InputHandler {
 
         match command[..] {
             ["m" | "msg", target_and_message] => {
-                let target_and_message: Vec<&str> = target_and_message.splitn(2, ' ').collect();
-
-                if target_and_message.len() == 2 {
-                    state.create_buffer_if_not_exists(&target_and_message[0]);
-                    state.set_current_buffer(&target_and_message[0]);
-
-                    self.irc
-                        .send_privmsg(target_and_message[0], target_and_message[1])?;
+                match target_and_message.splitn(2, ' ').collect::<Vec<&str>>()[..] {
+                    [target, message] => {
+                        state.create_buffer_if_not_exists(&target);
+                        state.set_current_buffer(&target);
+                        self.irc.send_privmsg(&target, &message)?;
+                    }
+                    _ => {}
                 }
             }
             ["q" | "quit"] => {
