@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 
-use irc::proto::Message;
+use irc::proto::{Command, Message};
 
 #[derive(Clone, Copy, Debug)]
 pub enum Mode {
@@ -81,10 +81,23 @@ impl State {
     }
 
     pub fn push_message(&mut self, message: Message) {
-        match message.response_target() {
-            Some(response_target) if response_target != self.nickname => {
-                self.create_buffer_if_not_exists(response_target);
-                self.buffers.get_mut(response_target).unwrap().push(message);
+        match &message.command {
+            Command::PRIVMSG(_, _) | Command::NOTICE(_, _) => match message.response_target() {
+                Some(response_target) if response_target != self.nickname => {
+                    self.create_buffer_if_not_exists(response_target);
+                    self.buffers.get_mut(response_target).unwrap().push(message);
+                }
+                // Not sure if this case is possible
+                _ => {
+                    self.buffers
+                        .get_mut(&State::get_default_buffer_name())
+                        .unwrap()
+                        .push(message);
+                }
+            },
+            Command::TOPIC(channel, _) => {
+                self.create_buffer_if_not_exists(channel);
+                self.buffers.get_mut(channel).unwrap().push(message);
             }
             _ => {
                 self.buffers
