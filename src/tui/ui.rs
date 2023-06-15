@@ -9,6 +9,7 @@ use tui;
 use tui::backend::CrosstermBackend;
 use tui::layout::{Constraint, Direction, Layout};
 use tui::style::{Color, Style};
+use tui::text::{Line, Span};
 use tui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
@@ -72,7 +73,7 @@ impl Tui {
             );
     }
 
-    pub fn render(&mut self, irc: &Client, state: &State) -> Result<(), failure::Error> {
+    pub fn render(&mut self, _irc: &Client, state: &State) -> Result<(), failure::Error> {
         let layout = self.get_layout();
 
         self.terminal.draw(|f| {
@@ -80,10 +81,9 @@ impl Tui {
             let chunks = layout.split(size);
 
             let messages: Vec<_> = state
-                .messages
+                .get_messages()
                 .iter()
                 .rev()
-                .take(chunks[0].height as usize)
                 .map(|message| {
                     ListItem::new(message.to_string()).style(Style::default().fg(Color::White))
                 })
@@ -110,12 +110,13 @@ impl Tui {
                 .scroll((0, scroll as u16))
                 .block(Block::default().borders(Borders::TOP));
 
-            let channels = match irc.list_channels() {
-                Some(channels) => channels,
-                None => vec![],
-            };
+            let channels: Vec<Span> = (*state.buffers.lock().unwrap())
+                .keys()
+                .into_iter()
+                .flat_map(|str| [Span::raw(str.to_owned()), Span::raw(" ")])
+                .collect();
 
-            let channel_bar = Paragraph::new(format!("Channels: {}", channels.join(" ")));
+            let channel_bar = Paragraph::new(Line::from(channels));
 
             f.render_widget(list, chunks[0]);
             f.render_widget(channel_bar, chunks[1]);

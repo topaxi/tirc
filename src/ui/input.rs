@@ -26,6 +26,23 @@ impl InputHandler {
         &self.ui
     }
 
+    pub fn sync_state(&mut self, state: &mut State) -> Result<(), failure::Error> {
+        let channels = match self.irc.list_channels() {
+            Some(channels) => channels,
+            None => vec![],
+        };
+
+        let mut buffers = state.buffers.lock().unwrap();
+
+        for channel in channels {
+            if buffers.get(&channel).is_none() {
+                buffers.insert(channel, vec![]);
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn render_ui(&mut self, state: &State) -> Result<(), failure::Error> {
         self.ui.render(&self.irc, &state)?;
 

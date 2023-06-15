@@ -37,6 +37,7 @@ async fn main() -> Result<(), failure::Error> {
     let mut input_handler = InputHandler::new(irc, tui);
 
     loop {
+        input_handler.sync_state(&mut state)?;
         input_handler.render_ui(&state)?;
 
         match rx.recv().await {
