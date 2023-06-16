@@ -118,7 +118,10 @@ async fn create_irc_client(config: TircConfig) -> Result<Client, anyhow::Error> 
         use_tls: Some(server_config.use_tls),
         dangerously_accept_invalid_certs: Some(server_config.accept_invalid_cert),
         channels: server_config.autojoin.clone(),
-        version: Some(format!("tirc v0.1.0 - https://github.com/topaxi/tirc")),
+        version: Some(format!(
+            "tirc v{} - https://github.com/topaxi/tirc",
+            env!("CARGO_PKG_VERSION")
+        )),
         ..Default::default()
     };
 
