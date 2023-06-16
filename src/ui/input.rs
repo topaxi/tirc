@@ -1,5 +1,6 @@
 use crossterm::event::{Event as CrosstermEvent, KeyCode};
 use irc::{client::prelude::Client, proto::Message};
+use mlua::Lua;
 
 use crate::tui::Tui;
 
@@ -13,13 +14,14 @@ pub enum Event<I> {
 }
 
 pub struct InputHandler {
+    lua: Lua,
     irc: Client,
     ui: Tui,
 }
 
 impl InputHandler {
-    pub fn new(irc: Client, ui: Tui) -> Self {
-        Self { irc, ui }
+    pub fn new(lua: Lua, irc: Client, ui: Tui) -> Self {
+        Self { lua, irc, ui }
     }
 
     pub fn ui(&self) -> &Tui {

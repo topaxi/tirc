@@ -15,7 +15,9 @@ use tokio::{sync::mpsc, time::Instant};
 
 #[tokio::main]
 async fn main() -> Result<(), failure::Error> {
-    let mut irc = create_irc_client().await?;
+    let (config, lua) = load_config().await?;
+
+    let mut irc = create_irc_client(config).await?;
     let stream = irc.stream()?;
 
     irc.send_cap_req(&[
@@ -45,7 +47,7 @@ async fn main() -> Result<(), failure::Error> {
 
     tui.initialize_terminal()?;
 
-    let mut input_handler = InputHandler::new(irc, tui);
+    let mut input_handler = InputHandler::new(lua, irc, tui);
 
     loop {
         input_handler.sync_state(&mut state)?;
@@ -154,7 +156,7 @@ fn get_default_config() -> &'static str {
     default_config
 }
 
-async fn load_config() -> Result<TircConfig, failure::Error> {
+async fn load_config() -> Result<(TircConfig, Lua), failure::Error> {
     let config_filename =
         xdg::BaseDirectories::with_prefix("tirc")?.place_config_file("init.lua")?;
     let config_dirname = config_filename
@@ -171,33 +173,33 @@ async fn load_config() -> Result<TircConfig, failure::Error> {
 
     let lua = Lua::new();
 
-    let globals = lua.globals();
+    let value = {
+        let globals = lua.globals();
 
-    let package: Table = globals.get("package")?;
-    let package_path: String = package.get("path")?;
-    let mut path_array: Vec<String> = package_path.split(";").map(|s| s.to_owned()).collect();
+        let package: Table = globals.get("package")?;
+        let package_path: String = package.get("path")?;
+        let mut path_array: Vec<String> = package_path.split(";").map(|s| s.to_owned()).collect();
 
-    fn prefix_path(array: &mut Vec<String>, path: &Path) {
-        array.insert(0, format!("{}/?.lua", path.display()));
-        array.insert(1, format!("{}/?/init.lua", path.display()));
-    }
+        fn prefix_path(array: &mut Vec<String>, path: &Path) {
+            array.insert(0, format!("{}/?.lua", path.display()));
+            array.insert(1, format!("{}/?/init.lua", path.display()));
+        }
 
-    prefix_path(&mut path_array, config_dirname);
+        prefix_path(&mut path_array, config_dirname);
 
-    package.set("path", path_array.join(";"))?;
+        package.set("path", path_array.join(";"))?;
 
-    let value = lua
-        .load(&config_lua_code)
-        .set_name(config_filename.display().to_string())?
-        .call(())?;
+        lua.load(&config_lua_code)
+            .set_name(config_filename.display().to_string())?
+            .call(())?
+    };
+
     let config: TircConfig = lua.from_value(value)?;
 
-    Ok(config)
+    Ok((config, lua))
 }
 
-async fn create_irc_client() -> Result<Client, failure::Error> {
-    let config = load_config().await?;
-
+async fn create_irc_client(config: TircConfig) -> Result<Client, failure::Error> {
     let server_config = config.servers.get(0).expect("No server config found");
 
     let client_config = Config {
