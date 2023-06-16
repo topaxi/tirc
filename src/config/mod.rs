@@ -28,6 +28,7 @@ pub struct ServerConfig {
     pub accept_invalid_cert: bool,
 
     pub nickname: Vec<String>,
+    pub realname: Option<String>,
 
     #[serde(default)]
     pub autojoin: Vec<String>,

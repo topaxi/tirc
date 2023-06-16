@@ -113,6 +113,7 @@ async fn create_irc_client(config: TircConfig) -> Result<Client, anyhow::Error> 
                 .clone(),
         ),
         alt_nicks: server_config.nickname[1..].to_vec(),
+        realname: server_config.realname.clone(),
         server: Some(server_config.host.clone()),
         port: Some(server_config.port),
         use_tls: Some(server_config.use_tls),
