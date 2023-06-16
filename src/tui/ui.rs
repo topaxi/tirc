@@ -84,7 +84,7 @@ impl Tui {
             let buffers = &state.buffers;
 
             let current_buffer_messages: &Vec<Message> = buffers
-                .get(current_buffer_name.to_string().as_str())
+                .get(current_buffer_name.to_owned().as_str())
                 .unwrap();
 
             let messages: Vec<_> = current_buffer_messages
@@ -123,7 +123,7 @@ impl Tui {
                 .flat_map(|str| {
                     let mut style = Style::default();
 
-                    if str.to_string() == current_buffer_name.to_string() {
+                    if str == current_buffer_name {
                         style = style.add_modifier(Modifier::BOLD);
                     }
 
