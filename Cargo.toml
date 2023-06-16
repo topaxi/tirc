@@ -17,3 +17,4 @@ xdg = "2.5.0"
 serde = "1.0.164"
 indoc = "2.0.1"
 indexmap = "1.9.3"
+semver = { version = "1.0.17", features = ["serde"] }

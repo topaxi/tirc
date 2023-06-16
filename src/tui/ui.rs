@@ -47,7 +47,7 @@ impl Tui {
         self.input.handle_event(event);
     }
 
-    pub fn initialize_terminal(&mut self) -> Result<(), failure::Error> {
+    pub fn initialize_terminal(&mut self) -> Result<(), anyhow::Error> {
         enable_raw_mode()?;
 
         self.terminal.clear()?;
@@ -74,7 +74,7 @@ impl Tui {
             );
     }
 
-    pub fn render(&mut self, _irc: &Client, state: &State) -> Result<(), failure::Error> {
+    pub fn render(&mut self, _irc: &Client, state: &State) -> Result<(), anyhow::Error> {
         let layout = self.get_layout();
 
         self.terminal.draw(|f| {

@@ -13,7 +13,7 @@ use tirc::{
 use tokio::{sync::mpsc, time::Instant};
 
 #[tokio::main]
-async fn main() -> Result<(), failure::Error> {
+async fn main() -> Result<(), anyhow::Error> {
     let (config, lua) = load_config().await?;
 
     let mut irc = create_irc_client(config).await?;
@@ -101,7 +101,7 @@ async fn poll_input(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), failure::Er
     }
 }
 
-async fn create_irc_client(config: TircConfig) -> Result<Client, failure::Error> {
+async fn create_irc_client(config: TircConfig) -> Result<Client, anyhow::Error> {
     let server_config = config.servers.get(0).expect("No server config found");
 
     let client_config = Config {

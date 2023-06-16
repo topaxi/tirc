@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use indoc::indoc;
-use mlua::{Lua, LuaSerdeExt, Table};
+use mlua::{Lua, LuaSerdeExt, Table, Value};
 use serde::Deserialize;
 
 #[inline]
@@ -58,7 +58,67 @@ fn get_default_config() -> &'static str {
     default_config
 }
 
-pub async fn load_config() -> Result<(TircConfig, Lua), failure::Error> {
+pub fn get_or_create_module<'lua>(lua: &'lua Lua, name: &str) -> anyhow::Result<mlua::Table<'lua>> {
+    let globals = lua.globals();
+    let package: Table = globals.get("package")?;
+    let loaded: Table = package.get("loaded")?;
+
+    let module = loaded.get(name)?;
+    match module {
+        Value::Nil => {
+            let module = lua.create_table()?;
+            loaded.set(name, module.clone())?;
+            Ok(module)
+        }
+        Value::Table(table) => Ok(table),
+        wat => anyhow::bail!(
+            "cannot register module {} as package.loaded.{} is already set to a value of type {}",
+            name,
+            name,
+            wat.type_name()
+        ),
+    }
+}
+
+fn get_version() -> semver::Version {
+    semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("Unable to parse version")
+}
+
+fn get_version_lua_value<'lua>(lua: &'lua Lua) -> mlua::Table<'lua> {
+    let version = get_version();
+    let table = lua.create_table().expect("Unable to create table");
+    let metatable = lua.create_table().expect("Unable to create metatable");
+
+    table
+        .set("major", version.major)
+        .expect("Unable to set major");
+    table
+        .set("minor", version.minor)
+        .expect("Unable to set minor");
+    table
+        .set("patch", version.patch)
+        .expect("Unable to set patch");
+
+    metatable
+        .set(
+            "__tostring",
+            lua.create_function(|_, version: mlua::Table| {
+                let major: u8 = version.get("major").expect("Unable to get major");
+                let minor: u8 = version.get("minor").expect("Unable to get minor");
+                let patch: u8 = version.get("patch").expect("Unable to get patch");
+
+                Ok(format!("{}.{}.{}", major, minor, patch))
+            })
+            .expect("Unable to create __tostring function"),
+        )
+        .expect("Unable to set __tostring");
+
+    table.set_metatable(Some(metatable));
+
+    table
+}
+
+pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
     let config_filename =
         xdg::BaseDirectories::with_prefix("tirc")?.place_config_file("init.lua")?;
     let config_dirname = config_filename
@@ -77,6 +137,10 @@ pub async fn load_config() -> Result<(TircConfig, Lua), failure::Error> {
 
     let value = {
         let globals = lua.globals();
+        let tirc_mod = get_or_create_module(&lua, "tirc")?;
+
+        tirc_mod.set("config_dir", config_dirname.display().to_string())?;
+        tirc_mod.set("version", get_version_lua_value(&lua))?;
 
         let package: Table = globals.get("package")?;
         let package_path: String = package.get("path")?;

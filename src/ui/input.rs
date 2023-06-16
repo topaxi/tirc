@@ -28,7 +28,7 @@ impl InputHandler {
         &self.ui
     }
 
-    pub fn sync_state(&mut self, state: &mut State) -> Result<(), failure::Error> {
+    pub fn sync_state(&mut self, state: &mut State) -> Result<(), anyhow::Error> {
         state.nickname = self.irc.current_nickname().to_string();
 
         let channels = match self.irc.list_channels() {
@@ -47,7 +47,7 @@ impl InputHandler {
         Ok(())
     }
 
-    pub fn render_ui(&mut self, state: &State) -> Result<(), failure::Error> {
+    pub fn render_ui(&mut self, state: &State) -> Result<(), anyhow::Error> {
         self.ui.render(&self.irc, &state)?;
 
         Ok(())
