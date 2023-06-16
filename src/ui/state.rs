@@ -100,7 +100,9 @@ impl State {
                         .push(message);
                 }
             },
-            Command::TOPIC(channel, _) => {
+            Command::TOPIC(channel, _)
+            | Command::PART(channel, _)
+            | Command::JOIN(channel, _, _) => {
                 self.create_buffer_if_not_exists(channel);
                 self.buffers.get_mut(channel).unwrap().push(message);
             }
