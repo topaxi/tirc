@@ -113,3 +113,73 @@ impl State {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_get_buffer_name_by_index() {
+        let state = super::State::new();
+        assert_eq!(state.get_buffer_name_by_index(0), "(status)");
+    }
+
+    #[test]
+    fn test_get_current_buffer_index() {
+        let state = super::State::new();
+        assert_eq!(state.get_current_buffer_index(), 0);
+    }
+
+    #[test]
+    fn test_set_current_buffer_index() {
+        let mut state = super::State::new();
+        state.buffers.insert("foo".to_string(), vec![]);
+        assert_eq!(state.get_current_buffer_index(), 0);
+        state.set_current_buffer_index(1);
+        assert_eq!(state.get_current_buffer_index(), 1);
+    }
+
+    #[test]
+    fn test_set_current_buffer() {
+        let mut state = super::State::new();
+        state.buffers.insert("foo".to_string(), vec![]);
+        assert_eq!(state.get_current_buffer_index(), 0);
+        state.set_current_buffer("foo");
+        assert_eq!(state.get_current_buffer_index(), 1);
+    }
+
+    #[test]
+    fn test_next_buffer() {
+        let mut state = super::State::new();
+        state.buffers.insert("foo".to_string(), vec![]);
+        state.buffers.insert("bar".to_string(), vec![]);
+        assert_eq!(state.get_current_buffer_index(), 0);
+        state.next_buffer();
+        assert_eq!(state.get_current_buffer_index(), 1);
+        state.next_buffer();
+        assert_eq!(state.get_current_buffer_index(), 2);
+        state.next_buffer();
+        assert_eq!(state.get_current_buffer_index(), 0);
+    }
+
+    #[test]
+    fn test_previous_buffer() {
+        let mut state = super::State::new();
+        state.buffers.insert("foo".to_string(), vec![]);
+        state.buffers.insert("bar".to_string(), vec![]);
+        assert_eq!(state.get_current_buffer_index(), 0);
+        state.previous_buffer();
+        assert_eq!(state.get_current_buffer_index(), 2);
+        state.previous_buffer();
+        assert_eq!(state.get_current_buffer_index(), 1);
+        state.previous_buffer();
+        assert_eq!(state.get_current_buffer_index(), 0);
+    }
+
+    #[test]
+    fn test_create_buffer_if_not_exists() {
+        let mut state = super::State::new();
+        state.create_buffer_if_not_exists("foo");
+        assert_eq!(state.buffers.len(), 2);
+        state.create_buffer_if_not_exists("foo");
+        assert_eq!(state.buffers.len(), 2);
+    }
+}
