@@ -125,7 +125,6 @@ impl Tui {
             let buffers: Vec<Span> = state
                 .buffers
                 .keys()
-                .into_iter()
                 .flat_map(|str| {
                     let mut style = Style::default();
 
@@ -152,7 +151,7 @@ impl Tui {
                         // Put cursor past the end of the input text
                         chunks[2].x
                             + ((self.input.visual_cursor()).max(scroll) - scroll) as u16
-                            + prefix_len as u16,
+                            + prefix_len,
                         // Move one line down, from the border to the input line
                         chunks[2].y + 1,
                     )

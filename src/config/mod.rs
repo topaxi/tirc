@@ -40,7 +40,7 @@ pub struct TircConfig {
 }
 
 fn get_default_config() -> &'static str {
-    let default_config = indoc! {"
+    indoc! {"
         local config = {}
 
         config.servers = {
@@ -54,9 +54,7 @@ fn get_default_config() -> &'static str {
         }
 
         return config
-    "};
-
-    default_config
+    "}
 }
 
 pub fn get_or_create_module<'lua>(lua: &'lua Lua, name: &str) -> anyhow::Result<mlua::Table<'lua>> {
@@ -85,7 +83,7 @@ fn get_version() -> semver::Version {
     semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("Unable to parse version")
 }
 
-fn get_version_lua_value<'lua>(lua: &'lua Lua) -> mlua::Table<'lua> {
+fn get_version_lua_value(lua: &Lua) -> mlua::Table<'_> {
     let version = get_version();
     let table = lua.create_table().expect("Unable to create table");
     let metatable = lua.create_table().expect("Unable to create metatable");
@@ -127,7 +125,7 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
         .expect("Unable to create config directory");
 
     if !config_filename.exists() {
-        std::fs::create_dir_all(&config_dirname)?;
+        std::fs::create_dir_all(config_dirname)?;
 
         std::fs::write(&config_filename, get_default_config())?;
     }
@@ -145,7 +143,7 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
 
         let package: Table = globals.get("package")?;
         let package_path: String = package.get("path")?;
-        let mut path_array: Vec<String> = package_path.split(";").map(|s| s.to_owned()).collect();
+        let mut path_array: Vec<String> = package_path.split(';').map(|s| s.to_owned()).collect();
 
         fn prefix_path(array: &mut Vec<String>, path: &Path) {
             array.insert(0, format!("{}/?.lua", path.display()));

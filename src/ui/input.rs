@@ -9,7 +9,7 @@ use super::{Mode, State};
 #[derive(Debug)]
 pub enum Event<I> {
     Input(I),
-    Message(Message),
+    Message(Box<Message>),
     Tick,
 }
 
@@ -48,7 +48,7 @@ impl InputHandler {
     }
 
     pub fn render_ui(&mut self, state: &State) -> Result<(), anyhow::Error> {
-        self.ui.render(&self.irc, &self.lua, &state)?;
+        self.ui.render(&self.irc, &self.lua, state)?;
 
         Ok(())
     }
@@ -60,13 +60,12 @@ impl InputHandler {
 
         match command[..] {
             ["m" | "msg", target_and_message] => {
-                match target_and_message.splitn(2, ' ').collect::<Vec<&str>>()[..] {
-                    [target, message] => {
-                        state.create_buffer_if_not_exists(&target);
-                        state.set_current_buffer(&target);
-                        self.irc.send_privmsg(&target, &message)?;
-                    }
-                    _ => {}
+                if let [target, message] =
+                    target_and_message.splitn(2, ' ').collect::<Vec<&str>>()[..]
+                {
+                    state.create_buffer_if_not_exists(target);
+                    state.set_current_buffer(target);
+                    self.irc.send_privmsg(target, message)?;
                 }
             }
             ["q" | "quit"] => {
@@ -87,7 +86,7 @@ impl InputHandler {
 
     fn key_code_is_digit(key_code: KeyCode) -> bool {
         match key_code {
-            KeyCode::Char(char) => char.is_digit(10),
+            KeyCode::Char(char) => char.is_ascii_digit(),
             _ => false,
         }
     }
@@ -154,7 +153,7 @@ impl InputHandler {
                 }
             },
             (_, Event::Message(message)) => {
-                state.push_message(message);
+                state.push_message(*message);
             }
             (_, Event::Tick) => {}
         }

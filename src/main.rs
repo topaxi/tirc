@@ -41,7 +41,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let irc_handle = tokio::spawn(async move { connect_irc(stream, irc_sender).await });
 
-    let mut state = ui::State::new();
+    let mut state = ui::State::default();
     let mut tui = tirc::tui::Tui::new()?;
 
     tui.initialize_terminal()?;
@@ -52,15 +52,14 @@ async fn main() -> Result<(), anyhow::Error> {
         input_handler.sync_state(&mut state)?;
         input_handler.render_ui(&state)?;
 
-        match rx.recv().await {
-            Some(event) => match input_handler.handle_event(&mut state, event) {
+        if let Some(event) = rx.recv().await {
+            match input_handler.handle_event(&mut state, event) {
                 Ok(_) => {}
                 Err(_) => {
                     input_handle.abort();
                     break;
                 }
-            },
-            None => {}
+            }
         }
     }
 
@@ -93,10 +92,12 @@ async fn poll_input(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), failure::Er
             }
         }
 
-        if last_tick.elapsed() >= tick_rate {
-            if let Ok(_) = tx.send(Event::Tick).await {
-                last_tick = Instant::now();
-            }
+        if last_tick.elapsed() < tick_rate {
+            continue;
+        }
+
+        if (tx.send(Event::Tick).await).is_ok() {
+            last_tick = Instant::now();
         }
     }
 }
@@ -136,7 +137,7 @@ async fn connect_irc(
     tx: mpsc::Sender<Event<KeyEvent>>,
 ) -> Result<(), failure::Error> {
     while let Some(message) = stream.next().await.transpose()? {
-        tx.send(Event::Message(message)).await?;
+        tx.send(Event::Message(Box::new(message))).await?;
     }
 
     Ok(())
