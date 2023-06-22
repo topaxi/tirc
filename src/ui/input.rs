@@ -48,7 +48,7 @@ impl InputHandler {
     }
 
     pub fn render_ui(&mut self, state: &State) -> Result<(), anyhow::Error> {
-        self.ui.render(&self.irc, &state)?;
+        self.ui.render(&self.irc, &self.lua, &state)?;
 
         Ok(())
     }

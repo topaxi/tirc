@@ -5,6 +5,7 @@ use crossterm::terminal::{
 };
 use irc::client::Client;
 use irc::proto::Message;
+use mlua::Lua;
 use std::io::{self, Stdout};
 use tui;
 use tui::backend::CrosstermBackend;
@@ -74,7 +75,12 @@ impl Tui {
             );
     }
 
-    pub fn render(&mut self, _irc: &Client, state: &State) -> Result<(), anyhow::Error> {
+    pub fn render(
+        &mut self,
+        _irc: &Client,
+        _lua: &Lua,
+        state: &State,
+    ) -> Result<(), anyhow::Error> {
         let layout = self.get_layout();
 
         self.terminal.draw(|f| {

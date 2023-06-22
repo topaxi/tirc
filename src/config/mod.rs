@@ -136,7 +136,7 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
 
     let lua = Lua::new();
 
-    let value = {
+    let config = {
         let globals = lua.globals();
         let tirc_mod = get_or_create_module(&lua, "tirc")?;
 
@@ -156,12 +156,17 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
 
         package.set("path", path_array.join(";"))?;
 
-        lua.load(&config_lua_code)
+        let value: Value = lua
+            .load(&config_lua_code)
             .set_name(config_filename.display().to_string())?
-            .call(())?
-    };
+            .call(())?;
 
-    let config: TircConfig = lua.from_value(value)?;
+        let config: TircConfig = lua.from_value(value.clone())?;
+
+        globals.set("config", value)?;
+
+        config
+    };
 
     Ok((config, lua))
 }
