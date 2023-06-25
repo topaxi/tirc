@@ -71,11 +71,50 @@ impl Renderer {
             );
     }
 
+    fn table_to_line(&self, lua: &mlua::Lua, table: mlua::Table) -> mlua::Result<Line> {
+        let mut line = Line::default();
+
+        for v in table.sequence_values::<mlua::Value>() {
+            let v = v?;
+
+            match v {
+                mlua::Value::String(_) => {
+                    let v = mlua::String::from_lua(v, lua)?;
+                    let str = v.to_str()?.to_owned();
+
+                    line.spans.push(Span::from(str));
+                }
+                mlua::Value::Table(_) => {
+                    let v = mlua::Table::from_lua(v, lua)?;
+                    let str = v.get::<_, Option<String>>(1)?;
+                    let style = v.get::<_, Option<mlua::Table>>(2)?;
+
+                    if let Some(str) = str {
+                        if let Some(style) = style {
+                            let style: Style = lua.from_value(mlua::Value::Table(style))?;
+
+                            line.spans.push(Span::styled(str, style));
+                        } else {
+                            line.spans.push(Span::from(str));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(mlua::Error::external(anyhow::anyhow!(
+                        "table must be a string or a table with a string and style"
+                    )))
+                }
+            }
+        }
+
+        Ok(line)
+    }
+
     fn render_message(
         &self,
         lua: &mlua::Lua,
         message: &Message,
-    ) -> Result<Option<String>, anyhow::Error> {
+    ) -> Result<Option<Line>, anyhow::Error> {
         let message = to_lua_message(lua, message)?;
         let v = config::emit_sync_callback(lua, ("format-message".to_string(), (message)))?;
 
@@ -85,8 +124,9 @@ impl Renderer {
                 let v = mlua::String::from_lua(v, lua)?;
                 let str = v.to_str()?.to_owned();
 
-                Ok(Some(str))
+                Ok(Some(Line::from(str)))
             }
+            mlua::Value::Table(tbl) => Ok(Some(self.table_to_line(lua, tbl.to_owned())?)),
             _ => Err(anyhow::anyhow!(
                 "render-message callback must return a string or nil"
             )),
@@ -113,7 +153,7 @@ impl Renderer {
             .map(|message| {
                 self.render_message(lua, message)
                     .unwrap()
-                    .unwrap_or_else(|| message.to_string())
+                    .unwrap_or_else(|| Line::from(message.to_string()))
             })
             .map(|message| ListItem::new(message).style(Style::default().fg(Color::White)))
             .collect();

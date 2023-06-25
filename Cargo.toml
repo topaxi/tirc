@@ -10,7 +10,7 @@ futures = "0.3.28"
 irc = { path = "../irc", features = ["ctcp", "tls-native", "serde"] }
 tokio = { version = "1.28.2", features = ["full"] }
 crossterm = { version = "0.26.1", features = ["serde"] }
-tui = { version="0.21.0", package = "ratatui" }
+tui = { version="0.21.0", package = "ratatui", features = ["crossterm", "serde"] }
 tui-input = { version = "*", features = ["crossterm"] }
 anyhow = "1.0.71"
 mlua = { version = "0.8.9", features = ["luajit52", "serde", "async", "serialize"] }
