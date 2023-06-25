@@ -16,7 +16,7 @@ use tokio::{sync::mpsc, time::Instant};
 async fn main() -> Result<(), anyhow::Error> {
     let (config, lua) = load_config().await?;
 
-    let mut irc = create_irc_client(config).await?;
+    let mut irc = create_irc_client(&config).await?;
     let stream = irc.stream()?;
 
     irc.send_cap_req(&[
@@ -42,6 +42,9 @@ async fn main() -> Result<(), anyhow::Error> {
     let irc_handle = tokio::spawn(async move { connect_irc(stream, irc_sender).await });
 
     let mut state = ui::State::default();
+
+    state.server = config.servers.get(0).unwrap().host.clone();
+
     let mut tui = tirc::tui::Tui::new()?;
 
     tui.initialize_terminal()?;
@@ -102,7 +105,7 @@ async fn poll_input(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), failure::Er
     }
 }
 
-async fn create_irc_client(config: TircConfig) -> Result<Client, anyhow::Error> {
+async fn create_irc_client(config: &TircConfig) -> Result<Client, anyhow::Error> {
     let server_config = config.servers.get(0).expect("No server config found");
 
     let client_config = Config {

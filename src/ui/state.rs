@@ -13,6 +13,7 @@ pub enum Mode {
 pub struct State {
     pub mode: Mode,
     pub nickname: String,
+    pub server: String,
     pub current_buffer: String,
     pub buffers: IndexMap<String, Vec<Message>>,
 }
@@ -36,6 +37,7 @@ impl State {
         State {
             mode: Mode::Normal,
             nickname: String::new(),
+            server: String::new(),
             current_buffer: default_buffer_name,
             buffers,
         }

@@ -121,7 +121,7 @@ impl Renderer {
         let list = List::new(messages)
             .block(
                 Block::default()
-                    .title("irc.topaxi.ch")
+                    .title(format!("{}@{}", state.nickname, state.server))
                     .borders(Borders::NONE),
             )
             .start_corner(tui::layout::Corner::BottomLeft);
