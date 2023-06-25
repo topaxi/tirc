@@ -93,19 +93,20 @@ impl State {
 
     pub fn push_message(&mut self, message: Message) {
         match &message.command {
-            Command::PRIVMSG(_, _) | Command::NOTICE(_, _) => match message.response_target() {
-                Some(response_target) if response_target != self.nickname => {
-                    self.create_buffer_if_not_exists(response_target);
-                    self.buffers.get_mut(response_target).unwrap().push(message);
+            Command::PRIVMSG(nickname, _) | Command::NOTICE(nickname, _) => {
+                let default_buffer_name = State::get_default_buffer_name();
+                let mut target = match message.response_target() {
+                    Some(response_target) if response_target != self.nickname => response_target,
+                    _ => nickname,
+                };
+
+                if target == "*" || target == self.nickname {
+                    target = default_buffer_name.as_str();
                 }
-                // Not sure if this case is possible
-                _ => {
-                    self.buffers
-                        .get_mut(&State::get_default_buffer_name())
-                        .unwrap()
-                        .push(message);
-                }
-            },
+
+                self.create_buffer_if_not_exists(target);
+                self.buffers.get_mut(target).unwrap().push(message);
+            }
             Command::TOPIC(channel, _)
             | Command::PART(channel, _)
             | Command::JOIN(channel, _, _) => {

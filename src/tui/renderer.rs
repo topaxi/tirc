@@ -116,14 +116,15 @@ impl Renderer {
                     .unwrap_or_else(|| message.to_string())
             })
             .map(|message| ListItem::new(message).style(Style::default().fg(Color::White)))
-            .rev()
             .collect();
 
-        let list = List::new(messages).block(
-            Block::default()
-                .title("irc.topaxi.ch")
-                .borders(Borders::NONE),
-        );
+        let list = List::new(messages)
+            .block(
+                Block::default()
+                    .title("irc.topaxi.ch")
+                    .borders(Borders::NONE),
+            )
+            .start_corner(tui::layout::Corner::BottomLeft);
 
         f.render_widget(list, rect);
     }
