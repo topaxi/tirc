@@ -1,7 +1,7 @@
 use std::io::Stdout;
 
 use irc::proto::Message;
-use mlua::{FromLua, LuaSerdeExt, Table};
+use mlua::{FromLua, LuaSerdeExt};
 use tui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -39,9 +39,9 @@ fn to_lua_message<'lua>(
                             _ => Ok(None::<String>),
                         })
                     })
-                    .expect("Unable to create tostring function"),
+                    .expect("Unable to create __tostring function"),
                 )
-                .expect("Unable to create tostring function");
+                .expect("Unable to set __tostring function on metatable");
 
             table.set_metatable(Some(metatable));
 
