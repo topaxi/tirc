@@ -1,7 +1,8 @@
 use std::path::Path;
 
+use anyhow::anyhow;
 use indoc::indoc;
-use mlua::{Lua, LuaSerdeExt, Table, Value};
+use mlua::{Lua, LuaSerdeExt, Table, ToLuaMulti, Value};
 use serde::Deserialize;
 
 #[inline]
@@ -55,6 +56,53 @@ fn get_default_config() -> &'static str {
 
         return config
     "}
+}
+
+fn register_event(lua: &Lua, (name, func): (String, mlua::Function)) -> mlua::Result<()> {
+    let decorated_name = format!("tirc-event-{}", name);
+    let tbl: mlua::Value = lua.named_registry_value(&decorated_name)?;
+
+    match tbl {
+        mlua::Value::Nil => {
+            let tbl = lua.create_table()?;
+            tbl.set(1, func)?;
+            lua.set_named_registry_value(&decorated_name, tbl)?;
+            Ok(())
+        }
+        mlua::Value::Table(tbl) => {
+            let len = tbl.raw_len();
+            tbl.set(len + 1, func)?;
+            Ok(())
+        }
+        _ => Err(mlua::Error::external(anyhow!(
+            "registry key for {} has invalid type",
+            decorated_name
+        ))),
+    }
+}
+
+pub fn emit_sync_callback<'lua, A>(
+    lua: &'lua Lua,
+    (name, args): (String, A),
+) -> mlua::Result<mlua::Value<'lua>>
+where
+    A: ToLuaMulti<'lua>,
+{
+    let decorated_name = format!("tirc-event-{}", name);
+    let tbl: mlua::Value = lua.named_registry_value(&decorated_name)?;
+
+    match tbl {
+        mlua::Value::Table(tbl) => {
+            #[allow(clippy::never_loop)]
+            for func in tbl.sequence_values::<mlua::Function>() {
+                let func = func?;
+                return func.call(args);
+            }
+
+            Ok(mlua::Value::Nil)
+        }
+        _ => Ok(mlua::Value::Nil),
+    }
 }
 
 pub fn get_or_create_module<'lua>(lua: &'lua Lua, name: &str) -> anyhow::Result<mlua::Table<'lua>> {
@@ -140,6 +188,7 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
 
         tirc_mod.set("config_dir", config_dirname.display().to_string())?;
         tirc_mod.set("version", get_version_lua_value(&lua))?;
+        tirc_mod.set("on", lua.create_function(register_event)?)?;
 
         let package: Table = globals.get("package")?;
         let package_path: String = package.get("path")?;

@@ -1,6 +1,7 @@
 use std::io::Stdout;
 
 use irc::proto::Message;
+use mlua::FromLua;
 use tui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -10,7 +11,10 @@ use tui::{
 };
 use tui_input::Input;
 
-use crate::ui::{Mode, State};
+use crate::{
+    config,
+    ui::{Mode, State},
+};
 
 pub struct Renderer {}
 
@@ -32,10 +36,33 @@ impl Renderer {
             );
     }
 
+    fn render_message(
+        &self,
+        lua: &mlua::Lua,
+        message: &Message,
+    ) -> Result<Option<String>, anyhow::Error> {
+        let v =
+            config::emit_sync_callback(lua, ("format-message".to_string(), (message.to_string())))?;
+
+        match &v {
+            mlua::Value::Nil => Ok(None),
+            mlua::Value::String(_) => {
+                let v = mlua::String::from_lua(v, lua)?;
+                let str = v.to_str()?.to_owned();
+
+                Ok(Some(str))
+            }
+            _ => Err(anyhow::anyhow!(
+                "render-message callback must return a string or nil"
+            )),
+        }
+    }
+
     fn render_messages(
         &self,
         f: &mut tui::Frame<CrosstermBackend<Stdout>>,
         state: &State,
+        lua: &mlua::Lua,
         rect: Rect,
     ) {
         let current_buffer_name = &state.current_buffer;
@@ -49,8 +76,11 @@ impl Renderer {
             .iter()
             .rev()
             .map(|message| {
-                ListItem::new(message.to_string()).style(Style::default().fg(Color::White))
+                self.render_message(lua, message)
+                    .unwrap()
+                    .unwrap_or_else(|| message.to_string())
             })
+            .map(|message| ListItem::new(message).style(Style::default().fg(Color::White)))
             .rev()
             .collect();
 
@@ -129,14 +159,14 @@ impl Renderer {
         &mut self,
         f: &mut tui::Frame<CrosstermBackend<Stdout>>,
         state: &State,
-        _lua: &mlua::Lua,
+        lua: &mlua::Lua,
         input: &Input,
     ) {
         let layout = self.get_layout();
         let size = f.size();
         let chunks = layout.split(size);
 
-        self.render_messages(f, state, chunks[0]);
+        self.render_messages(f, state, lua, chunks[0]);
         self.render_buffer_bar(f, state, chunks[1]);
         self.render_input(f, state, input, chunks[2]);
     }
