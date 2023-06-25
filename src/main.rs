@@ -41,9 +41,10 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let irc_handle = tokio::spawn(async move { connect_irc(stream, irc_sender).await });
 
-    let mut state = ui::State::default();
-
-    state.server = config.servers.get(0).unwrap().host.clone();
+    let mut state = ui::State {
+        server: config.servers.get(0).unwrap().host.clone(),
+        ..Default::default()
+    };
 
     let mut tui = tirc::tui::Tui::new()?;
 
