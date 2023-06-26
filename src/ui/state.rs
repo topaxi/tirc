@@ -114,6 +114,7 @@ impl State {
                     .push((chrono::Local::now(), message));
             }
             Command::TOPIC(channel, _)
+            | Command::ChannelMODE(channel, _)
             | Command::PART(channel, _)
             | Command::JOIN(channel, _, _) => {
                 self.create_buffer_if_not_exists(channel);
