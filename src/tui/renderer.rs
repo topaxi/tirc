@@ -1,5 +1,6 @@
 use std::io::Stdout;
 
+use chrono::{DateTime, Datelike, Timelike};
 use irc::proto::Message;
 use mlua::LuaSerdeExt;
 use tui::{
@@ -73,15 +74,47 @@ impl Renderer {
         Ok(spans)
     }
 
-    fn render_time(&self, lua: &mlua::Lua, message: &Message) -> Result<Vec<Span>, anyhow::Error> {
-        let message = to_lua_message(lua, message)?;
-        let v = config::emit_sync_callback(lua, ("format-time".to_string(), (message)))?;
-
-        match &v {
+    fn lua_value_to_spans(
+        &self,
+        lua: &mlua::Lua,
+        value: mlua::Value,
+    ) -> Result<Vec<Span>, anyhow::Error> {
+        match &value {
+            mlua::Value::Nil => Ok(vec![]),
             mlua::Value::String(v) => Ok(vec![Span::raw(v.to_str()?.to_owned())]),
             mlua::Value::Table(tbl) => Ok(self.table_to_spans(lua, tbl.to_owned())?),
-            _ => Err(anyhow::anyhow!("format-time callback must return a string")),
+            _ => Err(anyhow::anyhow!(
+                "render-message callback must return a string or nil"
+            )),
         }
+    }
+
+    fn date_time_to_table<'a>(
+        &'a self,
+        lua: &'a mlua::Lua,
+        date_time: &DateTime<chrono::Local>,
+    ) -> mlua::Result<mlua::Table> {
+        let table = lua.create_table()?;
+        table.set("year", date_time.year())?;
+        table.set("month", date_time.month())?;
+        table.set("day", date_time.day())?;
+        table.set("hour", date_time.hour())?;
+        table.set("minute", date_time.minute())?;
+        table.set("second", date_time.second())?;
+        Ok(table)
+    }
+
+    fn render_time(
+        &self,
+        lua: &mlua::Lua,
+        date_time: &DateTime<chrono::Local>,
+        message: &Message,
+    ) -> Result<Vec<Span>, anyhow::Error> {
+        let message = to_lua_message(lua, message)?;
+        let date_time = self.date_time_to_table(lua, date_time)?;
+        let v = config::emit_sync_callback(lua, ("format-time".to_string(), (date_time, message)))?;
+
+        self.lua_value_to_spans(lua, v)
     }
 
     fn render_message(
@@ -92,14 +125,7 @@ impl Renderer {
         let message = to_lua_message(lua, message)?;
         let v = config::emit_sync_callback(lua, ("format-message".to_string(), (message)))?;
 
-        match &v {
-            mlua::Value::Nil => Ok(vec![]),
-            mlua::Value::String(v) => Ok(vec![Span::raw(v.to_str()?.to_owned())]),
-            mlua::Value::Table(tbl) => Ok(self.table_to_spans(lua, tbl.to_owned())?),
-            _ => Err(anyhow::anyhow!(
-                "render-message callback must return a string or nil"
-            )),
-        }
+        self.lua_value_to_spans(lua, v)
     }
 
     fn render_messages(
@@ -112,15 +138,23 @@ impl Renderer {
         let current_buffer_name = &state.current_buffer;
         let buffers = &state.buffers;
 
-        let current_buffer_messages: &Vec<Message> = buffers
+        let current_buffer_messages: &Vec<_> = buffers
             .get(current_buffer_name.to_owned().as_str())
             .unwrap();
 
         let messages: Vec<_> = current_buffer_messages
             .iter()
             .rev()
-            .map(|message| {
-                let time_spans = self.render_time(lua, message).unwrap_or_else(|_| vec![]);
+            // TODO: Only convert to lua value once
+            //.map(|(date_time, message)| {
+            //    let message = to_lua_message(lua, message).unwrap();
+            //    let date_time = lua.to_value(&date_time).unwrap();
+            //    (date_time, message)
+            //})
+            .map(|(date_time, message)| {
+                let time_spans = self
+                    .render_time(lua, date_time, message)
+                    .unwrap_or_else(|_| vec![]);
 
                 let message_spans = self
                     .render_message(lua, message)

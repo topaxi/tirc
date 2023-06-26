@@ -1,3 +1,4 @@
+use chrono::DateTime;
 use indexmap::IndexMap;
 
 use irc::proto::{Command, Message};
@@ -15,7 +16,7 @@ pub struct State {
     pub nickname: String,
     pub server: String,
     pub current_buffer: String,
-    pub buffers: IndexMap<String, Vec<Message>>,
+    pub buffers: IndexMap<String, Vec<(DateTime<chrono::Local>, Message)>>,
 }
 
 impl Default for State {
@@ -28,7 +29,7 @@ impl State {
     pub fn new() -> State {
         let default_buffer_name = State::get_default_buffer_name();
 
-        let buffers: IndexMap<String, Vec<Message>> = {
+        let buffers = {
             let mut buffers = IndexMap::new();
             buffers.insert(default_buffer_name.clone(), vec![]);
             buffers
@@ -107,19 +108,25 @@ impl State {
                 }
 
                 self.create_buffer_if_not_exists(target);
-                self.buffers.get_mut(target).unwrap().push(message);
+                self.buffers
+                    .get_mut(target)
+                    .unwrap()
+                    .push((chrono::Local::now(), message));
             }
             Command::TOPIC(channel, _)
             | Command::PART(channel, _)
             | Command::JOIN(channel, _, _) => {
                 self.create_buffer_if_not_exists(channel);
-                self.buffers.get_mut(channel).unwrap().push(message);
+                self.buffers
+                    .get_mut(channel)
+                    .unwrap()
+                    .push((chrono::Local::now(), message));
             }
             _ => {
                 self.buffers
                     .get_mut(&State::get_default_buffer_name())
                     .unwrap()
-                    .push(message);
+                    .push((chrono::Local::now(), message));
             }
         }
     }
