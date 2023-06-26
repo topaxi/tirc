@@ -71,8 +71,8 @@ impl Renderer {
             );
     }
 
-    fn table_to_line(&self, lua: &mlua::Lua, table: mlua::Table) -> mlua::Result<Line> {
-        let mut line = Line::default();
+    fn table_to_spans(&self, lua: &mlua::Lua, table: mlua::Table) -> mlua::Result<Vec<Span>> {
+        let mut spans = vec![];
 
         for v in table.sequence_values::<mlua::Value>() {
             let v = v?;
@@ -82,7 +82,7 @@ impl Renderer {
                     let v = mlua::String::from_lua(v, lua)?;
                     let str = v.to_str()?.to_owned();
 
-                    line.spans.push(Span::from(str));
+                    spans.push(Span::from(str));
                 }
                 mlua::Value::Table(v) => {
                     let str = v.get::<_, Option<String>>(1)?;
@@ -92,9 +92,9 @@ impl Renderer {
                         if let Some(style) = style {
                             let style: Style = lua.from_value(mlua::Value::Table(style))?;
 
-                            line.spans.push(Span::styled(str, style));
+                            spans.push(Span::styled(str, style));
                         } else {
-                            line.spans.push(Span::from(str));
+                            spans.push(Span::from(str));
                         }
                     }
                 }
@@ -106,26 +106,41 @@ impl Renderer {
             }
         }
 
-        Ok(line)
+        Ok(spans)
+    }
+
+    fn render_time(&self, lua: &mlua::Lua, message: &Message) -> Result<Vec<Span>, anyhow::Error> {
+        let message = to_lua_message(lua, message)?;
+        let v = config::emit_sync_callback(lua, ("format-time".to_string(), (message)))?;
+
+        match &v {
+            mlua::Value::String(_) => {
+                let v = mlua::String::from_lua(v, lua)?;
+                let str = v.to_str()?.to_owned();
+                Ok(vec![Span::from(str)])
+            }
+            mlua::Value::Table(tbl) => Ok(self.table_to_spans(lua, tbl.to_owned())?),
+            _ => Err(anyhow::anyhow!("format-time callback must return a string")),
+        }
     }
 
     fn render_message(
         &self,
         lua: &mlua::Lua,
         message: &Message,
-    ) -> Result<Option<Line>, anyhow::Error> {
+    ) -> Result<Vec<Span>, anyhow::Error> {
         let message = to_lua_message(lua, message)?;
         let v = config::emit_sync_callback(lua, ("format-message".to_string(), (message)))?;
 
         match &v {
-            mlua::Value::Nil => Ok(None),
+            mlua::Value::Nil => Ok(vec![]),
             mlua::Value::String(_) => {
                 let v = mlua::String::from_lua(v, lua)?;
                 let str = v.to_str()?.to_owned();
 
-                Ok(Some(Line::from(str)))
+                Ok(vec![Span::raw(str)])
             }
-            mlua::Value::Table(tbl) => Ok(Some(self.table_to_line(lua, tbl.to_owned())?)),
+            mlua::Value::Table(tbl) => Ok(self.table_to_spans(lua, tbl.to_owned())?),
             _ => Err(anyhow::anyhow!(
                 "render-message callback must return a string or nil"
             )),
@@ -150,10 +165,16 @@ impl Renderer {
             .iter()
             .rev()
             .map(|message| {
-                self.render_message(lua, message)
-                    .unwrap()
-                    .unwrap_or_else(|| Line::from(message.to_string()))
+                let time_spans = self.render_time(lua, message).unwrap_or_else(|_| vec![]);
+
+                let message_spans = self
+                    .render_message(lua, message)
+                    .unwrap_or_else(|_| vec![Span::raw(message.to_string())]);
+
+                [time_spans, message_spans].concat()
             })
+            .filter(|spans| !spans.is_empty())
+            .map(Line::from)
             .map(|message| ListItem::new(message).style(Style::default().fg(Color::White)))
             .collect();
 
