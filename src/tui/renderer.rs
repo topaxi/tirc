@@ -1,7 +1,7 @@
 use std::io::Stdout;
 
 use irc::proto::Message;
-use mlua::{FromLua, LuaSerdeExt};
+use mlua::LuaSerdeExt;
 use tui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -78,11 +78,8 @@ impl Renderer {
             let v = v?;
 
             match v {
-                mlua::Value::String(_) => {
-                    let v = mlua::String::from_lua(v, lua)?;
-                    let str = v.to_str()?.to_owned();
-
-                    spans.push(Span::from(str));
+                mlua::Value::String(v) => {
+                    spans.push(Span::raw(v.to_str()?.to_owned()));
                 }
                 mlua::Value::Table(v) => {
                     let str = v.get::<_, Option<String>>(1)?;
@@ -114,11 +111,7 @@ impl Renderer {
         let v = config::emit_sync_callback(lua, ("format-time".to_string(), (message)))?;
 
         match &v {
-            mlua::Value::String(_) => {
-                let v = mlua::String::from_lua(v, lua)?;
-                let str = v.to_str()?.to_owned();
-                Ok(vec![Span::from(str)])
-            }
+            mlua::Value::String(v) => Ok(vec![Span::raw(v.to_str()?.to_owned())]),
             mlua::Value::Table(tbl) => Ok(self.table_to_spans(lua, tbl.to_owned())?),
             _ => Err(anyhow::anyhow!("format-time callback must return a string")),
         }
@@ -134,12 +127,7 @@ impl Renderer {
 
         match &v {
             mlua::Value::Nil => Ok(vec![]),
-            mlua::Value::String(_) => {
-                let v = mlua::String::from_lua(v, lua)?;
-                let str = v.to_str()?.to_owned();
-
-                Ok(vec![Span::raw(str)])
-            }
+            mlua::Value::String(v) => Ok(vec![Span::raw(v.to_str()?.to_owned())]),
             mlua::Value::Table(tbl) => Ok(self.table_to_spans(lua, tbl.to_owned())?),
             _ => Err(anyhow::anyhow!(
                 "render-message callback must return a string or nil"
