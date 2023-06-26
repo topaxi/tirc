@@ -16,42 +16,9 @@ use crate::{
     ui::{Mode, State},
 };
 
+use super::lua::to_lua_message;
+
 pub struct Renderer {}
-
-fn to_lua_message<'lua>(
-    lua: &'lua mlua::Lua,
-    message: &Message,
-) -> mlua::Result<mlua::Table<'lua>> {
-    let lua_message = lua.to_value(message)?;
-
-    match lua_message {
-        mlua::Value::Table(table) => {
-            let metatable = lua.create_table().expect("Unable to create metatable");
-            let lua_message_str = lua.to_value(&message.to_string())?;
-
-            metatable.set("__str", lua_message_str)?;
-            metatable
-                .set(
-                    "__tostring",
-                    lua.create_function(|_, lua_message: mlua::Value<'_>| {
-                        Ok(match lua_message {
-                            mlua::Value::Table(tbl) => tbl.get_metatable().unwrap().get("__str"),
-                            _ => Ok(None::<String>),
-                        })
-                    })
-                    .expect("Unable to create __tostring function"),
-                )
-                .expect("Unable to set __tostring function on metatable");
-
-            table.set_metatable(Some(metatable));
-
-            Ok(table)
-        }
-        _ => Err(mlua::Error::external(anyhow::anyhow!(
-            "message must be a table"
-        ))),
-    }
-}
 
 impl Renderer {
     pub fn new() -> Renderer {
