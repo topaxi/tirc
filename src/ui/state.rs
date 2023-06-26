@@ -94,42 +94,44 @@ impl State {
         }
     }
 
-    pub fn push_message(&mut self, message: Message) {
+    fn push_message_to_buffer(&mut self, buffer_name: &str, message: Message) {
+        self.buffers
+            .get_mut(buffer_name)
+            .unwrap()
+            .push((chrono::Local::now(), message));
+    }
+
+    fn get_target_buffer_name(&mut self, message: &Message) -> String {
+        let default_buffer_name = State::get_default_buffer_name();
+
         match &message.command {
             Command::PRIVMSG(nickname, _) | Command::NOTICE(nickname, _) => {
-                let default_buffer_name = State::get_default_buffer_name();
                 let mut target = match message.response_target() {
-                    Some(response_target) if response_target != self.nickname => response_target,
-                    _ => nickname,
+                    Some(response_target) if response_target != self.nickname => {
+                        response_target.to_owned()
+                    }
+                    _ => nickname.to_owned(),
                 };
 
                 if target == "*" || target == self.nickname {
-                    target = default_buffer_name.as_str();
+                    target = default_buffer_name;
                 }
 
-                self.create_buffer_if_not_exists(target);
-                self.buffers
-                    .get_mut(target)
-                    .unwrap()
-                    .push((chrono::Local::now(), message));
+                target
             }
             Command::TOPIC(channel, _)
             | Command::ChannelMODE(channel, _)
             | Command::PART(channel, _)
-            | Command::JOIN(channel, _, _) => {
-                self.create_buffer_if_not_exists(channel);
-                self.buffers
-                    .get_mut(channel)
-                    .unwrap()
-                    .push((chrono::Local::now(), message));
-            }
-            _ => {
-                self.buffers
-                    .get_mut(&State::get_default_buffer_name())
-                    .unwrap()
-                    .push((chrono::Local::now(), message));
-            }
+            | Command::JOIN(channel, _, _) => channel.to_owned(),
+            _ => default_buffer_name,
         }
+    }
+
+    pub fn push_message(&mut self, message: Message) {
+        let buffer_name = self.get_target_buffer_name(&message);
+
+        self.create_buffer_if_not_exists(&buffer_name);
+        self.push_message_to_buffer(&buffer_name, message)
     }
 }
 
