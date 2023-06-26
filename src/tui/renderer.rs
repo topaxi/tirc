@@ -126,6 +126,10 @@ impl Renderer {
                     .render_message(lua, message)
                     .unwrap_or_else(|_| vec![Span::raw(message.to_string())]);
 
+                if message_spans.is_empty() {
+                    return message_spans;
+                }
+
                 [time_spans, message_spans].concat()
             })
             .filter(|spans| !spans.is_empty())
