@@ -84,8 +84,7 @@ impl Renderer {
 
                     line.spans.push(Span::from(str));
                 }
-                mlua::Value::Table(_) => {
-                    let v = mlua::Table::from_lua(v, lua)?;
+                mlua::Value::Table(v) => {
                     let str = v.get::<_, Option<String>>(1)?;
                     let style = v.get::<_, Option<mlua::Table>>(2)?;
 
