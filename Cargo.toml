@@ -6,8 +6,7 @@ edition = "2021"
 [dependencies]
 failure = "0.1.8"
 futures = "0.3.28"
-#irc = { git = "https://github.com/topaxi/irc.git", branch = "feat/message-serde", features = ["ctcp", "tls-native", "serde"] }
-irc = { path = "../irc", features = ["ctcp", "tls-native", "serde"] }
+irc = { git = "https://github.com/topaxi/irc.git", branch = "feat/message-serde", features = ["ctcp", "tls-native", "serde"] }
 tokio = { version = "1.28.2", features = ["full"] }
 crossterm = { version = "0.26.1", features = ["serde"] }
 tui = { version="0.21.0", package = "ratatui", features = ["crossterm", "serde"] }

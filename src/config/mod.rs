@@ -5,6 +5,8 @@ use indoc::indoc;
 use mlua::{Lua, LuaSerdeExt, Table, ToLuaMulti, Value};
 use serde::Deserialize;
 
+use crate::tui::create_tirc_theme_lua_module;
+
 #[inline]
 fn bool_true() -> bool {
     true
@@ -185,6 +187,8 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
     let config = {
         let globals = lua.globals();
         let tirc_mod = get_or_create_module(&lua, "tirc")?;
+
+        create_tirc_theme_lua_module(&lua)?;
 
         tirc_mod.set("config_dir", config_dirname.display().to_string())?;
         tirc_mod.set("version", get_version_lua_value(&lua))?;

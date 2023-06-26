@@ -507,6 +507,7 @@ dependencies = [
 [[package]]
 name = "irc"
 version = "0.15.0"
+source = "git+https://github.com/topaxi/irc.git?branch=feat/message-serde#a9af5d62788e7040e7343c5228074f61b85c457d"
 dependencies = [
  "chrono",
  "encoding",
@@ -529,6 +530,7 @@ dependencies = [
 [[package]]
 name = "irc-proto"
 version = "0.15.0"
+source = "git+https://github.com/topaxi/irc.git?branch=feat/message-serde#a9af5d62788e7040e7343c5228074f61b85c457d"
 dependencies = [
  "bytes",
  "encoding",
