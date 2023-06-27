@@ -31,6 +31,30 @@ local function list_concat(...)
   return list_append({}, ...)
 end
 
+---@generic T
+---@param list table<integer, T>
+---@param fn fun(v: T, k: integer, list: table<integer, T>): boolean
+---@return table<integer, T>
+local function list_filter(list, fn)
+  local result = {}
+
+  for k, v in ipairs(list) do
+    if fn(v, k, list) then
+      table.insert(result, v)
+    end
+  end
+
+  return result
+end
+
+local function list_find(list, fn)
+  for k, v in ipairs(list) do
+    if fn(v, k, list) then
+      return v
+    end
+  end
+end
+
 local blue = theme.style { fg = 'blue' }
 local darkgray = theme.style { fg = 'darkgray' }
 
@@ -43,20 +67,34 @@ local server_notice_icon = {
 
 local function format_join(msg)
   return msg.prefix.Nickname[1]
-      .. (msg.command.JOIN[3] and msg.command.JOIN[3] ~= 'Unknown' and (' (' .. msg.command.JOIN[3] .. ')') or '')
-      .. ' has joined '
-      .. msg.command.JOIN[1]
+    .. (msg.command.JOIN[3] and msg.command.JOIN[3] ~= 'Unknown' and (' (' .. msg.command.JOIN[3] .. ')') or '')
+    .. ' has joined '
+    .. msg.command.JOIN[1]
 end
 
 local function format_part(msg)
   return msg.prefix.Nickname[1] .. ' has parted ' .. msg.command.PART[1]
 end
 
-local function format_privmsg(msg)
+local function format_privmsg(msg, nickname)
+  local is_draft = list_find(msg.tags, function(tag)
+    return tag[1] == 'time'
+  end) == nil
+
+  if is_draft then
+    return {
+      { '<', darkgray },
+      { nickname, darkgray },
+      { '>', darkgray },
+      ' ',
+      { msg.command.PRIVMSG[2], darkgray },
+    }
+  end
+
   return {
-    { '<',                    darkgray },
+    { '<', darkgray },
     { msg.prefix.Nickname[1], blue },
-    { '>',                    darkgray },
+    { '>', darkgray },
     ' ',
     msg.command.PRIVMSG[2],
   }
@@ -79,22 +117,6 @@ local function format_notice(msg)
       msg.command.NOTICE[2],
     }
   end
-end
-
----@generic T
----@param list table<integer, T>
----@param fn fun(v: T, k: integer, list: table<integer, T>): boolean
----@return table<integer, T>
-local function list_filter(list, fn)
-  local result = {}
-
-  for k, v in ipairs(list) do
-    if fn(v, k, list) then
-      table.insert(result, v)
-    end
-  end
-
-  return result
 end
 
 ---@generic T
@@ -183,10 +205,10 @@ local function format_user_mode(msg)
   end
 
   local plus =
-      list_map(list_filter(msg.command.UserMODE[2], is_added_mode), format_mode)
+    list_map(list_filter(msg.command.UserMODE[2], is_added_mode), format_mode)
 
   local minus =
-      list_map(list_filter(msg.command.UserMODE[2], is_removed_mode), format_mode)
+    list_map(list_filter(msg.command.UserMODE[2], is_removed_mode), format_mode)
 
   local noprefix = list_map(
     list_filter(msg.command.UserMODE[2], is_noprefix_mode),
@@ -202,13 +224,13 @@ local function format_user_mode(msg)
   }
 end
 
-local function format_message(msg)
+local function format_message(msg, nickname)
   if msg.command.JOIN then
     return format_join(msg)
   elseif msg.command.PART then
     return format_part(msg)
   elseif msg.command.PRIVMSG then
-    return format_privmsg(msg)
+    return format_privmsg(msg, nickname)
   elseif msg.command.NOTICE then
     return format_notice(msg)
   elseif msg.command.ChannelMODE then
@@ -217,8 +239,8 @@ local function format_message(msg)
     return format_user_mode(msg)
   elseif msg.command.Response then
     if
-        msg.command.Response[1] == 'RPL_NAMREPLY'
-        or msg.command.Response[1] == 'RPL_ENDOFNAMES'
+      msg.command.Response[1] == 'RPL_NAMREPLY'
+      or msg.command.Response[1] == 'RPL_ENDOFNAMES'
     then
       return nil
     end
@@ -256,7 +278,7 @@ end
 
 local function get_time_from_iso_string(str)
   local year, month, day, hour, minute, second =
-      str:match('(%d%d%d%d)-(%d%d)-(%d%d)T(%d%d):(%d%d):(%d%d)')
+    str:match('(%d%d%d%d)-(%d%d)-(%d%d)T(%d%d):(%d%d):(%d%d)')
   return {
     year = tonumber(year),
     month = tonumber(month),
@@ -309,12 +331,12 @@ function M.setup(config)
     end
   end)
 
-  tirc.on('format-message', function(msg)
+  tirc.on('format-message', function(msg, nickname)
     if config.debug then
       return dump_table(msg)
     end
 
-    local ok, str = pcall(format_message, msg)
+    local ok, str = pcall(format_message, msg, nickname)
 
     if ok then
       return str

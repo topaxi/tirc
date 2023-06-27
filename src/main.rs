@@ -28,6 +28,8 @@ async fn main() -> Result<(), anyhow::Error> {
         Capability::AccountNotify,
         Capability::ServerTime,
         Capability::UserhostInNames,
+        Capability::Batch,
+        Capability::Custom("labeled-response"),
     ])?;
 
     irc.identify()?;

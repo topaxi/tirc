@@ -121,9 +121,11 @@ impl Renderer {
         &self,
         lua: &mlua::Lua,
         message: &Message,
+        nickname: &str,
     ) -> Result<Vec<Span>, anyhow::Error> {
         let message = to_lua_message(lua, message)?;
-        let v = config::emit_sync_callback(lua, ("format-message".to_string(), (message)))?;
+        let v =
+            config::emit_sync_callback(lua, ("format-message".to_string(), (message, nickname)))?;
 
         self.lua_value_to_spans(lua, v)
     }
@@ -157,7 +159,7 @@ impl Renderer {
                     .unwrap_or_else(|_| vec![]);
 
                 let message_spans = self
-                    .render_message(lua, message)
+                    .render_message(lua, message, &state.nickname)
                     .unwrap_or_else(|_| vec![Span::raw(message.to_string())]);
 
                 if message_spans.is_empty() {

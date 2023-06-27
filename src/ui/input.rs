@@ -1,10 +1,23 @@
+use std::{
+    fmt,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
 use crossterm::event::{Event as CrosstermEvent, KeyCode};
-use irc::{client::prelude::Client, proto::Message};
+use irc::{
+    client::prelude::Client,
+    proto::{message::Tag, Command, Message},
+};
 use mlua::Lua;
 
 use crate::tui::Tui;
 
 use super::{Mode, State};
+
+static COUNTER: AtomicUsize = AtomicUsize::new(1);
+fn get_id() -> usize {
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
 
 #[derive(Debug)]
 pub enum Event<I> {
@@ -53,6 +66,19 @@ impl InputHandler {
         Ok(())
     }
 
+    fn send_privmsg<S1, S2>(&self, target: S1, message: S2) -> anyhow::Result<Message>
+    where
+        S1: fmt::Display,
+        S2: fmt::Display,
+    {
+        let mut message: Message = Command::PRIVMSG(target.to_string(), message.to_string()).into();
+
+        message.tags = Some(vec![Tag("label".to_string(), Some(get_id().to_string()))]);
+
+        self.irc.send(message.clone())?;
+        Ok(message)
+    }
+
     fn handle_command(&mut self, state: &mut State) -> Result<(), anyhow::Error> {
         state.mode = Mode::Normal;
 
@@ -66,7 +92,7 @@ impl InputHandler {
                         state.set_current_buffer(target);
 
                         if !message.trim().is_empty() {
-                            self.irc.send_privmsg(target, message)?;
+                            state.push_message(self.send_privmsg(target, message)?)
                         }
                     }
                     [target] => {
@@ -157,7 +183,7 @@ impl InputHandler {
                             let message = self.ui.input().value();
                             let current_buffer = &state.current_buffer;
 
-                            self.irc.send_privmsg(current_buffer, message)?;
+                            state.push_message(self.send_privmsg(current_buffer, message)?)
                         }
                         _ => {}
                     }

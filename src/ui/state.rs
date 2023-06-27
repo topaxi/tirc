@@ -95,6 +95,35 @@ impl State {
     }
 
     fn push_message_to_buffer(&mut self, buffer_name: &str, message: Message) {
+        let tags = message.tags.clone().unwrap_or_default();
+        let label = tags.iter().find(|tag| tag.0 == "label");
+
+        if let Some(label) = label {
+            // Find index of message with same tag label
+            let index = self
+                .buffers
+                .get(buffer_name)
+                .unwrap()
+                .iter()
+                .position(|(_, m)| {
+                    let tags = m.tags.clone().unwrap_or_default();
+
+                    tags.iter()
+                        .find(|tag| tag.0 == "label")
+                        .map(|tag| tag.1 == label.1)
+                        .unwrap_or(false)
+                });
+
+            if let Some(index) = index {
+                // Remove old message
+                let buffer = self.buffers.get_mut(buffer_name).unwrap();
+
+                buffer[index].1 = message;
+
+                return;
+            }
+        }
+
         self.buffers
             .get_mut(buffer_name)
             .unwrap()
