@@ -44,7 +44,11 @@ pub struct TircConfig {
 
 fn get_default_config() -> &'static str {
     indoc! {"
-        local config = {}
+        local theme = require('tirc.tui.theme.default')
+
+        local config = {
+            debug = false,
+        }
 
         config.servers = {
           {
@@ -55,6 +59,8 @@ fn get_default_config() -> &'static str {
             autojoin = { '#tirc' },
           },
         }
+
+        theme.setup(config)
 
         return config
     "}
@@ -188,8 +194,6 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
         let globals = lua.globals();
         let tirc_mod = get_or_create_module(&lua, "tirc")?;
 
-        create_tirc_theme_lua_module(&lua)?;
-
         tirc_mod.set("config_dir", config_dirname.display().to_string())?;
         tirc_mod.set("version", get_version_lua_value(&lua))?;
         tirc_mod.set("on", lua.create_function(register_event)?)?;
@@ -206,6 +210,18 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
         prefix_path(&mut path_array, config_dirname);
 
         package.set("path", path_array.join(";"))?;
+
+        create_tirc_theme_lua_module(&lua)?;
+
+        let default_theme_module: Table = lua
+            .load(include_str!("../tui/lua/default_theme.lua"))
+            .set_name("{builtin}/tui/lua/default_theme.lua")?
+            .call(())?;
+
+        globals
+            .get::<_, Table>("package")?
+            .get::<_, Table>("loaded")?
+            .set("tirc.tui.theme.default", default_theme_module)?;
 
         let value: Value = lua
             .load(&config_lua_code)

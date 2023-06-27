@@ -82,7 +82,7 @@ async fn main() -> Result<(), anyhow::Error> {
 }
 
 async fn poll_input(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), failure::Error> {
-    let tick_rate = Duration::from_millis(200);
+    let tick_rate = Duration::from_millis(1000);
     let mut last_tick = Instant::now();
 
     loop {
