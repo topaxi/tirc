@@ -113,18 +113,29 @@ where
     }
 }
 
-pub fn get_or_create_module<'lua>(lua: &'lua Lua, name: &str) -> anyhow::Result<mlua::Table<'lua>> {
+pub fn get_loaded_modules(lua: &Lua) -> mlua::Result<mlua::Table<'_>> {
     let globals = lua.globals();
     let package: Table = globals.get("package")?;
     let loaded: Table = package.get("loaded")?;
+    Ok(loaded)
+}
+
+pub fn set_loaded_modules<'lua>(
+    lua: &Lua,
+    name: &str,
+    module: mlua::Table<'lua>,
+) -> anyhow::Result<mlua::Table<'lua>> {
+    let loaded: Table = get_loaded_modules(lua)?;
+    loaded.set(name, module.clone())?;
+    Ok(module)
+}
+
+pub fn get_or_create_module<'lua>(lua: &'lua Lua, name: &str) -> anyhow::Result<mlua::Table<'lua>> {
+    let loaded: Table = get_loaded_modules(lua)?;
 
     let module = loaded.get(name)?;
     match module {
-        Value::Nil => {
-            let module = lua.create_table()?;
-            loaded.set(name, module.clone())?;
-            Ok(module)
-        }
+        Value::Nil => set_loaded_modules(lua, name, lua.create_table()?),
         Value::Table(table) => Ok(table),
         wat => anyhow::bail!(
             "cannot register module {} as package.loaded.{} is already set to a value of type {}",
@@ -218,10 +229,7 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
             .set_name("{builtin}/tui/lua/default_theme.lua")?
             .call(())?;
 
-        globals
-            .get::<_, Table>("package")?
-            .get::<_, Table>("loaded")?
-            .set("tirc.tui.theme.default", default_theme_module)?;
+        set_loaded_modules(&lua, "tirc.tui.theme.default", default_theme_module)?;
 
         let value: Value = lua
             .load(&config_lua_code)
