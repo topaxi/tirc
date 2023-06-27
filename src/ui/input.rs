@@ -60,12 +60,28 @@ impl InputHandler {
 
         match command[..] {
             ["m" | "msg", target_and_message] => {
+                match target_and_message.splitn(2, ' ').collect::<Vec<&str>>()[..] {
+                    [target, message] => {
+                        state.create_buffer_if_not_exists(target);
+                        state.set_current_buffer(target);
+
+                        if !message.trim().is_empty() {
+                            self.irc.send_privmsg(target, message)?;
+                        }
+                    }
+                    [target] => {
+                        state.create_buffer_if_not_exists(target);
+                        state.set_current_buffer(target);
+                    }
+                    _ => {}
+                }
+            }
+            ["notice", target_and_message] => {
                 if let [target, message] =
                     target_and_message.splitn(2, ' ').collect::<Vec<&str>>()[..]
                 {
                     state.create_buffer_if_not_exists(target);
-                    state.set_current_buffer(target);
-                    self.irc.send_privmsg(target, message)?;
+                    self.irc.send_notice(target, message)?;
                 }
             }
             ["q" | "quit"] => {
