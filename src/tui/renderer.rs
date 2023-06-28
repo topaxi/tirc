@@ -317,4 +317,26 @@ mod tests {
         assert_eq!(spans[1].content, ", ");
         assert_eq!(spans[2].content, "World!");
     }
+
+    #[test]
+    #[ignore]
+    fn test_lua_value_to_spans_deeply_nested() {
+        use super::*;
+        let renderer = Renderer::new();
+        let lua = mlua::Lua::new();
+        let value = lua
+            .load(indoc! {"
+                { 'a', { 'b', 'c', { 'd', 'e' } }, 'f' }
+            "})
+            .eval()
+            .unwrap();
+        let spans = renderer.lua_value_to_spans(&lua, value).unwrap();
+        assert_eq!(spans.len(), 6);
+        assert_eq!(spans[0].content, "a");
+        assert_eq!(spans[1].content, "b");
+        assert_eq!(spans[2].content, "c");
+        assert_eq!(spans[3].content, "d");
+        assert_eq!(spans[4].content, "e");
+        assert_eq!(spans[5].content, "f");
+    }
 }
