@@ -4,14 +4,13 @@ local theme = require('tirc.tui.theme')
 
 local M = {}
 
+local white = theme.style { fg = '#ffffff' }
 local blue = theme.style { fg = 'blue' }
 local green = theme.style { fg = 'green' }
 local darkgray = theme.style { fg = 'darkgray' }
 
 local server_notice_icon = {
-  { '-', blue },
-  { '!', theme.style { fg = '#ffffff' } },
-  { '-', blue },
+  { { '-', { '!', white }, '-' }, blue },
   ' ',
 }
 

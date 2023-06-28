@@ -39,53 +39,67 @@ impl Renderer {
             );
     }
 
-    fn table_to_spans(&self, lua: &mlua::Lua, table: mlua::Table) -> mlua::Result<Vec<Span>> {
-        let mut spans = vec![];
-
-        for v in table.sequence_values::<mlua::Value>() {
-            let v = v?;
-
-            match v {
-                mlua::Value::String(v) => {
-                    spans.push(Span::raw(v.to_str()?.to_owned()));
-                }
-                mlua::Value::Table(v) => {
-                    let str = v.get::<_, Option<String>>(1)?;
-                    let style = v.get::<_, Option<mlua::Table>>(2)?;
-
-                    if let Some(str) = str {
-                        if let Some(style) = style {
-                            let style: Style = lua.from_value(mlua::Value::Table(style))?;
-
-                            spans.push(Span::styled(str, style));
-                        } else {
-                            spans.push(Span::from(str));
-                        }
-                    }
-                }
-                _ => {
-                    return Err(mlua::Error::external(anyhow::anyhow!(
-                        "table must be a string or a table with a string and style"
-                    )))
-                }
-            }
-        }
-
-        Ok(spans)
-    }
-
     fn lua_value_to_spans(
         &self,
         lua: &mlua::Lua,
         value: mlua::Value,
     ) -> Result<Vec<Span>, anyhow::Error> {
-        match &value {
-            mlua::Value::Nil => Ok(vec![]),
-            mlua::Value::String(v) => Ok(vec![Span::raw(v.to_str()?.to_owned())]),
-            mlua::Value::Table(tbl) => Ok(self.table_to_spans(lua, tbl.to_owned())?),
-            _ => Err(anyhow::anyhow!(
-                "render-message callback must return a string or nil"
-            )),
+        let mut spans = vec![];
+        Self::flatten_lua_value(lua, value, &mut spans, None)?;
+        Ok(spans)
+    }
+
+    fn flatten_lua_value(
+        lua: &mlua::Lua,
+        value: mlua::Value,
+        spans: &mut Vec<Span>,
+        parent_style: Option<Style>,
+    ) -> mlua::Result<()> {
+        match value {
+            mlua::Value::String(str) => {
+                spans.push(Self::string_to_span(str.to_str()?.to_owned(), parent_style));
+            }
+            mlua::Value::Table(v) => {
+                for v in v.sequence_values::<mlua::Value>() {
+                    let v = v?;
+                    match v {
+                        mlua::Value::Table(v) => {
+                            let value = v.get::<_, mlua::Value>(1)?;
+                            let style = v.get::<_, Option<mlua::Table>>(2)?;
+                            let style = if let Some(style) = style {
+                                let style = lua.from_value::<Style>(mlua::Value::Table(style))?;
+
+                                // Apply parent style onto this style
+                                let style = if let Some(parent_style) = parent_style {
+                                    parent_style.patch(style)
+                                } else {
+                                    style
+                                };
+
+                                Some(style)
+                            } else {
+                                parent_style
+                            };
+
+                            Self::flatten_lua_value(lua, value, spans, style)?;
+                        }
+                        _ => {
+                            Self::flatten_lua_value(lua, v, spans, parent_style)?;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn string_to_span<'a>(str: String, style: Option<Style>) -> Span<'a> {
+        if let Some(style) = style {
+            Span::styled(str, style)
+        } else {
+            Span::raw(str)
         }
     }
 
