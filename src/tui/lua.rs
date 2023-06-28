@@ -6,7 +6,7 @@ use mlua::LuaSerdeExt;
 use tui::style::Color;
 
 fn get_tirc_theme_module(lua: &mlua::Lua) -> mlua::Table {
-    get_or_create_module(lua, "tirc.tui.theme").expect("Unable to create tirc.theme module")
+    get_or_create_module(lua, "tirc.tui.theme").expect("Unable to create tirc.tui.theme module")
 }
 
 pub fn create_tirc_theme_lua_module(lua: &mlua::Lua) -> mlua::Result<mlua::Table> {
