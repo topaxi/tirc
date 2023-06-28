@@ -65,6 +65,7 @@ impl Renderer {
                     match v {
                         mlua::Value::Table(v) => {
                             let value = v.get::<_, mlua::Value>(1)?;
+                            // TODO: If second arg is not a Style, we should recurse further
                             let style = v.get::<_, Option<mlua::Table>>(2)?;
                             let style = if let Some(style) = style {
                                 let style = lua.from_value::<Style>(mlua::Value::Table(style))?;
@@ -274,5 +275,46 @@ impl Renderer {
         self.render_messages(f, state, lua, chunks[0]);
         self.render_buffer_bar(f, state, chunks[1]);
         self.render_input(f, state, input, chunks[2]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+
+    #[test]
+    fn test_lua_value_to_spans() {
+        use super::*;
+        let renderer = Renderer::new();
+        let lua = mlua::Lua::new();
+        let value = lua
+            .load(indoc! {"
+                { 'Hello', ', ', 'World!' }
+            "})
+            .eval()
+            .unwrap();
+        let spans = renderer.lua_value_to_spans(&lua, value).unwrap();
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "Hello");
+        assert_eq!(spans[1].content, ", ");
+        assert_eq!(spans[2].content, "World!");
+    }
+
+    #[test]
+    fn test_lua_value_to_spans_nested() {
+        use super::*;
+        let renderer = Renderer::new();
+        let lua = mlua::Lua::new();
+        let value = lua
+            .load(indoc! {"
+                { 'Hello', { ', ' }, 'World!' }
+            "})
+            .eval()
+            .unwrap();
+        let spans = renderer.lua_value_to_spans(&lua, value).unwrap();
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "Hello");
+        assert_eq!(spans[1].content, ", ");
+        assert_eq!(spans[2].content, "World!");
     }
 }
