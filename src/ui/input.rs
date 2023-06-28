@@ -181,9 +181,12 @@ impl InputHandler {
                         }
                         Mode::Insert => {
                             let message = self.ui.input().value();
-                            let current_buffer = &state.current_buffer;
 
-                            state.push_message(self.send_privmsg(current_buffer, message)?)
+                            if !message.trim().is_empty() {
+                                let current_buffer = &state.current_buffer;
+
+                                state.push_message(self.send_privmsg(current_buffer, message)?)
+                            }
                         }
                         _ => {}
                     }
