@@ -16,7 +16,7 @@ jobs:
     steps:
       - run: sudo apt install -y libluajit-5.1-dev
       - run: curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
-      - run: cargo binstall cargo-nextest --secure
+      - run: cargo binstall cargo-nextest --secure -y
       - uses: actions/checkout@v3
       - name: Build
         run: cargo build --verbose
