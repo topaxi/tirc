@@ -110,58 +110,37 @@ local function format_mode(mode)
   end
 end
 
-local function format_channel_mode(msg)
+local function format_user_or_channel_mode(msg, mode, prefix)
   local plus = utils.list_map(
-    utils.list_filter(msg.command.ChannelMODE[2], is_added_mode),
+    utils.list_filter(msg.command[mode][2], is_added_mode),
     format_mode
   )
 
   local minus = utils.list_map(
-    utils.list_filter(msg.command.ChannelMODE[2], is_removed_mode),
+    utils.list_filter(msg.command[mode][2], is_removed_mode),
     format_mode
   )
 
   local noprefix = utils.list_map(
-    utils.list_filter(msg.command.ChannelMODE[2], is_noprefix_mode),
+    utils.list_filter(msg.command[mode][2], is_noprefix_mode),
     format_mode
   )
 
   return {
-    'cmode/',
-    msg.command.ChannelMODE[1],
+    prefix .. '/',
+    msg.command[mode][1],
     #plus > 0 and ' [' .. table.concat(plus, ' ') .. ']' or '',
     #minus > 0 and ' [' .. table.concat(minus, ' ') .. ']' or '',
     #noprefix > 0 and ' [' .. table.concat(noprefix, ' ') .. ']' or '',
   }
 end
 
+local function format_channel_mode(msg)
+  return format_user_or_channel_mode(msg, 'ChannelMODE', 'cmode')
+end
+
 local function format_user_mode(msg)
-  if false then
-    return utils.dump_table(msg)
-  end
-
-  local plus = utils.list_map(
-    utils.list_filter(msg.command.UserMODE[2], is_added_mode),
-    format_mode
-  )
-
-  local minus = utils.list_map(
-    utils.list_filter(msg.command.UserMODE[2], is_removed_mode),
-    format_mode
-  )
-
-  local noprefix = utils.list_map(
-    utils.list_filter(msg.command.UserMODE[2], is_noprefix_mode),
-    format_mode
-  )
-
-  return {
-    'umode/',
-    msg.command.UserMODE[1],
-    #plus > 0 and ' [' .. table.concat(plus, ' ') .. ']' or '',
-    #minus > 0 and ' [' .. table.concat(minus, ' ') .. ']' or '',
-    #noprefix > 0 and ' [' .. table.concat(noprefix, ' ') .. ']' or '',
-  }
+  return format_user_or_channel_mode(msg, 'UserMODE', 'umode')
 end
 
 local function format_message(msg, nickname)
