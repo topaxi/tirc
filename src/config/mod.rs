@@ -224,9 +224,16 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
 
         create_tirc_theme_lua_module(&lua)?;
 
+        let utils_module: Table = lua
+            .load(include_str!("../../lua/tirc/utils.lua"))
+            .set_name("{builtin}/tirc/lua/utils.lua")?
+            .call(())?;
+
+        set_loaded_modules(&lua, "tirc.utils", utils_module)?;
+
         let default_theme_module: Table = lua
-            .load(include_str!("../tui/lua/default_theme.lua"))
-            .set_name("{builtin}/tui/lua/default_theme.lua")?
+            .load(include_str!("../../lua/tirc/tui/default_theme.lua"))
+            .set_name("{builtin}/tirc/tui/default_theme.lua")?
             .call(())?;
 
         set_loaded_modules(&lua, "tirc.tui.theme.default", default_theme_module)?;

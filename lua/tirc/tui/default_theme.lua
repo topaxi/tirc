@@ -1,61 +1,11 @@
 local tirc = require('tirc')
+local utils = require('tirc.utils')
 local theme = require('tirc.tui.theme')
 
 local M = {}
 
----@param t table
----@return string
-local function dump_table(t)
-  local s = '{ '
-  for k, v in pairs(t) do
-    if type(v) == 'table' then
-      s = s .. k .. ' = ' .. dump_table(v) .. ', '
-    else
-      s = s .. k .. ' = ' .. tostring(v) .. ', '
-    end
-  end
-  return s .. '}'
-end
-
-local function list_append(a, ...)
-  for _, b in ipairs { ... } do
-    for _, v in ipairs(b) do
-      table.insert(a, v)
-    end
-  end
-
-  return a
-end
-
-local function list_concat(...)
-  return list_append({}, ...)
-end
-
----@generic T
----@param list table<integer, T>
----@param fn fun(v: T, k: integer, list: table<integer, T>): boolean
----@return table<integer, T>
-local function list_filter(list, fn)
-  local result = {}
-
-  for k, v in ipairs(list) do
-    if fn(v, k, list) then
-      table.insert(result, v)
-    end
-  end
-
-  return result
-end
-
-local function list_find(list, fn)
-  for k, v in ipairs(list) do
-    if fn(v, k, list) then
-      return v
-    end
-  end
-end
-
 local blue = theme.style { fg = 'blue' }
+local green = theme.style { fg = 'green' }
 local darkgray = theme.style { fg = 'darkgray' }
 
 local server_notice_icon = {
@@ -77,7 +27,7 @@ local function format_part(msg)
 end
 
 local function format_privmsg(msg, nickname)
-  local is_draft = list_find(msg.tags, function(tag)
+  local is_draft = utils.list_find(msg.tags, function(tag)
     return tag[1] == 'time'
   end) == nil
 
@@ -103,7 +53,7 @@ end
 local function format_notice(msg)
   if msg.prefix.ServerName then
     return {
-      { '!' .. msg.prefix.ServerName, theme.style { fg = 'green' } },
+      { '!' .. msg.prefix.ServerName, green },
       ' ',
       msg.command.NOTICE[2],
     }
@@ -117,19 +67,6 @@ local function format_notice(msg)
       msg.command.NOTICE[2],
     }
   end
-end
-
----@generic T
----@generic U
----@param list table<integer, T>
----@param fn fun(v: T, k: integer, list: table<integer, T>): U
----@return table<integer, U>
-local function list_map(list, fn)
-  local result = {}
-  for k, v in ipairs(list) do
-    table.insert(result, fn(v, k, list))
-  end
-  return result
 end
 
 local function is_string(v)
@@ -175,18 +112,18 @@ local function format_mode(mode)
 end
 
 local function format_channel_mode(msg)
-  local plus = list_map(
-    list_filter(msg.command.ChannelMODE[2], is_added_mode),
+  local plus = utils.list_map(
+    utils.list_filter(msg.command.ChannelMODE[2], is_added_mode),
     format_mode
   )
 
-  local minus = list_map(
-    list_filter(msg.command.ChannelMODE[2], is_removed_mode),
+  local minus = utils.list_map(
+    utils.list_filter(msg.command.ChannelMODE[2], is_removed_mode),
     format_mode
   )
 
-  local noprefix = list_map(
-    list_filter(msg.command.ChannelMODE[2], is_noprefix_mode),
+  local noprefix = utils.list_map(
+    utils.list_filter(msg.command.ChannelMODE[2], is_noprefix_mode),
     format_mode
   )
 
@@ -201,17 +138,21 @@ end
 
 local function format_user_mode(msg)
   if false then
-    return dump_table(msg)
+    return utils.dump_table(msg)
   end
 
-  local plus =
-    list_map(list_filter(msg.command.UserMODE[2], is_added_mode), format_mode)
+  local plus = utils.list_map(
+    utils.list_filter(msg.command.UserMODE[2], is_added_mode),
+    format_mode
+  )
 
-  local minus =
-    list_map(list_filter(msg.command.UserMODE[2], is_removed_mode), format_mode)
+  local minus = utils.list_map(
+    utils.list_filter(msg.command.UserMODE[2], is_removed_mode),
+    format_mode
+  )
 
-  local noprefix = list_map(
-    list_filter(msg.command.UserMODE[2], is_noprefix_mode),
+  local noprefix = utils.list_map(
+    utils.list_filter(msg.command.UserMODE[2], is_noprefix_mode),
     format_mode
   )
 
@@ -245,13 +186,13 @@ local function format_message(msg, nickname)
       return nil
     end
 
-    return list_concat(server_notice_icon, {
+    return utils.list_concat(server_notice_icon, {
       table.concat(msg.command.Response[2], ' ', 2),
     })
   elseif msg.command.PING or msg.command.PONG then
     return nil
   elseif msg.command.CAP then
-    return list_concat(server_notice_icon, {
+    return utils.list_concat(server_notice_icon, {
       'Capabilities ' .. msg.command.CAP[2] .. ' ' .. msg.command.CAP[3],
     })
     -- elseif msg.command.UserMODE then
@@ -333,7 +274,7 @@ function M.setup(config)
 
   tirc.on('format-message', function(msg, nickname)
     if config.debug then
-      return dump_table(msg)
+      return utils.dump_table(msg)
     end
 
     local ok, str = pcall(format_message, msg, nickname)
