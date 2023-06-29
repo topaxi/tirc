@@ -1,4 +1,5 @@
 local tirc = require('tirc')
+local date_time = require('tirc.date_time')
 local utils = require('tirc.utils')
 local theme = require('tirc.tui.theme')
 
@@ -209,45 +210,18 @@ local function get_time_from_tags(tags)
   end
 end
 
-local function get_time_from_iso_string(str)
-  local year, month, day, hour, minute, second =
-      str:match('(%d%d%d%d)-(%d%d)-(%d%d)T(%d%d):(%d%d):(%d%d)')
-  return {
-    year = tonumber(year),
-    month = tonumber(month),
-    day = tonumber(day),
-    hour = tonumber(hour),
-    minute = tonumber(minute),
-    second = tonumber(second),
-  }
-end
+local function format_time(dt, msg)
+  local time_tag = get_time_from_tags(msg.tags)
 
-local function format_iso_time_string(str)
-  local time = get_time_from_iso_string(str)
-  -- TODO: Adjust time to local time
-  return string.format('%02d:%02d:%02d', time.hour, time.minute, time.second)
-end
+  if time_tag then
+    dt = date_time.parse_from_rfc3339(time_tag)
+  end
 
-local function format_time(date_time, _msg)
-  -- local time_tag = get_time_from_tags(msg.tags)
-
-  -- if time_tag then
-  --   return {
-  --     format_iso_time_string(time_tag),
-  --     { ' ▏', darkgray },
-  --   }
-  -- end
-
-  local is_1337 = date_time.hour == 13 and date_time.minute == 37
+  local is_1337 = dt.hour == 13 and dt.minute == 37
 
   return {
     {
-      string.format(
-        '%02d:%02d:%02d',
-        date_time.hour,
-        date_time.minute,
-        date_time.second
-      ),
+      string.format('%02d:%02d:%02d', dt.hour, dt.minute, dt.second),
       is_1337 and red or nil,
     },
     ' ▏',
@@ -255,12 +229,12 @@ local function format_time(date_time, _msg)
 end
 
 function M.setup(config)
-  tirc.on('format-time', function(date_time, msg)
+  tirc.on('format-time', function(dt, msg)
     if config.debug then
       return nil
     end
 
-    local ok, str = pcall(format_time, date_time, msg)
+    local ok, str = pcall(format_time, dt, msg)
 
     if ok then
       return str

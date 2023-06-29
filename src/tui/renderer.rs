@@ -1,6 +1,6 @@
 use std::io::Stdout;
 
-use chrono::{DateTime, Datelike, Timelike};
+use chrono::DateTime;
 use irc::proto::Message;
 use mlua::LuaSerdeExt;
 use tui::{
@@ -14,6 +14,7 @@ use tui_input::Input;
 
 use crate::{
     config,
+    lua::date_time::date_time_to_table,
     ui::{Mode, State},
 };
 
@@ -118,21 +119,6 @@ impl Renderer {
         }
     }
 
-    fn date_time_to_table<'a>(
-        &'a self,
-        lua: &'a mlua::Lua,
-        date_time: &DateTime<chrono::Local>,
-    ) -> mlua::Result<mlua::Table> {
-        let table = lua.create_table()?;
-        table.set("year", date_time.year())?;
-        table.set("month", date_time.month())?;
-        table.set("day", date_time.day())?;
-        table.set("hour", date_time.hour())?;
-        table.set("minute", date_time.minute())?;
-        table.set("second", date_time.second())?;
-        Ok(table)
-    }
-
     fn render_time(
         &self,
         lua: &mlua::Lua,
@@ -140,7 +126,7 @@ impl Renderer {
         message: &Message,
     ) -> Result<Vec<Span>, anyhow::Error> {
         let message = to_lua_message(lua, message)?;
-        let date_time = self.date_time_to_table(lua, date_time)?;
+        let date_time = date_time_to_table(lua, date_time)?;
         let v = config::emit_sync_callback(lua, ("format-time".to_string(), (date_time, message)))?;
 
         self.lua_value_to_spans(lua, v)

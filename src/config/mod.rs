@@ -5,7 +5,7 @@ use indoc::indoc;
 use mlua::{Lua, LuaSerdeExt, Table, ToLuaMulti, Value};
 use serde::Deserialize;
 
-use crate::tui::create_tirc_theme_lua_module;
+use crate::{lua::date_time::create_date_time_module, tui::create_tirc_theme_lua_module};
 
 #[inline]
 fn bool_true() -> bool {
@@ -222,6 +222,7 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
 
         package.set("path", path_array.join(";"))?;
 
+        create_date_time_module(&lua)?;
         create_tirc_theme_lua_module(&lua)?;
 
         let utils_module: Table = lua
