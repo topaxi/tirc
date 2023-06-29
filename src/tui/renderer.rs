@@ -1,7 +1,5 @@
 use std::io::Stdout;
 
-use chrono::DateTime;
-use irc::proto::Message;
 use mlua::LuaSerdeExt;
 use tui::{
     backend::CrosstermBackend,
@@ -122,12 +120,13 @@ impl Renderer {
     fn render_time(
         &self,
         lua: &mlua::Lua,
-        date_time: &DateTime<chrono::Local>,
-        message: &Message,
+        date_time: mlua::Table,
+        message: &mlua::Table,
     ) -> Result<Vec<Span>, anyhow::Error> {
-        let message = to_lua_message(lua, message)?;
-        let date_time = date_time_to_table(lua, date_time)?;
-        let v = config::emit_sync_callback(lua, ("format-time".to_string(), (date_time, message)))?;
+        let v = config::emit_sync_callback(
+            lua,
+            ("format-time".to_string(), (date_time, message.clone())),
+        )?;
 
         self.lua_value_to_spans(lua, v)
     }
@@ -135,12 +134,13 @@ impl Renderer {
     fn render_message(
         &self,
         lua: &mlua::Lua,
-        message: &Message,
+        message: &mlua::Table,
         nickname: &str,
     ) -> Result<Vec<Span>, anyhow::Error> {
-        let message = to_lua_message(lua, message)?;
-        let v =
-            config::emit_sync_callback(lua, ("format-message".to_string(), (message, nickname)))?;
+        let v = config::emit_sync_callback(
+            lua,
+            ("format-message".to_string(), (message.clone(), nickname)),
+        )?;
 
         self.lua_value_to_spans(lua, v)
     }
@@ -162,20 +162,22 @@ impl Renderer {
         let messages: Vec<_> = current_buffer_messages
             .iter()
             .rev()
-            // TODO: Only convert to lua value once
-            //.map(|(date_time, message)| {
-            //    let message = to_lua_message(lua, message).unwrap();
-            //    let date_time = lua.to_value(&date_time).unwrap();
-            //    (date_time, message)
-            //})
+            .map(|(date_time, message)| {
+                let message = to_lua_message(lua, message).unwrap();
+                let date_time = date_time_to_table(lua, date_time).unwrap();
+
+                (date_time, message)
+            })
             .map(|(date_time, message)| {
                 let time_spans = self
-                    .render_time(lua, date_time, message)
+                    .render_time(lua, date_time, &message)
                     .unwrap_or_else(|_| vec![]);
 
                 let message_spans = self
-                    .render_message(lua, message, &state.nickname)
-                    .unwrap_or_else(|_| vec![Span::raw(message.to_string())]);
+                    .render_message(lua, &message, &state.nickname)
+                    .unwrap_or_else(|_| {
+                        vec![Span::raw(message.get::<_, String>("__str").unwrap())]
+                    });
 
                 if message_spans.is_empty() {
                     return message_spans;
