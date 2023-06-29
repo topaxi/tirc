@@ -7,6 +7,7 @@ local M = {}
 local white = theme.style { fg = '#ffffff' }
 local blue = theme.style { fg = 'blue' }
 local green = theme.style { fg = 'green' }
+local red = theme.style { fg = 'red' }
 local darkgray = theme.style { fg = 'darkgray' }
 
 local server_notice_icon = {
@@ -15,14 +16,26 @@ local server_notice_icon = {
 }
 
 local function format_join(msg)
-  return msg.prefix.Nickname[1]
-    .. (msg.command.JOIN[3] and msg.command.JOIN[3] ~= 'Unknown' and (' (' .. msg.command.JOIN[3] .. ')') or '')
-    .. ' has joined '
-    .. msg.command.JOIN[1]
+  return {
+    { msg.prefix.Nickname[1], blue },
+    {
+      msg.command.JOIN[3] and msg.command.JOIN[3] ~= 'Unknown' and {
+        { ' (',                darkgray },
+        { msg.command.JOIN[3], blue },
+        { ')',                 darkgray },
+      } or '',
+    },
+    ' has joined ',
+    { msg.command.JOIN[1],    green },
+  }
 end
 
 local function format_part(msg)
-  return msg.prefix.Nickname[1] .. ' has parted ' .. msg.command.PART[1]
+  return {
+    { msg.prefix.Nickname[1], blue },
+    ' has parted ',
+    { msg.command.PART[1],    green },
+  }
 end
 
 local function format_privmsg(msg, nickname)
@@ -32,18 +45,18 @@ local function format_privmsg(msg, nickname)
 
   if is_draft then
     return {
-      { '<', darkgray },
+      { '<',      darkgray },
       { nickname, darkgray },
-      { '>', darkgray },
+      { '>',      darkgray },
       ' ',
       { msg.command.PRIVMSG[2], darkgray },
     }
   end
 
   return {
-    { '<', darkgray },
+    { '<',                    darkgray },
     { msg.prefix.Nickname[1], blue },
-    { '>', darkgray },
+    { '>',                    darkgray },
     ' ',
     msg.command.PRIVMSG[2],
   }
@@ -110,6 +123,11 @@ local function format_mode(mode)
   end
 end
 
+local mode_type_colors = {
+  UserMODE = blue,
+  ChannelMODE = green,
+}
+
 local function format_user_or_channel_mode(msg, mode, prefix)
   local plus = utils.list_map(
     utils.list_filter(msg.command[mode][2], is_added_mode),
@@ -128,10 +146,10 @@ local function format_user_or_channel_mode(msg, mode, prefix)
 
   return {
     prefix .. '/',
-    msg.command[mode][1],
-    #plus > 0 and ' [' .. table.concat(plus, ' ') .. ']' or '',
-    #minus > 0 and ' [' .. table.concat(minus, ' ') .. ']' or '',
-    #noprefix > 0 and ' [' .. table.concat(noprefix, ' ') .. ']' or '',
+    { msg.command[mode][1], mode_type_colors[mode] },
+    #plus > 0 and { ' [', table.concat(plus, ' '), ']' } or '',
+    #minus > 0 and { ' [', table.concat(minus, ' '), ']' } or '',
+    #noprefix > 0 and { ' [', table.concat(noprefix, ' '), ']' } or '',
   }
 end
 
@@ -158,8 +176,8 @@ local function format_message(msg, nickname)
     return format_user_mode(msg)
   elseif msg.command.Response then
     if
-      msg.command.Response[1] == 'RPL_NAMREPLY'
-      or msg.command.Response[1] == 'RPL_ENDOFNAMES'
+        msg.command.Response[1] == 'RPL_NAMREPLY'
+        or msg.command.Response[1] == 'RPL_ENDOFNAMES'
     then
       return nil
     end
@@ -197,7 +215,7 @@ end
 
 local function get_time_from_iso_string(str)
   local year, month, day, hour, minute, second =
-    str:match('(%d%d%d%d)-(%d%d)-(%d%d)T(%d%d):(%d%d):(%d%d)')
+      str:match('(%d%d%d%d)-(%d%d)-(%d%d)T(%d%d):(%d%d):(%d%d)')
   return {
     year = tonumber(year),
     month = tonumber(month),
@@ -224,14 +242,19 @@ local function format_time(date_time, _msg)
   --   }
   -- end
 
+  local is_1337 = date_time.hour == 13 and date_time.minute == 37
+
   return {
-    string.format(
-      '%02d:%02d:%02d',
-      date_time.hour,
-      date_time.minute,
-      date_time.second
-    ),
-    { ' ▏', darkgray },
+    {
+      string.format(
+        '%02d:%02d:%02d',
+        date_time.hour,
+        date_time.minute,
+        date_time.second
+      ),
+      is_1337 and red or nil,
+    },
+    ' ▏',
   }
 end
 
