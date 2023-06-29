@@ -31,8 +31,8 @@ impl Renderer {
             .constraints(
                 [
                     Constraint::Min(0),
-                    Constraint::Length(1),
                     Constraint::Length(2),
+                    Constraint::Length(1),
                 ]
                 .as_ref(),
             );
@@ -258,6 +258,28 @@ impl Renderer {
         }
     }
 
+    fn render_users(
+        &self,
+        f: &mut tui::Frame<CrosstermBackend<Stdout>>,
+        state: &State,
+        rect: Rect,
+    ) {
+        let users = state
+            .users_in_current_buffer
+            .iter()
+            .map(|user| {
+                let style = Style::default().fg(Color::White);
+                ListItem::new(Span::styled(user.get_nickname(), style))
+            })
+            .collect::<Vec<_>>();
+        let list = List::new(users).block(
+            Block::default()
+                .title(state.current_buffer.to_owned())
+                .borders(Borders::LEFT),
+        );
+        f.render_widget(list, rect);
+    }
+
     pub fn render(
         &mut self,
         f: &mut tui::Frame<CrosstermBackend<Stdout>>,
@@ -269,9 +291,20 @@ impl Renderer {
         let size = f.size();
         let chunks = layout.split(size);
 
-        self.render_messages(f, state, lua, chunks[0]);
-        self.render_buffer_bar(f, state, chunks[1]);
-        self.render_input(f, state, input, chunks[2]);
+        if state.current_buffer != State::get_default_buffer_name() {
+            let layout_with_sidebar = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(90), Constraint::Percentage(10)].as_ref())
+                .split(chunks[0]);
+
+            self.render_users(f, state, layout_with_sidebar[1]);
+            self.render_messages(f, state, lua, layout_with_sidebar[0]);
+        } else {
+            self.render_messages(f, state, lua, chunks[0]);
+        }
+
+        self.render_buffer_bar(f, state, chunks[2]);
+        self.render_input(f, state, input, chunks[1]);
     }
 }
 

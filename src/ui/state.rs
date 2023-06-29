@@ -1,7 +1,10 @@
 use chrono::DateTime;
 use indexmap::IndexMap;
 
-use irc::proto::{Command, Message};
+use irc::{
+    client::data::User,
+    proto::{Command, Message},
+};
 
 #[derive(Clone, Copy, Debug)]
 pub enum Mode {
@@ -17,6 +20,7 @@ pub struct State {
     pub server: String,
     pub current_buffer: String,
     pub buffers: IndexMap<String, Vec<(DateTime<chrono::Local>, Message)>>,
+    pub users_in_current_buffer: Vec<User>,
 }
 
 impl Default for State {
@@ -41,10 +45,11 @@ impl State {
             server: String::new(),
             current_buffer: default_buffer_name,
             buffers,
+            users_in_current_buffer: vec![],
         }
     }
 
-    fn get_default_buffer_name() -> String {
+    pub fn get_default_buffer_name() -> String {
         String::from("(status)")
     }
 

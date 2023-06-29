@@ -57,6 +57,15 @@ impl InputHandler {
             }
         }
 
+        if state.current_buffer == State::get_default_buffer_name() {
+            state.users_in_current_buffer = vec![];
+        } else {
+            state.users_in_current_buffer = self
+                .irc
+                .list_users(&state.current_buffer)
+                .unwrap_or_default();
+        }
+
         Ok(())
     }
 
