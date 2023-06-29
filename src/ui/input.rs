@@ -111,6 +111,19 @@ impl InputHandler {
                     _ => {}
                 }
             }
+            ["me", message] => {
+                let message = format!("\x01ACTION {}\x01", message);
+                state.push_message(self.send_privmsg(&state.current_buffer, message)?);
+            }
+            ["desc" | "describe", target_and_message] => {
+                if let [target, message] =
+                    target_and_message.splitn(2, ' ').collect::<Vec<&str>>()[..]
+                {
+                    let message = format!("\x01ACTION {}\x01", message);
+                    state.create_buffer_if_not_exists(target);
+                    state.push_message(self.send_privmsg(target, message)?);
+                }
+            }
             ["notice", target_and_message] => {
                 if let [target, message] =
                     target_and_message.splitn(2, ' ').collect::<Vec<&str>>()[..]
@@ -128,6 +141,16 @@ impl InputHandler {
             }
             ["p" | "part", channel] => {
                 self.irc.send_part(channel)?;
+            }
+            ["n" | "nick", nickname] => {
+                // TODO: Update nickname in irc client, as it doesn't seem to update
+                self.irc.send(Command::NICK(nickname.to_owned()))?;
+            }
+            ["whois", nickname] => {
+                self.irc.send(Command::WHOIS(None, nickname.to_owned()))?;
+            }
+            ["list"] => {
+                self.irc.send(Command::LIST(None, None))?;
             }
             _ => {}
         }
