@@ -121,12 +121,9 @@ impl Renderer {
         &self,
         lua: &mlua::Lua,
         date_time: mlua::Table,
-        message: &mlua::Table,
+        message: mlua::Table,
     ) -> Result<Vec<Span>, anyhow::Error> {
-        let v = config::emit_sync_callback(
-            lua,
-            ("format-time".to_string(), (date_time, message.clone())),
-        )?;
+        let v = config::emit_sync_callback(lua, ("format-time".to_string(), (date_time, message)))?;
 
         self.lua_value_to_spans(lua, v)
     }
@@ -134,13 +131,11 @@ impl Renderer {
     fn render_message(
         &self,
         lua: &mlua::Lua,
-        message: &mlua::Table,
+        message: mlua::Table,
         nickname: &str,
     ) -> Result<Vec<Span>, anyhow::Error> {
-        let v = config::emit_sync_callback(
-            lua,
-            ("format-message".to_string(), (message.clone(), nickname)),
-        )?;
+        let v =
+            config::emit_sync_callback(lua, ("format-message".to_string(), (message, nickname)))?;
 
         self.lua_value_to_spans(lua, v)
     }
@@ -170,11 +165,11 @@ impl Renderer {
             })
             .map(|(date_time, message)| {
                 let time_spans = self
-                    .render_time(lua, date_time, &message)
+                    .render_time(lua, date_time, message.clone())
                     .unwrap_or_else(|_| vec![]);
 
                 let message_spans = self
-                    .render_message(lua, &message, &state.nickname)
+                    .render_message(lua, message.clone(), &state.nickname)
                     .unwrap_or_else(|_| {
                         vec![Span::raw(message.get::<_, String>("__str").unwrap())]
                     });
