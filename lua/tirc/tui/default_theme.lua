@@ -39,27 +39,48 @@ local function format_part(msg)
   }
 end
 
+local function format_privmsg_nickname(nickname, color)
+  return {
+    { '<',      darkgray },
+    { nickname, color },
+    { '>',      darkgray },
+  }
+end
+
+local function format_privmsg_action_nickname(nickname, color)
+  return { { '* ', nickname }, color }
+end
+
+local function format_privmsg_message(message)
+  return message
+end
+
 local function format_privmsg(msg, nickname)
   local is_draft = utils.list_find(msg.tags, function(tag)
     return tag[1] == 'time'
   end) == nil
 
+  local message_str = msg.command.PRIVMSG[2]
+  local is_action = message_str:sub(1, 8) == '\001ACTION '
+
+  if is_action then
+    message_str = message_str:sub(9, -2)
+  end
+
   if is_draft then
     return {
-      { '<',      darkgray },
-      { nickname, darkgray },
-      { '>',      darkgray },
+      is_action and format_privmsg_action_nickname(nickname, darkgray)
+      or format_privmsg_nickname(nickname, darkgray),
       ' ',
-      { msg.command.PRIVMSG[2], darkgray },
+      { format_privmsg_message(message_str), darkgray },
     }
   end
 
   return {
-    { '<',                    darkgray },
-    { msg.prefix.Nickname[1], blue },
-    { '>',                    darkgray },
+    is_action and format_privmsg_action_nickname(msg.prefix.Nickname[1], white)
+    or format_privmsg_nickname(msg.prefix.Nickname[1], blue),
     ' ',
-    msg.command.PRIVMSG[2],
+    format_privmsg_message(message_str),
   }
 end
 
