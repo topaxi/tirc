@@ -43,10 +43,10 @@ end
 
 ---@param nickname string
 ---@param style TircThemeStyle
-local function format_privmsg_nickname(nickname, color)
+local function format_privmsg_nickname(nickname, style)
   return {
     { '<',      darkgray },
-    { nickname, color },
+    { nickname, style },
     { '>',      darkgray },
   }
 end
@@ -158,7 +158,7 @@ local function format_mode(mode)
   end
 end
 
-local mode_type_colors = {
+local mode_type_styles = {
   UserMODE = blue,
   ChannelMODE = green,
 }
@@ -181,7 +181,7 @@ local function format_user_or_channel_mode(msg, mode, prefix)
 
   return {
     prefix .. '/',
-    { msg.command[mode][1], mode_type_colors[mode] },
+    { msg.command[mode][1], mode_type_styles[mode] },
     #plus > 0 and { ' [', table.concat(plus, ' '), ']' } or '',
     #minus > 0 and { ' [', table.concat(minus, ' '), ']' } or '',
     #noprefix > 0 and { ' [', table.concat(noprefix, ' '), ']' } or '',
