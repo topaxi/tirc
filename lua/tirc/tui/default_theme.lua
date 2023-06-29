@@ -191,10 +191,6 @@ local function format_message(msg, nickname)
     return utils.list_concat(server_notice_icon, {
       'Capabilities ' .. msg.command.CAP[2] .. ' ' .. msg.command.CAP[3],
     })
-    -- elseif msg.command.UserMODE then
-    --   local mode = msg.command.UerMode[2].Plus and '+' or '-';
-
-    --   return '-!- Mode change [' .. mode .. ']';
   end
 
   return tostring(msg)
