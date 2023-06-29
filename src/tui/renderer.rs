@@ -291,7 +291,7 @@ impl Renderer {
         let size = f.size();
         let chunks = layout.split(size);
 
-        if state.current_buffer != State::get_default_buffer_name() {
+        if state.users_in_current_buffer.len() > 1 {
             let layout_with_sidebar = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(90), Constraint::Percentage(10)].as_ref())
