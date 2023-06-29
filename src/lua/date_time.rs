@@ -2,7 +2,7 @@ use anyhow::anyhow;
 use chrono::{Datelike, Timelike};
 use mlua::Lua;
 
-use crate::config::get_or_create_module;
+use super::get_or_create_module;
 
 pub fn date_time_to_table<'a>(
     lua: &'a Lua,

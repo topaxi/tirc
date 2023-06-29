@@ -1,9 +1,10 @@
 use std::str::FromStr;
 
-use crate::config::get_or_create_module;
 use irc::proto::Message;
 use mlua::LuaSerdeExt;
 use tui::style::Color;
+
+use crate::lua::get_or_create_module;
 
 fn get_tirc_theme_module(lua: &mlua::Lua) -> mlua::Table {
     get_or_create_module(lua, "tirc.tui.theme").expect("Unable to create tirc.tui.theme module")
