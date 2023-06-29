@@ -148,9 +148,9 @@ end
 
 local function format_mode(mode)
   if mode.Plus then
-    return '+' .. format_mode_value(mode.Plus[1])
+    return { { '+', green }, format_mode_value(mode.Plus[1]) }
   elseif mode.Minus then
-    return '-' .. format_mode_value(mode.Minus[1])
+    return { { '-', red }, format_mode_value(mode.Minus[1]) }
   elseif mode.NoPrefix then
     return format_mode_value(mode.NoPrefix[1])
   end
@@ -161,28 +161,37 @@ local mode_type_styles = {
   ChannelMODE = green,
 }
 
+local function insert_every_second(tbl, element)
+  local new_tbl = {}
+
+  for _, v in ipairs(tbl) do
+    table.insert(new_tbl, v)
+    table.insert(new_tbl, element)
+  end
+
+  table.remove(new_tbl, #new_tbl)
+
+  return new_tbl
+end
+
+local function format_modes(modes, predicate)
+  return insert_every_second(
+    utils.list_map(utils.list_filter(modes, predicate), format_mode),
+    ' '
+  )
+end
+
 local function format_user_or_channel_mode(msg, mode, prefix)
-  local plus = utils.list_map(
-    utils.list_filter(msg.command[mode][2], is_added_mode),
-    format_mode
-  )
-
-  local minus = utils.list_map(
-    utils.list_filter(msg.command[mode][2], is_removed_mode),
-    format_mode
-  )
-
-  local noprefix = utils.list_map(
-    utils.list_filter(msg.command[mode][2], is_noprefix_mode),
-    format_mode
-  )
+  local plus = format_modes(msg.command[mode][2], is_added_mode)
+  local minus = format_modes(msg.command[mode][2], is_removed_mode)
+  local noprefix = format_modes(msg.command[mode][2], is_noprefix_mode)
 
   return {
     prefix .. '/',
     { msg.command[mode][1], mode_type_styles[mode] },
-    #plus > 0 and { ' [', table.concat(plus, ' '), ']' } or '',
-    #minus > 0 and { ' [', table.concat(minus, ' '), ']' } or '',
-    #noprefix > 0 and { ' [', table.concat(noprefix, ' '), ']' } or '',
+    #plus > 0 and { ' [', plus, ']' } or '',
+    #minus > 0 and { ' [', minus, ']' } or '',
+    #noprefix > 0 and { ' [', noprefix, ']' } or '',
   }
 end
 
