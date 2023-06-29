@@ -64,25 +64,39 @@ impl Renderer {
                     let v = v?;
                     match v {
                         mlua::Value::Table(v) => {
-                            let value = v.get::<_, mlua::Value>(1)?;
-                            // TODO: If second arg is not a Style, we should recurse further
-                            let style = v.get::<_, Option<mlua::Table>>(2)?;
-                            let style = if let Some(style) = style {
-                                let style = lua.from_value::<Style>(mlua::Value::Table(style))?;
-
-                                // Apply parent style onto this style
-                                let style = if let Some(parent_style) = parent_style {
-                                    parent_style.patch(style)
-                                } else {
-                                    style
-                                };
-
-                                Some(style)
-                            } else {
-                                parent_style
+                            let style = v.get::<_, Option<mlua::Value>>(2)?;
+                            let style = match style {
+                                Some(mlua::Value::Table(_)) => {
+                                    match lua.from_value::<Style>(style.unwrap()) {
+                                        Ok(style) => {
+                                            // Apply parent style onto this style
+                                            let style = if let Some(parent_style) = parent_style {
+                                                parent_style.patch(style)
+                                            } else {
+                                                style
+                                            };
+                                            Some(style)
+                                        }
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
                             };
 
-                            Self::flatten_lua_value(lua, value, spans, style)?;
+                            if let Some(style) = style {
+                                let value = v.get::<_, Option<mlua::Value>>(1)?;
+
+                                if let Some(value) = value {
+                                    Self::flatten_lua_value(lua, value, spans, Some(style))?;
+                                }
+                            } else {
+                                Self::flatten_lua_value(
+                                    lua,
+                                    mlua::Value::Table(v),
+                                    spans,
+                                    parent_style,
+                                )?;
+                            }
                         }
                         _ => {
                             Self::flatten_lua_value(lua, v, spans, parent_style)?;
@@ -282,6 +296,8 @@ impl Renderer {
 mod tests {
     use indoc::indoc;
 
+    use crate::tui::create_tirc_theme_lua_module;
+
     #[test]
     fn test_lua_value_to_spans() {
         use super::*;
@@ -319,7 +335,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_lua_value_to_spans_deeply_nested() {
         use super::*;
         let renderer = Renderer::new();
@@ -338,5 +353,45 @@ mod tests {
         assert_eq!(spans[3].content, "d");
         assert_eq!(spans[4].content, "e");
         assert_eq!(spans[5].content, "f");
+    }
+
+    #[test]
+    fn test_lua_value_to_styled_spans() -> anyhow::Result<(), anyhow::Error> {
+        use super::*;
+        let renderer = Renderer::new();
+        let lua = mlua::Lua::new();
+        create_tirc_theme_lua_module(&lua)?;
+        let value = lua
+            .load(indoc! {"
+                local theme = require('tirc.tui.theme')
+
+                local blue = theme.style { fg = 'blue' }
+                local green = theme.style { fg = 'green' }
+                local darkgray = theme.style { fg = 'darkgray', bg = 'white' }
+
+                return { { 'a', blue }, { { 'b', { 'c', { 'd', green }, 'e' } }, darkgray }, 'f' }
+            "})
+            .eval()?;
+        let spans = renderer.lua_value_to_spans(&lua, value)?;
+        assert_eq!(spans.len(), 6);
+        assert_eq!(spans[0].content, "a");
+        assert_eq!(spans[0].style.fg, Some(Color::Blue));
+        assert_eq!(spans[0].style.bg, None);
+        assert_eq!(spans[1].content, "b");
+        assert_eq!(spans[1].style.fg, Some(Color::DarkGray));
+        assert_eq!(spans[1].style.bg, Some(Color::White));
+        assert_eq!(spans[2].content, "c");
+        assert_eq!(spans[2].style.fg, Some(Color::DarkGray));
+        assert_eq!(spans[2].style.bg, Some(Color::White));
+        assert_eq!(spans[3].content, "d");
+        assert_eq!(spans[3].style.fg, Some(Color::Green));
+        assert_eq!(spans[3].style.bg, Some(Color::White));
+        assert_eq!(spans[4].content, "e");
+        assert_eq!(spans[4].style.fg, Some(Color::DarkGray));
+        assert_eq!(spans[4].style.bg, Some(Color::White));
+        assert_eq!(spans[5].content, "f");
+        assert_eq!(spans[5].style.fg, None);
+        assert_eq!(spans[5].style.bg, None);
+        Ok(())
     }
 }
