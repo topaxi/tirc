@@ -16,6 +16,7 @@ local server_notice_icon = {
   ' ',
 }
 
+---@param msg table
 local function format_join(msg)
   return {
     { msg.prefix.Nickname[1], blue },
@@ -31,6 +32,7 @@ local function format_join(msg)
   }
 end
 
+---@param msg table
 local function format_part(msg)
   return {
     { msg.prefix.Nickname[1], blue },
@@ -39,6 +41,8 @@ local function format_part(msg)
   }
 end
 
+---@param nickname string
+---@param style TircThemeStyle
 local function format_privmsg_nickname(nickname, color)
   return {
     { '<',      darkgray },
@@ -47,19 +51,25 @@ local function format_privmsg_nickname(nickname, color)
   }
 end
 
-local function format_privmsg_action_nickname(nickname, color)
-  return { { '* ', nickname }, color }
+---@param nickname string
+---@param style TircThemeStyle
+local function format_privmsg_action_nickname(nickname, style)
+  return { { '* ', nickname }, style }
 end
 
+---@param message string
 local function format_privmsg_message(message)
   return message
 end
 
+---@param msg table
+---@param nickname string
 local function format_privmsg(msg, nickname)
   local is_draft = utils.list_find(msg.tags, function(tag)
     return tag[1] == 'time'
   end) == nil
 
+  ---@type string
   local message_str = msg.command.PRIVMSG[2]
   local is_action = message_str:sub(1, 8) == '\001ACTION '
 
@@ -84,6 +94,7 @@ local function format_privmsg(msg, nickname)
   }
 end
 
+---@param msg table
 local function format_notice(msg)
   if msg.prefix.ServerName then
     return {
@@ -119,12 +130,14 @@ local function is_noprefix_mode(v)
   return type(v) == 'table' and v.NoPrefix
 end
 
-local get_first_table_key = function(t)
+---@param t table
+local function get_first_table_key(t)
   for k, _ in pairs(t) do
     return k
   end
 end
 
+---@param mode_value string|table
 local function format_mode_value(mode_value)
   if is_string(mode_value) then
     return mode_value
