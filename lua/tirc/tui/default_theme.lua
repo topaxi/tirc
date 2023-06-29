@@ -20,13 +20,11 @@ local server_notice_icon = {
 local function format_join(msg)
   return {
     { msg.prefix.Nickname[1], blue },
-    {
-      msg.command.JOIN[3] and msg.command.JOIN[3] ~= 'Unknown' and {
-        { ' (',                darkgray },
-        { msg.command.JOIN[3], blue },
-        { ')',                 darkgray },
-      } or '',
-    },
+    msg.command.JOIN[3] and msg.command.JOIN[3] ~= 'Unknown' and {
+      { ' (',                darkgray },
+      { msg.command.JOIN[3], blue },
+      { ')',                 darkgray },
+    } or '',
     ' has joined ',
     { msg.command.JOIN[1],    green },
   }
