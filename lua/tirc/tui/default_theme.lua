@@ -290,47 +290,21 @@ local function format_user(user)
 end
 
 function M.setup(config)
-  tirc.on('format-time', function(dt, msg)
-    if config.debug then
-      return nil
+  local function handle_event(callback)
+    return function(...)
+      local ok, result = pcall(callback, ...)
+
+      if ok then
+        return result
+      else
+        return 'ERR: ' .. tostring(result)
+      end
     end
+  end
 
-    local ok, str = pcall(format_time, dt, msg)
-
-    if ok then
-      return str
-    else
-      return 'ERR in format-time: ' .. tostring(str)
-    end
-  end)
-
-  tirc.on('format-message', function(msg, nickname)
-    if config.debug then
-      return utils.dump_table(msg)
-    end
-
-    local ok, str = pcall(format_message, msg, nickname)
-
-    if ok then
-      return str
-    else
-      return 'ERR in format-message: ' .. tostring(str)
-    end
-  end)
-
-  tirc.on('format-user', function(user)
-    if config.debug then
-      return utils.dump_table(user)
-    end
-
-    local ok, str = pcall(format_user, user)
-
-    if ok then
-      return str
-    else
-      return 'ERR in format-user: ' .. tostring(str)
-    end
-  end)
+  tirc.on('format-time', handle_event(format_time))
+  tirc.on('format-message', handle_event(format_message))
+  tirc.on('format-user', handle_event(format_user))
 end
 
 return M
