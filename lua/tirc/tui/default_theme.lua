@@ -16,6 +16,9 @@ local server_notice_icon = {
   ' ',
 }
 
+---@param tbl table<integer, unknown>
+---@param element unknown
+---@return table<integer, unknown>
 local function insert_every_second(tbl, element)
   local new_tbl = {}
 
@@ -303,7 +306,7 @@ local function format_user(user)
   }
 end
 
-function M.setup(config)
+function M.setup(_config)
   local function handle_event(callback)
     return function(...)
       local ok, result = pcall(callback, ...)

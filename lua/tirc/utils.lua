@@ -67,6 +67,7 @@ end
 
 ---@param str string
 ---@param sep string|nil
+---@return table<integer, string>
 function M.split(str, sep)
   if sep == nil then
     return { str }
