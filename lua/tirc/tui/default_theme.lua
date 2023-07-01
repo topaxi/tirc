@@ -269,6 +269,26 @@ local function format_time(dt, msg)
   }
 end
 
+local access_level_styles = {
+  Owner = { '~', red },
+  Admin = { '&', red },
+  Oper = { '@', red },
+  HalfOp = { '%', red },
+  Voice = { '+', green },
+  Member = {},
+}
+
+local function format_user(user)
+  return {
+    {
+      utils.list_map(user.access_levels, function(level)
+        return access_level_styles[level]
+      end),
+    },
+    { user.nickname, blue },
+  }
+end
+
 function M.setup(config)
   tirc.on('format-time', function(dt, msg)
     if config.debug then
@@ -295,6 +315,20 @@ function M.setup(config)
       return str
     else
       return 'ERR in format-message: ' .. tostring(str)
+    end
+  end)
+
+  tirc.on('format-user', function(user)
+    if config.debug then
+      return utils.dump_table(user)
+    end
+
+    local ok, str = pcall(format_user, user)
+
+    if ok then
+      return str
+    else
+      return 'ERR in format-user: ' .. tostring(str)
     end
   end)
 end

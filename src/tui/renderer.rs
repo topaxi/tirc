@@ -1,5 +1,6 @@
 use std::io::Stdout;
 
+use irc::client::data::AccessLevel;
 use mlua::LuaSerdeExt;
 use tui::{
     backend::CrosstermBackend,
@@ -256,18 +257,53 @@ impl Renderer {
         }
     }
 
+    fn render_user(&self, lua: &mlua::Lua, user: mlua::Table) -> Result<Vec<Span>, anyhow::Error> {
+        let v = config::emit_sync_callback(lua, ("format-user".to_string(), user))?;
+
+        self.lua_value_to_spans(lua, v)
+    }
+
+    fn get_access_level_priority(access_level: &AccessLevel) -> i32 {
+        match access_level {
+            AccessLevel::Owner => 0,
+            AccessLevel::Admin => 1,
+            AccessLevel::Oper => 2,
+            AccessLevel::HalfOp => 3,
+            AccessLevel::Voice => 4,
+            AccessLevel::Member => 5,
+        }
+    }
+
     fn render_users(
         &self,
         f: &mut tui::Frame<CrosstermBackend<Stdout>>,
         state: &State,
+        lua: &mlua::Lua,
         rect: Rect,
     ) {
-        let users = state
-            .users_in_current_buffer
+        let mut users = state.users_in_current_buffer.clone();
+
+        users.sort_unstable_by(|a, b| {
+            Self::get_access_level_priority(&a.highest_access_level())
+                .cmp(&Self::get_access_level_priority(&b.highest_access_level()))
+                .then_with(|| a.get_nickname().cmp(b.get_nickname()))
+        });
+
+        let users = users
             .iter()
             .map(|user| {
-                let style = Style::default().fg(Color::White);
-                ListItem::new(Span::styled(user.get_nickname(), style))
+                let lua_user = lua.to_value(user);
+                let rendered_user = if let Ok(mlua::Value::Table(tbl)) = lua_user {
+                    self.render_user(lua, tbl).unwrap_or_default()
+                } else {
+                    vec![]
+                };
+
+                if rendered_user.is_empty() {
+                    return ListItem::new(user.get_nickname());
+                }
+
+                ListItem::new(Line::from(rendered_user))
             })
             .collect::<Vec<_>>();
         let list = List::new(users).block(
@@ -295,7 +331,7 @@ impl Renderer {
                 .constraints([Constraint::Percentage(90), Constraint::Percentage(10)].as_ref())
                 .split(chunks[0]);
 
-            self.render_users(f, state, layout_with_sidebar[1]);
+            self.render_users(f, state, lua, layout_with_sidebar[1]);
             self.render_messages(f, state, lua, layout_with_sidebar[0]);
         } else {
             self.render_messages(f, state, lua, chunks[0]);

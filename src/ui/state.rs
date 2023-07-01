@@ -162,7 +162,7 @@ impl<'lua> State<'lua> {
 
     pub fn push_message(&mut self, message: TircMessage<'lua>) {
         let buffer_name = match &message {
-            TircMessage::Irc(_, m, _) => self.get_target_buffer_name(&m),
+            TircMessage::Irc(_, m, _) => self.get_target_buffer_name(m),
             _ => State::get_default_buffer_name(),
         };
 
