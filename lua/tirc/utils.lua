@@ -65,4 +65,18 @@ function M.list_map(list, fn)
   return result
 end
 
+---@param str string
+---@param sep string|nil
+function M.split(str, sep)
+  if sep == nil then
+    return { str }
+  end
+
+  local tbl = {}
+  for word in str:gmatch(('([^%s]*)%s'):format(sep, sep)) do
+    table.insert(tbl, word)
+  end
+  return tbl
+end
+
 return M

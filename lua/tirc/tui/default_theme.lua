@@ -16,6 +16,19 @@ local server_notice_icon = {
   ' ',
 }
 
+local function insert_every_second(tbl, element)
+  local new_tbl = {}
+
+  for _, v in ipairs(tbl) do
+    table.insert(new_tbl, v)
+    table.insert(new_tbl, element)
+  end
+
+  table.remove(new_tbl, #new_tbl)
+
+  return new_tbl
+end
+
 ---@param msg table
 local function format_join(msg)
   return {
@@ -55,9 +68,23 @@ local function format_privmsg_action_nickname(nickname, style)
   return { { '* ', nickname }, style }
 end
 
+---@param word string
+local function is_channel(word)
+  return word:match('#%w+$')
+end
+
 ---@param message string
 local function format_privmsg_message(message)
-  return message
+  return insert_every_second(
+    utils.list_map(utils.split(message, '%s'), function(word)
+      if is_channel(word) then
+        return { word, green }
+      end
+
+      return word
+    end),
+    ' '
+  )
 end
 
 ---@param msg table
@@ -160,19 +187,6 @@ local mode_type_styles = {
   UserMODE = blue,
   ChannelMODE = green,
 }
-
-local function insert_every_second(tbl, element)
-  local new_tbl = {}
-
-  for _, v in ipairs(tbl) do
-    table.insert(new_tbl, v)
-    table.insert(new_tbl, element)
-  end
-
-  table.remove(new_tbl, #new_tbl)
-
-  return new_tbl
-end
 
 local function format_modes(modes, predicate)
   return insert_every_second(
@@ -297,7 +311,7 @@ function M.setup(config)
       if ok then
         return result
       else
-        return 'ERR: ' .. tostring(result)
+        return { 'ERR: ' .. tostring(result), red }
       end
     end
   end
