@@ -346,7 +346,7 @@ impl Renderer {
 mod tests {
     use indoc::indoc;
 
-    use crate::tui::create_tirc_theme_lua_module;
+    use crate::tui::lua::create_tirc_theme_lua_module;
 
     #[test]
     fn test_lua_value_to_spans() {
