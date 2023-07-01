@@ -100,45 +100,38 @@ impl<'lua> State<'lua> {
         }
     }
 
-    fn push_message_to_buffer(&mut self, buffer_name: &str, message: Message) {
-        let tags = message.tags.clone().unwrap_or_default();
-        let label = tags.iter().find(|tag| tag.0 == "label");
-        let tirc_message = TircMessage::Irc(
-            Box::new(chrono::Local::now()),
-            Box::new(message),
-            Box::new(None),
-        );
+    fn push_message_to_buffer(&mut self, buffer_name: &str, message: TircMessage<'lua>) {
+        if let TircMessage::Irc(_, m, _) = &message {
+            let tags = m.tags.clone().unwrap_or_default();
+            let label = tags.iter().find(|tag| tag.0 == "label");
 
-        if let Some(label) = label {
-            // Find index of message with same tag label
-            let index = self.buffers.get(buffer_name).unwrap().iter().position(|m| {
-                if let TircMessage::Irc(_, m, _) = m {
-                    let tags = m.tags.clone().unwrap_or_default();
+            if let Some(label) = label {
+                // Find index of message with same tag label
+                let index = self.buffers.get(buffer_name).unwrap().iter().position(|m| {
+                    if let TircMessage::Irc(_, m, _) = m {
+                        let tags = m.tags.clone().unwrap_or_default();
 
-                    return tags
-                        .iter()
-                        .find(|tag| tag.0 == "label")
-                        .map(|tag| tag.1 == label.1)
-                        .unwrap_or(false);
+                        tags.iter()
+                            .find(|tag| tag.0 == "label")
+                            .map(|tag| tag.1 == label.1)
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    }
+                });
+
+                if let Some(index) = index {
+                    // Remove old message
+                    let buffer = self.buffers.get_mut(buffer_name).unwrap();
+
+                    buffer[index] = message;
+
+                    return;
                 }
-
-                false
-            });
-
-            if let Some(index) = index {
-                // Remove old message
-                let buffer = self.buffers.get_mut(buffer_name).unwrap();
-
-                buffer[index] = tirc_message;
-
-                return;
             }
         }
 
-        self.buffers
-            .get_mut(buffer_name)
-            .unwrap()
-            .push(tirc_message);
+        self.buffers.get_mut(buffer_name).unwrap().push(message);
     }
 
     fn get_target_buffer_name(&mut self, message: &Message) -> String {
@@ -171,7 +164,7 @@ impl<'lua> State<'lua> {
         let buffer_name = self.get_target_buffer_name(&message);
 
         self.create_buffer_if_not_exists(&buffer_name);
-        self.push_message_to_buffer(&buffer_name, message)
+        self.push_message_to_buffer(&buffer_name, message.into())
     }
 }
 
