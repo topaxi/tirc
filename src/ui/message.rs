@@ -1,9 +1,13 @@
+use mlua::Lua;
+
+use crate::tui::lua::to_lua_message;
+
 #[derive(Debug)]
 pub enum TircMessage<'lua> {
     Irc(
         Box<chrono::DateTime<chrono::Local>>,
         Box<irc::proto::Message>,
-        Box<Option<mlua::Value<'lua>>>,
+        Box<mlua::Table<'lua>>,
     ),
     Lua(
         Box<chrono::DateTime<chrono::Local>>,
@@ -12,8 +16,12 @@ pub enum TircMessage<'lua> {
     ),
 }
 
-impl<'lua> From<irc::proto::Message> for TircMessage<'lua> {
-    fn from(value: irc::proto::Message) -> Self {
-        TircMessage::Irc(chrono::Local::now().into(), value.into(), None.into())
+impl<'lua> TircMessage<'lua> {
+    pub fn from_message(message: irc::proto::Message, lua: &'lua Lua) -> Self {
+        TircMessage::Irc(
+            chrono::Local::now().into(),
+            message.clone().into(),
+            to_lua_message(lua, &message).unwrap().into(),
+        )
     }
 }

@@ -12,7 +12,7 @@ use mlua::Lua;
 
 use crate::tui::Tui;
 
-use super::{Mode, State};
+use super::{Mode, State, TircMessage};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(1);
 fn get_id() -> usize {
@@ -26,14 +26,14 @@ pub enum Event<I> {
     Tick,
 }
 
-pub struct InputHandler {
-    lua: Lua,
+pub struct InputHandler<'lua> {
+    lua: &'lua Lua,
     irc: Client,
     ui: Tui,
 }
 
-impl InputHandler {
-    pub fn new(lua: Lua, irc: Client, ui: Tui) -> Self {
+impl<'lua> InputHandler<'lua> {
+    pub fn new(lua: &'lua Lua, irc: Client, ui: Tui) -> Self {
         Self { lua, irc, ui }
     }
 
@@ -88,7 +88,7 @@ impl InputHandler {
         Ok(message)
     }
 
-    fn handle_command(&mut self, state: &mut State) -> Result<(), anyhow::Error> {
+    fn handle_command(&mut self, state: &mut State<'lua>) -> Result<(), anyhow::Error> {
         state.mode = Mode::Normal;
 
         let command: Vec<&str> = self.ui.input().value().splitn(2, ' ').collect();
@@ -101,7 +101,10 @@ impl InputHandler {
                         state.set_current_buffer(target);
 
                         if !message.trim().is_empty() {
-                            state.push_message(self.send_privmsg(target, message)?)
+                            state.push_message(TircMessage::from_message(
+                                self.send_privmsg(target, message)?,
+                                &self.lua,
+                            ))
                         }
                     }
                     [target] => {
@@ -113,7 +116,10 @@ impl InputHandler {
             }
             ["me", message] => {
                 let message = format!("\x01ACTION {}\x01", message);
-                state.push_message(self.send_privmsg(&state.current_buffer, message)?);
+                state.push_message(TircMessage::from_message(
+                    self.send_privmsg(&state.current_buffer, message)?,
+                    &self.lua,
+                ));
             }
             ["desc" | "describe", target_and_message] => {
                 if let [target, message] =
@@ -121,7 +127,10 @@ impl InputHandler {
                 {
                     let message = format!("\x01ACTION {}\x01", message);
                     state.create_buffer_if_not_exists(target);
-                    state.push_message(self.send_privmsg(target, message)?);
+                    state.push_message(TircMessage::from_message(
+                        self.send_privmsg(target, message)?,
+                        &self.lua,
+                    ));
                 }
             }
             ["notice", target_and_message] => {
@@ -174,7 +183,7 @@ impl InputHandler {
 
     pub fn handle_event(
         &mut self,
-        state: &mut State,
+        state: &mut State<'lua>,
         event: Event<crossterm::event::KeyEvent>,
     ) -> Result<(), anyhow::Error> {
         match (state.mode, event) {
@@ -216,8 +225,10 @@ impl InputHandler {
 
                             if !message.trim().is_empty() {
                                 let current_buffer = &state.current_buffer;
+                                let message = self.send_privmsg(current_buffer, message)?;
+                                let tirc_message = TircMessage::from_message(message, self.lua);
 
-                                state.push_message(self.send_privmsg(current_buffer, message)?)
+                                state.push_message(tirc_message);
                             }
                         }
                         _ => {}
@@ -230,7 +241,9 @@ impl InputHandler {
                 }
             },
             (_, Event::Message(message)) => {
-                state.push_message(*message);
+                let tirc_message = TircMessage::from_message(*message, self.lua);
+
+                state.push_message(tirc_message);
             }
             (_, Event::Tick) => {}
         }

@@ -1,4 +1,4 @@
-use std::{io::Stdout, ops::Deref};
+use std::io::Stdout;
 
 use mlua::LuaSerdeExt;
 use tui::{
@@ -15,8 +15,6 @@ use crate::{
     lua::date_time::date_time_to_table,
     ui::{Mode, State, TircMessage},
 };
-
-use super::lua::to_lua_message;
 
 pub struct Renderer {}
 
@@ -158,19 +156,17 @@ impl Renderer {
             .iter()
             .rev()
             .map(|tirc_message| {
-                if let TircMessage::Irc(date_time, message, _) = tirc_message {
-                    let lua_message = to_lua_message(lua, message.deref()).unwrap();
-
+                if let TircMessage::Irc(date_time, message, lua_message) = tirc_message {
                     let time_spans = self
                         .render_time(
                             lua,
                             date_time_to_table(lua, date_time).unwrap(),
-                            lua_message.clone(),
+                            *lua_message.clone(),
                         )
                         .unwrap_or_else(|_| vec![]);
 
                     let message_spans = self
-                        .render_message(lua, lua_message, &state.nickname)
+                        .render_message(lua, *lua_message.clone(), &state.nickname)
                         .unwrap_or_else(|_| vec![Span::raw(message.to_string())]);
 
                     if message_spans.is_empty() {

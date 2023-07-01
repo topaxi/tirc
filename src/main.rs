@@ -52,7 +52,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     tui.initialize_terminal()?;
 
-    let mut input_handler = InputHandler::new(lua, irc, tui);
+    let mut input_handler = InputHandler::new(&lua, irc, tui);
 
     loop {
         input_handler.sync_state(&mut state)?;

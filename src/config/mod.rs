@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::{
     lua::{date_time::create_date_time_module, get_or_create_module, set_loaded_modules},
-    tui::create_tirc_theme_lua_module,
+    tui::lua::create_tirc_theme_lua_module,
 };
 
 #[inline]
