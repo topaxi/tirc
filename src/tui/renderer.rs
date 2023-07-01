@@ -1,4 +1,4 @@
-use std::io::Stdout;
+use std::{io::Stdout, ops::Deref};
 
 use mlua::LuaSerdeExt;
 use tui::{
@@ -13,7 +13,7 @@ use tui_input::Input;
 use crate::{
     config,
     lua::date_time::date_time_to_table,
-    ui::{Mode, State},
+    ui::{Mode, State, TircMessage},
 };
 
 use super::lua::to_lua_message;
@@ -157,28 +157,30 @@ impl Renderer {
         let messages: Vec<_> = current_buffer_messages
             .iter()
             .rev()
-            .map(|(date_time, message)| {
-                let message = to_lua_message(lua, message).unwrap();
-                let date_time = date_time_to_table(lua, date_time).unwrap();
+            .map(|tirc_message| {
+                if let TircMessage::Irc(date_time, message, _) = tirc_message {
+                    let lua_message = to_lua_message(lua, message.deref()).unwrap();
 
-                (date_time, message)
-            })
-            .map(|(date_time, message)| {
-                let time_spans = self
-                    .render_time(lua, date_time, message.clone())
-                    .unwrap_or_else(|_| vec![]);
+                    let time_spans = self
+                        .render_time(
+                            lua,
+                            date_time_to_table(lua, date_time).unwrap(),
+                            lua_message.clone(),
+                        )
+                        .unwrap_or_else(|_| vec![]);
 
-                let message_spans = self
-                    .render_message(lua, message.clone(), &state.nickname)
-                    .unwrap_or_else(|_| {
-                        vec![Span::raw(message.get::<_, String>("__str").unwrap())]
-                    });
+                    let message_spans = self
+                        .render_message(lua, lua_message, &state.nickname)
+                        .unwrap_or_else(|_| vec![Span::raw(message.to_string())]);
 
-                if message_spans.is_empty() {
-                    return message_spans;
+                    if message_spans.is_empty() {
+                        return message_spans;
+                    }
+
+                    [time_spans, message_spans].concat()
+                } else {
+                    vec![]
                 }
-
-                [time_spans, message_spans].concat()
             })
             .filter(|spans| !spans.is_empty())
             .map(Line::from)

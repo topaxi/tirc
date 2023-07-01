@@ -1,10 +1,11 @@
-use chrono::DateTime;
 use indexmap::IndexMap;
 
 use irc::{
     client::data::User,
     proto::{Command, Message},
 };
+
+use super::message::TircMessage;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Mode {
@@ -14,23 +15,23 @@ pub enum Mode {
 }
 
 #[derive(Debug)]
-pub struct State {
+pub struct State<'lua> {
     pub mode: Mode,
     pub nickname: String,
     pub server: String,
     pub current_buffer: String,
-    pub buffers: IndexMap<String, Vec<(DateTime<chrono::Local>, Message)>>,
+    pub buffers: IndexMap<String, Vec<TircMessage<'lua>>>,
     pub users_in_current_buffer: Vec<User>,
 }
 
-impl Default for State {
+impl<'lua> Default for State<'lua> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl State {
-    pub fn new() -> State {
+impl<'lua> State<'lua> {
+    pub fn new() -> State<'lua> {
         let default_buffer_name = State::get_default_buffer_name();
 
         let buffers = {
@@ -102,28 +103,33 @@ impl State {
     fn push_message_to_buffer(&mut self, buffer_name: &str, message: Message) {
         let tags = message.tags.clone().unwrap_or_default();
         let label = tags.iter().find(|tag| tag.0 == "label");
+        let tirc_message = TircMessage::Irc(
+            Box::new(chrono::Local::now()),
+            Box::new(message),
+            Box::new(None),
+        );
 
         if let Some(label) = label {
             // Find index of message with same tag label
-            let index = self
-                .buffers
-                .get(buffer_name)
-                .unwrap()
-                .iter()
-                .position(|(_, m)| {
+            let index = self.buffers.get(buffer_name).unwrap().iter().position(|m| {
+                if let TircMessage::Irc(_, m, _) = m {
                     let tags = m.tags.clone().unwrap_or_default();
 
-                    tags.iter()
+                    return tags
+                        .iter()
                         .find(|tag| tag.0 == "label")
                         .map(|tag| tag.1 == label.1)
-                        .unwrap_or(false)
-                });
+                        .unwrap_or(false);
+                }
+
+                false
+            });
 
             if let Some(index) = index {
                 // Remove old message
                 let buffer = self.buffers.get_mut(buffer_name).unwrap();
 
-                buffer[index].1 = message;
+                buffer[index] = tirc_message;
 
                 return;
             }
@@ -132,7 +138,7 @@ impl State {
         self.buffers
             .get_mut(buffer_name)
             .unwrap()
-            .push((chrono::Local::now(), message));
+            .push(tirc_message);
     }
 
     fn get_target_buffer_name(&mut self, message: &Message) -> String {
