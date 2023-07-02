@@ -1,6 +1,6 @@
 extern crate irc;
 
-use std::time::Duration;
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use crossterm::event::{self, Event as CrosstermEvent, KeyEvent};
 use futures::prelude::*;
@@ -12,12 +12,42 @@ use tirc::{
 };
 use tokio::{sync::mpsc, time::Instant};
 
+fn create_lua_irc_sender(
+    lua: &mlua::Lua,
+    sender: irc::client::Sender,
+) -> mlua::Result<mlua::Table> {
+    let shared_sender = Rc::new(RefCell::new(sender));
+    let tbl = lua.create_table()?;
+
+    let sender = Rc::clone(&shared_sender);
+    tbl.set(
+        "send_privmsg",
+        lua.create_function(move |_, (target, message): (String, String)| {
+            sender.borrow().send_privmsg(target, message).unwrap();
+            Ok(())
+        })?,
+    )?;
+
+    let sender = Rc::clone(&shared_sender);
+    tbl.set(
+        "send_notice",
+        lua.create_function(move |_, (target, message): (String, String)| {
+            sender.borrow().send_notice(target, message).unwrap();
+            Ok(())
+        })?,
+    )?;
+
+    Ok(tbl)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let (config, lua) = load_config().await?;
 
     let mut irc = create_irc_client(&config).await?;
     let stream = irc.stream()?;
+
+    lua.set_named_registry_value("sender", create_lua_irc_sender(&lua, irc.sender())?)?;
 
     irc.send_cap_req(&[
         Capability::EchoMessage,
@@ -40,7 +70,6 @@ async fn main() -> Result<(), anyhow::Error> {
     let irc_sender = tx.clone();
 
     let input_handle = tokio::spawn(async move { poll_input(input_sender).await });
-
     let irc_handle = tokio::spawn(async move { connect_irc(stream, irc_sender).await });
 
     let mut state = ui::State {

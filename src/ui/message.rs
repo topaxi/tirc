@@ -9,11 +9,7 @@ pub enum TircMessage<'lua> {
         Box<irc::proto::Message>,
         Box<mlua::Table<'lua>>,
     ),
-    Lua(
-        Box<chrono::DateTime<chrono::Local>>,
-        Box<String>,
-        Box<mlua::Value<'lua>>,
-    ),
+    Lua(Box<chrono::DateTime<chrono::Local>>, Box<mlua::Table<'lua>>),
 }
 
 impl<'lua> TircMessage<'lua> {
@@ -23,5 +19,12 @@ impl<'lua> TircMessage<'lua> {
             message.clone(),
             to_lua_message(lua, &message).unwrap().into(),
         )
+    }
+
+    pub fn get_lua_message(&self) -> &mlua::Table<'lua> {
+        match self {
+            TircMessage::Irc(_, _, lua_message) => lua_message,
+            TircMessage::Lua(_, lua_message) => lua_message,
+        }
     }
 }

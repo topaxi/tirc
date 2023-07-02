@@ -1,4 +1,4 @@
----@alias EventName 'format-time' | 'format-message' | 'format-user'
+---@alias EventName 'message' | 'format-time' | 'format-message' | 'format-user'
 
 ---@class TircModule
 ---@field version string
