@@ -70,7 +70,7 @@ impl<'lua> InputHandler<'lua> {
     }
 
     pub fn render_ui(&mut self, state: &State) -> Result<(), anyhow::Error> {
-        self.ui.render(&self.irc, &self.lua, state)?;
+        self.ui.render(&self.irc, self.lua, state)?;
 
         Ok(())
     }
@@ -103,7 +103,7 @@ impl<'lua> InputHandler<'lua> {
                         if !message.trim().is_empty() {
                             state.push_message(TircMessage::from_message(
                                 self.send_privmsg(target, message)?.into(),
-                                &self.lua,
+                                self.lua,
                             ))
                         }
                     }
@@ -118,7 +118,7 @@ impl<'lua> InputHandler<'lua> {
                 let message = format!("\x01ACTION {}\x01", message);
                 state.push_message(TircMessage::from_message(
                     self.send_privmsg(&state.current_buffer, message)?.into(),
-                    &self.lua,
+                    self.lua,
                 ));
             }
             ["desc" | "describe", target_and_message] => {
@@ -129,7 +129,7 @@ impl<'lua> InputHandler<'lua> {
                     state.create_buffer_if_not_exists(target);
                     state.push_message(TircMessage::from_message(
                         self.send_privmsg(target, message)?.into(),
-                        &self.lua,
+                        self.lua,
                     ));
                 }
             }
