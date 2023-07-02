@@ -78,16 +78,13 @@ end
 
 ---@param message string
 local function format_privmsg_message(message)
-  return insert_every_second(
-    utils.list_map(utils.split(message, '%s'), function(word)
-      if is_channel(word) then
-        return { word, green }
-      end
+  return utils.list_flat_map(utils.split(message, '%s'), function(word)
+    if is_channel(word) then
+      return { { word, green }, ' ' }
+    end
 
-      return word
-    end),
-    ' '
-  )
+    return { word, ' ' }
+  end)
 end
 
 ---@param msg table

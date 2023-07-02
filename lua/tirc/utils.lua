@@ -65,6 +65,20 @@ function M.list_map(list, fn)
   return result
 end
 
+---@generic T
+---@param list table<integer, T>
+---@param fn fun(v: T, k: integer, list: table<integer, T>): table<integer, T>
+---@return table<integer, T>
+function M.list_flat_map(list, fn)
+  local result = {}
+  for k, v in ipairs(list) do
+    for _, v2 in ipairs(fn(v, k, list)) do
+      table.insert(result, v2)
+    end
+  end
+  return result
+end
+
 ---@param str string
 ---@param sep string|nil
 ---@return table<integer, string>
@@ -74,7 +88,7 @@ function M.split(str, sep)
   end
 
   local tbl = {}
-  for word in str:gmatch(('([^%s]*)%s'):format(sep, sep)) do
+  for word in (str .. sep):gmatch(('([^%s]*)%s'):format(sep, sep)) do
     table.insert(tbl, word)
   end
   return tbl
