@@ -3,7 +3,7 @@ local M = {}
 ---@param t table
 ---@return string
 function M.dump_table(t)
-  local s = '{ '
+  local s = tostring(t) .. ' { '
   for k, v in pairs(t) do
     if type(v) == 'table' then
       s = s .. k .. ' = ' .. M.dump_table(v) .. ', '
