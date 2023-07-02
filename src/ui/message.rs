@@ -17,10 +17,10 @@ pub enum TircMessage<'lua> {
 }
 
 impl<'lua> TircMessage<'lua> {
-    pub fn from_message(message: irc::proto::Message, lua: &'lua Lua) -> Self {
+    pub fn from_message(message: Box<irc::proto::Message>, lua: &'lua Lua) -> Self {
         TircMessage::Irc(
             chrono::Local::now().into(),
-            message.clone().into(),
+            message.clone(),
             to_lua_message(lua, &message).unwrap().into(),
         )
     }
