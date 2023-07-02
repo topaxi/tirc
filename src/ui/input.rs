@@ -1,5 +1,6 @@
 use std::{
     fmt,
+    rc::Rc,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -58,12 +59,13 @@ impl<'lua> InputHandler<'lua> {
         }
 
         if state.current_buffer == State::get_default_buffer_name() {
-            state.users_in_current_buffer = vec![];
+            state.users_in_current_buffer = Rc::new([]);
         } else {
             state.users_in_current_buffer = self
                 .irc
                 .list_users(&state.current_buffer)
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .into();
         }
 
         Ok(())
@@ -91,11 +93,11 @@ impl<'lua> InputHandler<'lua> {
     fn handle_command(&mut self, state: &mut State<'lua>) -> Result<(), anyhow::Error> {
         state.mode = Mode::Normal;
 
-        let command: Vec<&str> = self.ui.input().value().splitn(2, ' ').collect();
+        let command: Rc<[&str]> = self.ui.input().value().splitn(2, ' ').collect();
 
         match command[..] {
             ["m" | "msg", target_and_message] => {
-                match target_and_message.splitn(2, ' ').collect::<Vec<&str>>()[..] {
+                match target_and_message.splitn(2, ' ').collect::<Rc<[&str]>>()[..] {
                     [target, message] => {
                         state.create_buffer_if_not_exists(target);
                         state.set_current_buffer(target);
@@ -123,7 +125,7 @@ impl<'lua> InputHandler<'lua> {
             }
             ["desc" | "describe", target_and_message] => {
                 if let [target, message] =
-                    target_and_message.splitn(2, ' ').collect::<Vec<&str>>()[..]
+                    target_and_message.splitn(2, ' ').collect::<Rc<[&str]>>()[..]
                 {
                     let message = format!("\x01ACTION {}\x01", message);
                     state.create_buffer_if_not_exists(target);
@@ -135,7 +137,7 @@ impl<'lua> InputHandler<'lua> {
             }
             ["notice", target_and_message] => {
                 if let [target, message] =
-                    target_and_message.splitn(2, ' ').collect::<Vec<&str>>()[..]
+                    target_and_message.splitn(2, ' ').collect::<Rc<[&str]>>()[..]
                 {
                     state.create_buffer_if_not_exists(target);
                     self.irc.send_notice(target, message)?;

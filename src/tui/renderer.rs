@@ -281,7 +281,7 @@ impl Renderer {
         lua: &mlua::Lua,
         rect: Rect,
     ) {
-        let mut users = state.users_in_current_buffer.clone();
+        let mut users = state.users_in_current_buffer.to_vec();
 
         users.sort_unstable_by(|a, b| {
             Self::get_access_level_priority(&a.highest_access_level())

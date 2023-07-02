@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use indexmap::IndexMap;
 
 use irc::{
@@ -21,7 +23,7 @@ pub struct State<'lua> {
     pub server: String,
     pub current_buffer: String,
     pub buffers: IndexMap<String, Vec<TircMessage<'lua>>>,
-    pub users_in_current_buffer: Vec<User>,
+    pub users_in_current_buffer: Rc<[User]>,
 }
 
 impl<'lua> Default for State<'lua> {
@@ -46,7 +48,7 @@ impl<'lua> State<'lua> {
             server: String::new(),
             current_buffer: default_buffer_name,
             buffers,
-            users_in_current_buffer: vec![],
+            users_in_current_buffer: Rc::new([]),
         }
     }
 
