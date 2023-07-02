@@ -93,11 +93,11 @@ impl<'lua> InputHandler<'lua> {
     fn handle_command(&mut self, state: &mut State<'lua>) -> Result<(), anyhow::Error> {
         state.mode = Mode::Normal;
 
-        let command: Rc<[&str]> = self.ui.input().value().splitn(2, ' ').collect();
+        let command: Box<[&str]> = self.ui.input().value().splitn(2, ' ').collect();
 
-        match command[..] {
+        match *command {
             ["m" | "msg", target_and_message] => {
-                match target_and_message.splitn(2, ' ').collect::<Rc<[&str]>>()[..] {
+                match *target_and_message.splitn(2, ' ').collect::<Box<[&str]>>() {
                     [target, message] => {
                         state.create_buffer_if_not_exists(target);
                         state.set_current_buffer(target);
@@ -125,7 +125,7 @@ impl<'lua> InputHandler<'lua> {
             }
             ["desc" | "describe", target_and_message] => {
                 if let [target, message] =
-                    target_and_message.splitn(2, ' ').collect::<Rc<[&str]>>()[..]
+                    *target_and_message.splitn(2, ' ').collect::<Box<[&str]>>()
                 {
                     let message = format!("\x01ACTION {}\x01", message);
                     state.create_buffer_if_not_exists(target);
@@ -137,7 +137,7 @@ impl<'lua> InputHandler<'lua> {
             }
             ["notice", target_and_message] => {
                 if let [target, message] =
-                    target_and_message.splitn(2, ' ').collect::<Rc<[&str]>>()[..]
+                    *target_and_message.splitn(2, ' ').collect::<Box<[&str]>>()
                 {
                     state.create_buffer_if_not_exists(target);
                     self.irc.send_notice(target, message)?;
