@@ -295,13 +295,13 @@ local access_level_styles = {
   Member = {},
 }
 
+local function format_access_level(level)
+  return access_level_styles[level]
+end
+
 local function format_user(user)
   return {
-    {
-      utils.list_map(user.access_levels, function(level)
-        return access_level_styles[level]
-      end),
-    },
+    utils.list_map(user.access_levels, format_access_level),
     { user.nickname, blue },
   }
 end
