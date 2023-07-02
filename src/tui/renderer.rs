@@ -5,7 +5,7 @@ use mlua::LuaSerdeExt;
 use tui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
@@ -181,7 +181,7 @@ impl Renderer {
             })
             .filter(|spans| !spans.is_empty())
             .map(Line::from)
-            .map(|message| ListItem::new(message).style(Style::default().fg(Color::White)))
+            .map(ListItem::new)
             .collect();
 
         let list = List::new(messages)
