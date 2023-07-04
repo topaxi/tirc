@@ -345,6 +345,7 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
+    use tui::style::Color;
 
     use crate::tui::lua::create_tirc_theme_lua_module;
 
