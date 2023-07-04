@@ -6,9 +6,11 @@ local theme = require('tirc.tui.theme')
 local M = {}
 
 local white = theme.style { fg = '#ffffff' }
+local twhite = theme.style { fg = 'white' } -- this is darker than gray..
 local blue = theme.style { fg = 'blue' }
 local green = theme.style { fg = 'green' }
 local red = theme.style { fg = 'red' }
+local gray = theme.style { fg = 'gray' }
 local darkgray = theme.style { fg = 'darkgray' }
 
 local server_notice_icon = {
@@ -37,11 +39,11 @@ local function format_join(msg)
   return {
     { msg.prefix.Nickname[1], blue },
     msg.command.JOIN[3] and msg.command.JOIN[3] ~= 'Unknown' and {
-      { ' (',                darkgray },
+      { ' (',                gray },
       { msg.command.JOIN[3], blue },
-      { ')',                 darkgray },
+      { ')',                 gray },
     } or '',
-    ' has joined ',
+    { ' has joined ',         twhite },
     { msg.command.JOIN[1],    green },
   }
 end
@@ -50,7 +52,7 @@ end
 local function format_part(msg)
   return {
     { msg.prefix.Nickname[1], blue },
-    ' has parted ',
+    { ' has parted ',         twhite },
     { msg.command.PART[1],    green },
   }
 end
@@ -59,9 +61,9 @@ end
 ---@param style TircThemeStyle
 local function format_privmsg_nickname(nickname, style)
   return {
-    { '<',      darkgray },
+    { '<',      gray },
     { nickname, style },
-    { '>',      darkgray },
+    { '>',      gray },
   }
 end
 
@@ -201,11 +203,16 @@ local function format_user_or_channel_mode(msg, mode, prefix)
   local noprefix = format_modes(msg.command[mode][2], is_noprefix_mode)
 
   return {
-    prefix .. '/',
-    { msg.command[mode][1], mode_type_styles[mode] },
-    #plus > 0 and { ' [', plus, ']' } or '',
-    #minus > 0 and { ' [', minus, ']' } or '',
-    #noprefix > 0 and { ' [', noprefix, ']' } or '',
+    {
+      {
+        prefix .. '/',
+        { msg.command[mode][1], mode_type_styles[mode] },
+        #plus > 0 and { ' [', plus, ']' } or '',
+        #minus > 0 and { ' [', minus, ']' } or '',
+        #noprefix > 0 and { ' [', noprefix, ']' } or '',
+      },
+      twhite,
+    },
   }
 end
 
@@ -277,9 +284,9 @@ local function format_time(dt, msg)
   return {
     {
       string.format('%02d:%02d:%02d', dt.hour, dt.minute, dt.second),
-      is_1337 and red or nil,
+      is_1337 and red or twhite,
     },
-    ' ▏',
+    { ' ▏', twhite },
   }
 end
 
