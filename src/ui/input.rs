@@ -189,13 +189,13 @@ impl<'lua> InputHandler<'lua> {
         event: Event<crossterm::event::KeyEvent>,
     ) -> Result<(), anyhow::Error> {
         match (state.mode, event) {
-            (_, Event::Input(event)) if event.code == KeyCode::Tab => {
+            (Mode::Normal, Event::Input(event)) if event.code == KeyCode::Tab => {
                 state.next_buffer();
             }
-            (_, Event::Input(event)) if event.code == KeyCode::BackTab => {
+            (Mode::Normal, Event::Input(event)) if event.code == KeyCode::BackTab => {
                 state.previous_buffer();
             }
-            (_, Event::Input(event)) if InputHandler::key_code_is_digit(event.code) => {
+            (Mode::Normal, Event::Input(event)) if InputHandler::key_code_is_digit(event.code) => {
                 let index = InputHandler::get_key_code_as_digit(event.code) as usize;
 
                 if index < state.buffers.len() {
