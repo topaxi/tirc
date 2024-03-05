@@ -1,13 +1,10 @@
-use std::io::Stdout;
-
 use irc::client::data::AccessLevel;
 use mlua::LuaSerdeExt;
 use tui::{
-    backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListDirection, ListItem, Paragraph},
 };
 use tui_input::Input;
 
@@ -139,13 +136,7 @@ impl Renderer {
         self.lua_value_to_spans(lua, v)
     }
 
-    fn render_messages(
-        &self,
-        f: &mut tui::Frame<CrosstermBackend<Stdout>>,
-        state: &State,
-        lua: &mlua::Lua,
-        rect: Rect,
-    ) {
+    fn render_messages(&self, f: &mut tui::Frame, state: &State, lua: &mlua::Lua, rect: Rect) {
         let current_buffer_name = &state.current_buffer;
         let buffers = &state.buffers;
 
@@ -190,17 +181,12 @@ impl Renderer {
                     .title(format!("{}@{}", state.nickname, state.server))
                     .borders(Borders::NONE),
             )
-            .start_corner(tui::layout::Corner::BottomLeft);
+            .direction(ListDirection::BottomToTop);
 
         f.render_widget(list, rect);
     }
 
-    fn render_buffer_bar(
-        &self,
-        f: &mut tui::Frame<CrosstermBackend<Stdout>>,
-        state: &State,
-        rect: Rect,
-    ) {
+    fn render_buffer_bar(&self, f: &mut tui::Frame, state: &State, rect: Rect) {
         let current_buffer_name = &state.current_buffer;
 
         let buffers: Vec<Span> = state
@@ -222,13 +208,7 @@ impl Renderer {
         f.render_widget(buffer_bar, rect);
     }
 
-    fn render_input(
-        &mut self,
-        f: &mut tui::Frame<CrosstermBackend<Stdout>>,
-        state: &State,
-        input: &Input,
-        rect: Rect,
-    ) {
+    fn render_input(&mut self, f: &mut tui::Frame, state: &State, input: &Input, rect: Rect) {
         let prefix = match state.mode {
             Mode::Normal => "",
             Mode::Command => ":",
@@ -274,13 +254,7 @@ impl Renderer {
         }
     }
 
-    fn render_users(
-        &self,
-        f: &mut tui::Frame<CrosstermBackend<Stdout>>,
-        state: &State,
-        lua: &mlua::Lua,
-        rect: Rect,
-    ) {
+    fn render_users(&self, f: &mut tui::Frame, state: &State, lua: &mlua::Lua, rect: Rect) {
         let mut users = state.users_in_current_buffer.to_vec();
 
         users.sort_unstable_by(|a, b| {
@@ -314,13 +288,7 @@ impl Renderer {
         f.render_widget(list, rect);
     }
 
-    pub fn render(
-        &mut self,
-        f: &mut tui::Frame<CrosstermBackend<Stdout>>,
-        state: &State,
-        lua: &mlua::Lua,
-        input: &Input,
-    ) {
+    pub fn render(&mut self, f: &mut tui::Frame, state: &State, lua: &mlua::Lua, input: &Input) {
         let layout = self.get_layout();
         let size = f.size();
         let chunks = layout.split(size);

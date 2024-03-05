@@ -73,7 +73,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let irc_handle = tokio::spawn(async move { connect_irc(stream, irc_sender).await });
 
     let mut state = ui::State {
-        server: config.servers.get(0).unwrap().host.clone(),
+        server: config.servers.first().unwrap().host.clone(),
         ..Default::default()
     };
 
@@ -138,13 +138,13 @@ async fn poll_input(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), failure::Er
 }
 
 async fn create_irc_client(config: &TircConfig) -> Result<Client, anyhow::Error> {
-    let server_config = config.servers.get(0).expect("No server config found");
+    let server_config = config.servers.first().expect("No server config found");
 
     let client_config = Config {
         nickname: Some(
             server_config
                 .nickname
-                .get(0)
+                .first()
                 .expect("No nickname found")
                 .clone(),
         ),

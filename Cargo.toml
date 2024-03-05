@@ -8,11 +8,11 @@ failure = "0.1.8"
 futures = "0.3.28"
 irc = { git = "https://github.com/topaxi/irc.git", branch = "feat/message-serde", features = ["ctcp", "tls-native", "serde"] }
 tokio = { version = "1.28.2", features = ["full"] }
-crossterm = { version = "0.26.1", features = ["serde"] }
-tui = { version="0.21.0", package = "ratatui", features = ["crossterm", "serde"] }
+crossterm = { version = "0.27", features = ["serde"] }
+tui = { version="0.26", package = "ratatui", features = ["crossterm", "serde"] }
 tui-input = { version = "*", features = ["crossterm"] }
 anyhow = "1.0.71"
-mlua = { version = "0.8.9", features = ["luajit52", "serde", "async", "serialize"] }
+mlua = { version = "0.9", features = ["luajit52", "serde", "async", "serialize"] }
 xdg = "2.5.0"
 serde = "1.0.164"
 indoc = "2.0.1"

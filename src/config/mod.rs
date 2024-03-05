@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::anyhow;
 use indoc::indoc;
-use mlua::{Lua, LuaSerdeExt, Table, ToLuaMulti, Value};
+use mlua::{IntoLuaMulti, Lua, LuaSerdeExt, Table, Value};
 use serde::Deserialize;
 
 use crate::{
@@ -97,7 +97,7 @@ pub fn emit_sync_callback<'lua, A>(
     (name, args): (String, A),
 ) -> mlua::Result<mlua::Value<'lua>>
 where
-    A: ToLuaMulti<'lua>,
+    A: IntoLuaMulti<'lua>,
 {
     let decorated_name = format!("tirc-event-{}", name);
     let tbl: mlua::Value = lua.named_registry_value(&decorated_name)?;
@@ -197,21 +197,21 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
 
         let utils_module: Table = lua
             .load(include_str!("../../lua/tirc/utils.lua"))
-            .set_name("{builtin}/lua/tirc/utils.lua")?
+            .set_name("{builtin}/lua/tirc/utils.lua")
             .call(())?;
 
         set_loaded_modules(&lua, "tirc.utils", utils_module)?;
 
         let default_theme_module: Table = lua
             .load(include_str!("../../lua/tirc/tui/default_theme.lua"))
-            .set_name("{builtin}/lua/tirc/tui/default_theme.lua")?
+            .set_name("{builtin}/lua/tirc/tui/default_theme.lua")
             .call(())?;
 
         set_loaded_modules(&lua, "tirc.tui.theme.default", default_theme_module)?;
 
         let value: Value = lua
             .load(&config_lua_code)
-            .set_name(config_filename.display().to_string())?
+            .set_name(config_filename.display().to_string())
             .call(())?;
 
         let config: TircConfig = lua.from_value(value.clone())?;
