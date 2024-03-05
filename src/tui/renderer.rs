@@ -22,7 +22,7 @@ impl Renderer {
     }
 
     fn get_layout(&self) -> Layout {
-        return Layout::default()
+        Layout::default()
             .direction(Direction::Vertical)
             .constraints(
                 [
@@ -31,7 +31,7 @@ impl Renderer {
                     Constraint::Length(1),
                 ]
                 .as_ref(),
-            );
+            )
     }
 
     fn lua_value_to_spans(
@@ -116,8 +116,8 @@ impl Renderer {
     fn render_time(
         &self,
         lua: &mlua::Lua,
-        date_time: mlua::Table,
-        message: mlua::Table,
+        date_time: &mlua::Table,
+        message: &mlua::Table,
     ) -> Result<Vec<Span>, anyhow::Error> {
         let v = config::emit_sync_callback(lua, ("format-time".to_string(), (date_time, message)))?;
 
@@ -127,7 +127,7 @@ impl Renderer {
     fn render_message(
         &self,
         lua: &mlua::Lua,
-        message: mlua::Table,
+        message: &mlua::Table,
         nickname: &str,
     ) -> Result<Vec<Span>, anyhow::Error> {
         let v =
@@ -152,13 +152,13 @@ impl Renderer {
                     let time_spans = self
                         .render_time(
                             lua,
-                            date_time_to_table(lua, date_time).unwrap(),
-                            *lua_message.clone(),
+                            &date_time_to_table(lua, date_time).unwrap(),
+                            lua_message,
                         )
                         .unwrap_or_else(|_| vec![]);
 
                     let message_spans = self
-                        .render_message(lua, *lua_message.clone(), &state.nickname)
+                        .render_message(lua, lua_message, &state.nickname)
                         .unwrap_or_else(|_| vec![Span::raw(message.to_string())]);
 
                     if message_spans.is_empty() {
@@ -237,7 +237,7 @@ impl Renderer {
         }
     }
 
-    fn render_user(&self, lua: &mlua::Lua, user: mlua::Table) -> Result<Vec<Span>, anyhow::Error> {
+    fn render_user(&self, lua: &mlua::Lua, user: &mlua::Table) -> Result<Vec<Span>, anyhow::Error> {
         let v = config::emit_sync_callback(lua, ("format-user".to_string(), user))?;
 
         self.lua_value_to_spans(lua, v)
@@ -268,7 +268,7 @@ impl Renderer {
             .map(|user| {
                 let lua_user = lua.to_value(user);
                 let rendered_user = if let Ok(mlua::Value::Table(tbl)) = lua_user {
-                    self.render_user(lua, tbl).unwrap_or_default()
+                    self.render_user(lua, &tbl).unwrap_or_default()
                 } else {
                     vec![]
                 };
