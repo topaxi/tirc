@@ -47,11 +47,10 @@ pub struct TircConfig {
 
 fn get_default_config() -> &'static str {
     indoc! {"
+        local tirc = require('tirc')
         local theme = require('tirc.tui.theme.default')
 
-        local config = {
-            debug = false,
-        }
+        local config = tirc.create_config()
 
         config.servers = {
           {
@@ -63,7 +62,9 @@ fn get_default_config() -> &'static str {
           },
         }
 
-        theme.setup(config)
+        local theme_config = {}
+
+        theme.setup(theme_config)
 
         return config
     "}
@@ -173,7 +174,7 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
 
     let config = {
         let globals = lua.globals();
-        let tirc_mod = get_or_create_module(&lua, "tirc")?;
+        let tirc_mod = get_or_create_module(&lua, "_tirc")?;
 
         tirc_mod.set("config_dir", config_dirname.display().to_string())?;
         tirc_mod.set("version", get_version_lua_value(&lua))?;
@@ -195,6 +196,20 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
         create_date_time_module(&lua)?;
         create_tirc_theme_lua_module(&lua)?;
 
+        let public_tirc_module: Table = lua
+            .load(include_str!("../../lua/tirc/init.lua"))
+            .set_name("{builtin}/lua/tirc/init.lua")
+            .call(())?;
+
+        set_loaded_modules(&lua, "tirc", public_tirc_module)?;
+
+        let config_module: Table = lua
+            .load(include_str!("../../lua/tirc/config.lua"))
+            .set_name("{builtin}/lua/tirc/config.lua")
+            .call(())?;
+
+        set_loaded_modules(&lua, "tirc.config", config_module)?;
+
         let utils_module: Table = lua
             .load(include_str!("../../lua/tirc/utils.lua"))
             .set_name("{builtin}/lua/tirc/utils.lua")
@@ -203,11 +218,11 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
         set_loaded_modules(&lua, "tirc.utils", utils_module)?;
 
         let default_theme_module: Table = lua
-            .load(include_str!("../../lua/tirc/tui/default_theme.lua"))
-            .set_name("{builtin}/lua/tirc/tui/default_theme.lua")
+            .load(include_str!("../../lua/tirc/tui/themes/default.lua"))
+            .set_name("{builtin}/lua/tirc/tui/themes/default.lua")
             .call(())?;
 
-        set_loaded_modules(&lua, "tirc.tui.theme.default", default_theme_module)?;
+        set_loaded_modules(&lua, "tirc.tui.themes.default", default_theme_module)?;
 
         let value: Value = lua
             .load(&config_lua_code)
