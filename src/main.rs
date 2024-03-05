@@ -92,6 +92,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 Ok(_) => {}
                 Err(_) => {
                     input_handle.abort();
+                    irc_handle.abort();
                     break;
                 }
             }
