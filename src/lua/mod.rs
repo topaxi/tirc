@@ -15,7 +15,7 @@ pub fn set_loaded_modules<'lua>(
     module: mlua::Table<'lua>,
 ) -> anyhow::Result<mlua::Table<'lua>> {
     let loaded: Table = get_loaded_modules(lua)?;
-    loaded.set(name, module.clone())?;
+    loaded.set(name, &module)?;
     Ok(module)
 }
 

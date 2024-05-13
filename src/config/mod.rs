@@ -229,11 +229,9 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
             .set_name(config_filename.display().to_string())
             .call(())?;
 
-        let config: TircConfig = lua.from_value(value.clone())?;
+        globals.set("config", &value)?;
 
-        globals.set("config", value)?;
-
-        config
+        lua.from_value(value)?
     };
 
     Ok((config, lua))

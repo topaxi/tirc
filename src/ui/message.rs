@@ -14,11 +14,9 @@ pub enum TircMessage<'lua> {
 
 impl<'lua> TircMessage<'lua> {
     pub fn from_message(message: Box<irc::proto::Message>, lua: &'lua Lua) -> Self {
-        TircMessage::Irc(
-            chrono::Local::now().into(),
-            message.clone(),
-            to_lua_message(lua, &message).unwrap().into(),
-        )
+        let lua_message = to_lua_message(lua, &message).unwrap().into();
+
+        TircMessage::Irc(chrono::Local::now().into(), message, lua_message)
     }
 
     pub fn get_lua_message(&self) -> &mlua::Table<'lua> {

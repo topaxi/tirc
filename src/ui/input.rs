@@ -87,6 +87,7 @@ impl<'lua> InputHandler<'lua> {
         message.tags = Some(vec![Tag("label".to_string(), Some(get_id().to_string()))]);
 
         self.irc.send(message.clone())?;
+
         Ok(message)
     }
 
