@@ -5,17 +5,24 @@ edition = "2021"
 
 [dependencies]
 failure = "0.1.8"
-futures = "0.3.28"
-irc = { git = "https://github.com/topaxi/irc.git", branch = "feat/message-serde", features = ["ctcp", "tls-native", "serde"] }
-tokio = { version = "1.28.2", features = ["full"] }
+futures = "0.3.30"
+irc = { git = "https://github.com/topaxi/irc.git", branch = "feat/message-serde", features = [
+  "ctcp",
+  "tls-native",
+  "serde",
+] }
+tokio = { version = "1.37", features = ["full"] }
 crossterm = { version = "0.27", features = ["serde"] }
-tui = { version = "0.26", package = "ratatui", features = ["crossterm", "serde"] }
+tui = { version = "0.26", package = "ratatui", features = [
+  "crossterm",
+  "serde",
+] }
 tui-input = { version = "*", features = ["crossterm"] }
-anyhow = "1.0.71"
-mlua = { version = "0.9", features = ["luajit52", "serde", "async", "serialize"] }
-xdg = "2.5.0"
-serde = "1.0.164"
-indoc = "2.0.1"
+anyhow = "1.0.83"
+mlua = { version = "0.9.7", features = ["luajit52", "async", "serialize"] }
+xdg = "2.5.2"
+serde = "1.0.201"
+indoc = "2.0.5"
 indexmap = "2"
-semver = { version = "1.0.17", features = ["serde"] }
-chrono = { version = "0.4.26", features = ["serde"] }
+semver = { version = "1.0.23", features = ["serde"] }
+chrono = { version = "0.4.38", features = ["serde"] }
