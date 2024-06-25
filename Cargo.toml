@@ -13,7 +13,7 @@ irc = { git = "https://github.com/topaxi/irc.git", branch = "feat/message-serde"
 ] }
 tokio = { version = "1.37", features = ["full"] }
 crossterm = { version = "0.27", features = ["serde"] }
-tui = { version = "0.26", package = "ratatui", features = [
+tui = { version = "0.27", package = "ratatui", features = [
   "crossterm",
   "serde",
 ] }
