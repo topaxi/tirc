@@ -164,9 +164,15 @@ impl Renderer {
                         )
                         .unwrap_or_else(|_| vec![]);
 
+                    // TODO: Split up render message into render nickname and render message
                     let message_spans = self
                         .render_message(lua, lua_message, &state.nickname)
                         .unwrap_or_else(|_| vec![Span::raw(message.to_string())]);
+
+                    // Once we have the message rendered from the theme, we use the `textwrap`
+                    // crate to wrap the message to the width of available space.
+                    // Potentially we might want to do this before we pass the message to the
+                    // theme.
 
                     if message_spans.is_empty() {
                         return message_spans;

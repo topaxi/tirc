@@ -26,3 +26,4 @@ indoc = "2.0.5"
 indexmap = "2"
 semver = { version = "1.0.23", features = ["serde"] }
 chrono = { version = "0.4.38", features = ["serde"] }
+textwrap = "0.16.1"
