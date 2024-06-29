@@ -17,12 +17,27 @@ pub enum Mode {
 }
 
 #[derive(Debug)]
+pub struct ChatBuffer<'lua> {
+    pub messages: Vec<TircMessage<'lua>>,
+    pub scroll_position: usize,
+}
+
+impl Default for ChatBuffer<'_> {
+    fn default() -> Self {
+        ChatBuffer {
+            messages: vec![],
+            scroll_position: 0,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct State<'lua> {
     pub mode: Mode,
     pub nickname: String,
     pub server: String,
     pub current_buffer: String,
-    pub buffers: IndexMap<String, Vec<TircMessage<'lua>>>,
+    pub buffers: IndexMap<String, ChatBuffer<'lua>>,
     pub users_in_current_buffer: Rc<[User]>,
 }
 
@@ -38,7 +53,7 @@ impl<'lua> State<'lua> {
 
         let buffers = {
             let mut buffers = IndexMap::new();
-            buffers.insert(default_buffer_name.to_string(), vec![]);
+            buffers.insert(default_buffer_name.to_string(), ChatBuffer::default());
             buffers
         };
 
@@ -98,7 +113,7 @@ impl<'lua> State<'lua> {
         let buffers = &mut self.buffers;
 
         if buffers.get(buffer_name).is_none() {
-            buffers.insert(buffer_name.to_string(), vec![]);
+            buffers.insert(buffer_name.to_string(), ChatBuffer::default());
         }
     }
 
@@ -109,7 +124,7 @@ impl<'lua> State<'lua> {
             if let Some(tags) = &m.tags {
                 if let Some(label) = tags.iter().find(|tag| tag.0 == "label") {
                     // Find index of message with same tag label
-                    let index = buffer.iter().position(|m| match m {
+                    let index = buffer.messages.iter().position(|m| match m {
                         TircMessage::Irc(_, m, _) => m.tags.as_ref().map_or(false, |tags| {
                             tags.iter().any(|tag| tag.0 == "label" && tag.1 == label.1)
                         }),
@@ -118,7 +133,7 @@ impl<'lua> State<'lua> {
 
                     if let Some(index) = index {
                         // Remove old message
-                        buffer[index] = message;
+                        buffer.messages[index] = message;
 
                         return;
                     }
@@ -126,7 +141,7 @@ impl<'lua> State<'lua> {
             }
         }
 
-        buffer.push(message);
+        buffer.messages.push(message);
     }
 
     fn get_target_buffer_name(&mut self, message: &Message) -> String {
@@ -168,6 +183,8 @@ impl<'lua> State<'lua> {
 
 #[cfg(test)]
 mod tests {
+    use crate::ui::state::ChatBuffer;
+
     #[test]
     fn test_get_buffer_name_by_index() {
         let state = super::State::default();
@@ -183,7 +200,9 @@ mod tests {
     #[test]
     fn test_set_current_buffer_index() {
         let mut state = super::State::default();
-        state.buffers.insert("foo".to_string(), vec![]);
+        state
+            .buffers
+            .insert("foo".to_string(), ChatBuffer::default());
         assert_eq!(state.get_current_buffer_index(), 0);
         state.set_current_buffer_index(1);
         assert_eq!(state.get_current_buffer_index(), 1);
@@ -192,7 +211,9 @@ mod tests {
     #[test]
     fn test_set_current_buffer() {
         let mut state = super::State::default();
-        state.buffers.insert("foo".to_string(), vec![]);
+        state
+            .buffers
+            .insert("foo".to_string(), ChatBuffer::default());
         assert_eq!(state.get_current_buffer_index(), 0);
         state.set_current_buffer("foo");
         assert_eq!(state.get_current_buffer_index(), 1);
@@ -201,8 +222,12 @@ mod tests {
     #[test]
     fn test_next_buffer() {
         let mut state = super::State::default();
-        state.buffers.insert("foo".to_string(), vec![]);
-        state.buffers.insert("bar".to_string(), vec![]);
+        state
+            .buffers
+            .insert("foo".to_string(), ChatBuffer::default());
+        state
+            .buffers
+            .insert("bar".to_string(), ChatBuffer::default());
         assert_eq!(state.get_current_buffer_index(), 0);
         state.next_buffer();
         assert_eq!(state.get_current_buffer_index(), 1);
@@ -215,8 +240,12 @@ mod tests {
     #[test]
     fn test_previous_buffer() {
         let mut state = super::State::default();
-        state.buffers.insert("foo".to_string(), vec![]);
-        state.buffers.insert("bar".to_string(), vec![]);
+        state
+            .buffers
+            .insert("foo".to_string(), ChatBuffer::default());
+        state
+            .buffers
+            .insert("bar".to_string(), ChatBuffer::default());
         assert_eq!(state.get_current_buffer_index(), 0);
         state.previous_buffer();
         assert_eq!(state.get_current_buffer_index(), 2);

@@ -13,7 +13,7 @@ use mlua::Lua;
 
 use crate::{config::emit_sync_callback, tui::Tui};
 
-use super::{Mode, State, TircMessage};
+use super::{state::ChatBuffer, Mode, State, TircMessage};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(1);
 fn get_id() -> usize {
@@ -45,16 +45,13 @@ impl<'lua> InputHandler<'lua> {
     pub fn sync_state(&mut self, state: &mut State) -> Result<(), anyhow::Error> {
         state.nickname = self.irc.current_nickname().to_string();
 
-        let channels = match self.irc.list_channels() {
-            Some(channels) => channels,
-            None => vec![],
-        };
+        let channels = self.irc.list_channels().unwrap_or_default();
 
         let buffers = &mut state.buffers;
 
         for channel in channels {
             if buffers.get(&channel).is_none() {
-                buffers.insert(channel, vec![]);
+                buffers.insert(channel, ChatBuffer::default());
             }
         }
 
