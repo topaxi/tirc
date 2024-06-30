@@ -56,32 +56,28 @@ impl Renderer {
             }
             mlua::Value::Table(v) => {
                 for v in v.sequence_values::<mlua::Value>() {
-                    let v = v?;
-                    match v {
+                    match v? {
                         mlua::Value::Table(v) => {
                             let style = v.get::<_, Option<mlua::Value>>(2)?;
-                            let style = match style {
-                                Some(mlua::Value::Table(_)) => {
-                                    match lua.from_value::<Style>(style.unwrap()) {
-                                        Ok(style) => {
-                                            // Apply parent style onto this style
-                                            let style = if let Some(parent_style) = parent_style {
-                                                parent_style.patch(style)
-                                            } else {
-                                                style
-                                            };
-                                            Some(style)
-                                        }
-                                        _ => None,
+                            let style = if matches!(style, Some(mlua::Value::Table(_))) {
+                                match lua.from_value::<Style>(style.unwrap()) {
+                                    Ok(style) => {
+                                        // Apply parent style onto this style
+                                        let style = if let Some(parent_style) = parent_style {
+                                            parent_style.patch(style)
+                                        } else {
+                                            style
+                                        };
+                                        Some(style)
                                     }
+                                    _ => None,
                                 }
-                                _ => None,
+                            } else {
+                                None
                             };
 
                             if let Some(style) = style {
-                                let value = v.get::<_, Option<mlua::Value>>(1)?;
-
-                                if let Some(value) = value {
+                                if let Some(value) = v.get::<_, Option<mlua::Value>>(1)? {
                                     Self::flatten_lua_value(lua, value, spans, Some(style))?;
                                 }
                             } else {
@@ -93,7 +89,7 @@ impl Renderer {
                                 )?;
                             }
                         }
-                        _ => {
+                        v => {
                             Self::flatten_lua_value(lua, v, spans, parent_style)?;
                         }
                     }
