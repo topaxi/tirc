@@ -48,7 +48,7 @@ pub struct TircConfig {
 fn get_default_config() -> &'static str {
     indoc! {"
         local tirc = require('tirc')
-        local theme = require('tirc.tui.theme.default')
+        local theme = require('tirc.tui.themes.default')
 
         local config = tirc.create_config()
 
