@@ -17,17 +17,19 @@ use super::renderer::Renderer;
 pub struct Tui {
     terminal: tui::Terminal<CrosstermBackend<Stdout>>,
     input: Input,
+    renderer: Renderer,
 }
 
 impl Tui {
-    pub fn new() -> io::Result<Tui> {
+    pub fn new() -> io::Result<Self> {
         let stdout = io::stdout();
         let backend = CrosstermBackend::new(stdout);
         let terminal = tui::Terminal::new(backend)?;
 
-        Ok(Tui {
+        Ok(Self {
             terminal,
             input: Input::default(),
+            renderer: Renderer::default(),
         })
     }
 
@@ -59,9 +61,7 @@ impl Tui {
 
     pub fn render(&mut self, _irc: &Client, lua: &Lua, state: &State) -> Result<(), anyhow::Error> {
         self.terminal.draw(|f| {
-            let mut renderer = Renderer::new();
-
-            renderer.render(f, state, lua, &self.input);
+            self.renderer.render(f, state, lua, &self.input);
         })?;
 
         Ok(())

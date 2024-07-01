@@ -14,11 +14,18 @@ use crate::{
     ui::{Mode, State, TircMessage},
 };
 
+#[derive(Debug)]
 pub struct Renderer {}
 
+impl Default for Renderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Renderer {
-    pub fn new() -> Renderer {
-        Renderer {}
+    pub fn new() -> Self {
+        Self {}
     }
 
     fn get_layout(&self) -> Layout {
