@@ -107,8 +107,7 @@ where
         mlua::Value::Table(tbl) => {
             #[allow(clippy::never_loop)]
             for func in tbl.sequence_values::<mlua::Function>() {
-                let func = func?;
-                return func.call(args);
+                return func?.call(args);
             }
 
             Ok(mlua::Value::Nil)
