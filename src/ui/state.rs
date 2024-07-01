@@ -16,19 +16,10 @@ pub enum Mode {
     Insert,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ChatBuffer<'lua> {
     pub messages: Vec<TircMessage<'lua>>,
     pub scroll_position: usize,
-}
-
-impl Default for ChatBuffer<'_> {
-    fn default() -> Self {
-        ChatBuffer {
-            messages: vec![],
-            scroll_position: 0,
-        }
-    }
 }
 
 #[derive(Debug)]

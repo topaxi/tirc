@@ -6,7 +6,6 @@ use crossterm::terminal::{
 use irc::client::Client;
 use mlua::Lua;
 use std::io::{self, Stdout};
-use tui;
 use tui::backend::CrosstermBackend;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
