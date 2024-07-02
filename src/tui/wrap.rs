@@ -57,7 +57,7 @@ pub struct Options<'a> {
 /// Wraps a [`Text`] block.
 ///
 /// `text` should be broken up into lines at the time it's passed in.
-pub(crate) fn wrap_text<'a>(text: &'a Text, options: Options<'a>) -> Text<'a> {
+pub(crate) fn wrap_text<'a>(text: &'a Text<'_>, options: Options<'a>) -> Text<'a> {
     let mut lines = Vec::new();
     // We currently assume that lines in text don't have embedded newlines in
     // them. This assumption might need to be revisited.
@@ -71,7 +71,7 @@ pub(crate) fn wrap_text<'a>(text: &'a Text, options: Options<'a>) -> Text<'a> {
 /// Wraps a [`Line`] representing a single line.
 ///
 /// If the text contains multiple lines, use [`wrap_text`] instead.
-pub(crate) fn wrap_line<'a>(line: &'a Line, options: Options<'a>) -> Text<'a> {
+pub(crate) fn wrap_line<'a>(line: &'a Line<'_>, options: Options<'a>) -> Text<'a> {
     let mut lines = Vec::new();
     wrap_single_line(line, &options, &mut lines);
     Text::from(lines)
