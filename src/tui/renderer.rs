@@ -146,9 +146,7 @@ impl Renderer {
         let current_buffer_name = &state.current_buffer;
         let buffers = &state.buffers;
 
-        let current_buffer = buffers
-            .get(current_buffer_name.to_owned().as_str())
-            .unwrap();
+        let current_buffer = buffers.get(current_buffer_name).unwrap();
 
         let messages: Vec<_> = current_buffer
             .messages
