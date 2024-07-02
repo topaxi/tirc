@@ -126,7 +126,7 @@ impl Renderer {
         date_time: &mlua::Table,
         message: &mlua::Table,
     ) -> Result<Vec<Span>, anyhow::Error> {
-        let v = config::emit_sync_callback(lua, ("format-time".to_string(), (date_time, message)))?;
+        let v = config::emit_sync_callback(lua, "format-time", (date_time, message))?;
 
         self.lua_value_to_spans(lua, v)
     }
@@ -137,8 +137,7 @@ impl Renderer {
         message: &mlua::Table,
         nickname: &str,
     ) -> Result<Vec<Span>, anyhow::Error> {
-        let v =
-            config::emit_sync_callback(lua, ("format-message".to_string(), (message, nickname)))?;
+        let v = config::emit_sync_callback(lua, "format-message", (message, nickname))?;
 
         self.lua_value_to_spans(lua, v)
     }
@@ -246,7 +245,7 @@ impl Renderer {
     }
 
     fn render_user(&self, lua: &mlua::Lua, user: &mlua::Table) -> Result<Vec<Span>, anyhow::Error> {
-        let v = config::emit_sync_callback(lua, ("format-user".to_string(), user))?;
+        let v = config::emit_sync_callback(lua, "format-user", user)?;
 
         self.lua_value_to_spans(lua, v)
     }

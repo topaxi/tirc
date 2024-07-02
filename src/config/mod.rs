@@ -93,12 +93,13 @@ fn register_event(lua: &Lua, (name, func): (String, mlua::Function)) -> mlua::Re
     }
 }
 
-pub fn emit_sync_callback<'lua, A>(
+pub fn emit_sync_callback<'lua, Args>(
     lua: &'lua Lua,
-    (name, args): (String, A),
+    name: &str,
+    args: Args,
 ) -> mlua::Result<mlua::Value<'lua>>
 where
-    A: IntoLuaMulti<'lua>,
+    Args: IntoLuaMulti<'lua>,
 {
     let decorated_name = format!("tirc-event-{}", name);
     let tbl: mlua::Value = lua.named_registry_value(&decorated_name)?;
