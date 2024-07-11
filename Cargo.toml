@@ -9,6 +9,7 @@ futures = "0.3.30"
 irc = { git = "https://github.com/topaxi/irc.git", branch = "feat/message-serde", features = [
   "ctcp",
   "tls-native",
+  "channel-lists",
   "serde",
 ] }
 tokio = { version = "1.37", features = ["full"] }
