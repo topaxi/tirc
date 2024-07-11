@@ -1,4 +1,4 @@
----@alias EventName 'message' | 'format-time' | 'format-message' | 'format-user'
+---@alias EventName 'message' | 'format-message-time' | 'format-message-nickname' | 'format-message-text' | 'format-user'
 
 ---@class TircSender
 ---@field send_privmsg fun(target: string, message: string)

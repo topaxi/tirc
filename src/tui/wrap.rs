@@ -57,6 +57,7 @@ pub struct Options<'a> {
 /// Wraps a [`Text`] block.
 ///
 /// `text` should be broken up into lines at the time it's passed in.
+#[allow(dead_code)]
 pub(crate) fn wrap_text<'a>(text: &'a Text<'_>, options: Options<'a>) -> Text<'a> {
     let mut lines = Vec::new();
     // We currently assume that lines in text don't have embedded newlines in

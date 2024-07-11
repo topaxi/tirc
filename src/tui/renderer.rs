@@ -3,7 +3,7 @@ use mlua::LuaSerdeExt;
 use tui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
-    text::{Line, Span, Text},
+    text::{Line, Span},
     widgets::{Block, Borders, List, ListDirection, ListItem, Paragraph},
 };
 use tui_input::Input;
@@ -18,6 +18,13 @@ use super::wrap::wrap_line;
 
 #[derive(Debug)]
 pub struct Renderer {}
+
+#[derive(Debug, Clone, Default)]
+pub struct RenderedMessage<'a> {
+    pub time: Box<[Span<'a>]>,
+    pub nickname: Box<[Span<'a>]>,
+    pub message: Box<Line<'a>>,
+}
 
 impl Default for Renderer {
     fn default() -> Self {
@@ -122,24 +129,35 @@ impl Renderer {
         }
     }
 
-    fn render_time(
+    fn render_message_time(
         &self,
         lua: &mlua::Lua,
         date_time: &mlua::Table,
         message: &mlua::Table,
     ) -> Result<Vec<Span>, anyhow::Error> {
-        let v = config::emit_sync_callback(lua, "format-time", (date_time, message))?;
+        let v = config::emit_sync_callback(lua, "format-message-time", (date_time, message))?;
 
         self.lua_value_to_spans(lua, v)
     }
 
-    fn render_message(
+    fn render_message_nickname(
         &self,
         lua: &mlua::Lua,
         message: &mlua::Table,
         nickname: &str,
     ) -> Result<Vec<Span>, anyhow::Error> {
-        let v = config::emit_sync_callback(lua, "format-message", (message, nickname))?;
+        let v = config::emit_sync_callback(lua, "format-message-nickname", (message, nickname))?;
+
+        self.lua_value_to_spans(lua, v)
+    }
+
+    fn render_message_text(
+        &self,
+        lua: &mlua::Lua,
+        message: &mlua::Table,
+        nickname: &str,
+    ) -> Result<Vec<Span>, anyhow::Error> {
+        let v = config::emit_sync_callback(lua, "format-message-text", (message, nickname))?;
 
         self.lua_value_to_spans(lua, v)
     }
@@ -152,14 +170,37 @@ impl Renderer {
             .get(current_buffer_name.to_owned().as_str())
             .unwrap();
 
-        let messages: Vec<_> = current_buffer
+        let messages = current_buffer
             .messages
             .iter()
             .rev()
-            .map(|tirc_message| self.render_message_into_text(&state, &lua, &tirc_message, &rect))
-            .filter(|text| !text.width() > 0)
+            .filter_map(|tirc_message| self.render_message(state, lua, tirc_message))
+            .collect::<Vec<_>>();
+
+        let messages = messages
+            .iter()
+            .filter(|message| !message.message.width() > 0)
+            .map(|message| {
+                let initial_indent = message.time.clone();
+
+                let subsequent_indent = Box::new([Span::raw(
+                    " ".repeat(message.time.iter().map(|span| span.width()).sum()),
+                )]);
+
+                let text = wrap_line(
+                    &message.message,
+                    super::wrap::Options {
+                        width: rect.width as usize,
+                        initial_indent,
+                        subsequent_indent,
+                        break_words: true,
+                    },
+                );
+
+                text
+            })
             .map(ListItem::new)
-            .collect();
+            .collect::<Vec<_>>();
 
         let list = List::new(messages)
             .block(
@@ -172,71 +213,41 @@ impl Renderer {
         f.render_widget(list, rect);
     }
 
-    fn render_message_into_text(
+    fn render_message(
         &self,
         state: &State,
         lua: &mlua::Lua,
         tirc_message: &TircMessage,
-        rect: &Rect,
-    ) -> Text {
+    ) -> Option<RenderedMessage> {
         if let TircMessage::Irc(date_time, message, lua_message) = tirc_message {
             let time_spans = self
-                .render_time(
+                .render_message_time(
                     lua,
                     &date_time_to_table(lua, date_time).unwrap(),
                     lua_message,
                 )
                 .unwrap_or_else(|_| vec![]);
 
-            // TODO: Split up render message into render nickname and render message
+            let nickname_spans = self
+                .render_message_nickname(lua, lua_message, &state.nickname)
+                .unwrap_or_else(|_| vec![]);
+
             let message_spans = self
-                .render_message(lua, lua_message, &state.nickname)
+                .render_message_text(lua, lua_message, &state.nickname)
                 .unwrap_or_else(|_| vec![Span::raw(message.to_string())]);
 
             if message_spans.is_empty() {
-                return Text::default();
+                return None;
             }
 
-            let time_spans_width: usize = time_spans.iter().map(|span| span.width()).sum();
-            let line = Line::from(message_spans);
-
-            let text = wrap_line(
-                line,
-                super::wrap::Options {
-                    width: rect.width as usize,
-                    initial_indent: time_spans.into(),
-                    subsequent_indent: Box::new([Span::raw(" ".repeat(time_spans_width))]),
-                    break_words: true,
-                },
-            );
-
-            text
+            Some(RenderedMessage {
+                time: time_spans.into_boxed_slice(),
+                nickname: nickname_spans.into_boxed_slice(),
+                message: Box::new(Line::from(message_spans)),
+            })
         } else {
-            Text::default()
+            None
         }
-    }
-
-    fn split_spans_into_lines(spans: Vec<Span>, width: usize) -> Vec<Vec<Span>> {
-        let mut lines = vec![];
-        let mut current_line = vec![];
-        let mut current_line_width = 0;
-
-        for span in spans {
-            let span_width = span.width();
-            if current_line_width + span_width > width {
-                lines.push(current_line);
-                current_line = vec![];
-                current_line_width = 0;
-            }
-            current_line.push(span);
-            current_line_width += span_width;
-        }
-
-        if !current_line.is_empty() {
-            lines.push(current_line);
-        }
-
-        lines
     }
 
     fn render_buffer_bar(&self, f: &mut tui::Frame, state: &State, rect: Rect) {
