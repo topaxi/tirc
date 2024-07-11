@@ -325,7 +325,6 @@ function M.setup(_config)
 
   tirc.on('format-message-time', handle_event(M.format_message_time))
   tirc.on('format-message-text', handle_event(M.format_message_text))
-  tirc.on('format-message-nickname', handle_event(M.format_message_nickname))
   tirc.on('format-user', handle_event(M.format_user))
 end
 

@@ -22,7 +22,6 @@ pub struct Renderer {}
 #[derive(Debug, Clone, Default)]
 pub struct RenderedMessage<'a> {
     pub time: Box<[Span<'a>]>,
-    pub nickname: Box<[Span<'a>]>,
     pub message: Box<Line<'a>>,
 }
 
@@ -140,17 +139,6 @@ impl Renderer {
         self.lua_value_to_spans(lua, v)
     }
 
-    fn render_message_nickname(
-        &self,
-        lua: &mlua::Lua,
-        message: &mlua::Table,
-        nickname: &str,
-    ) -> Result<Vec<Span>, anyhow::Error> {
-        let v = config::emit_sync_callback(lua, "format-message-nickname", (message, nickname))?;
-
-        self.lua_value_to_spans(lua, v)
-    }
-
     fn render_message_text(
         &self,
         lua: &mlua::Lua,
@@ -183,11 +171,26 @@ impl Renderer {
             .map(|message| {
                 let initial_indent = message.time.clone();
 
-                let subsequent_indent = Box::new([Span::raw(
-                    " ".repeat(message.time.iter().map(|span| span.width()).sum()),
-                )]);
+                // TODO: This is a hack to have the time | user separator included in the
+                // subsequent indent. It would be better to have a more explicit solution.
+                let subsequent_indent = if initial_indent.len() > 0 {
+                    Box::new([
+                        Span::raw(
+                            " ".repeat(
+                                initial_indent
+                                    .iter()
+                                    .take(initial_indent.len() - 1)
+                                    .map(|span| span.width())
+                                    .sum(),
+                            ),
+                        ),
+                        initial_indent.iter().last().unwrap().clone(),
+                    ])
+                } else {
+                    Box::new([Span::raw(""), Span::raw("")])
+                };
 
-                let text = wrap_line(
+                wrap_line(
                     &message.message,
                     super::wrap::Options {
                         width: rect.width as usize,
@@ -195,9 +198,7 @@ impl Renderer {
                         subsequent_indent,
                         break_words: true,
                     },
-                );
-
-                text
+                )
             })
             .map(ListItem::new)
             .collect::<Vec<_>>();
@@ -220,7 +221,7 @@ impl Renderer {
         tirc_message: &TircMessage,
     ) -> Option<RenderedMessage> {
         if let TircMessage::Irc(date_time, message, lua_message) = tirc_message {
-            let time_spans = self
+            let mut time_spans = self
                 .render_message_time(
                     lua,
                     &date_time_to_table(lua, date_time).unwrap(),
@@ -228,9 +229,9 @@ impl Renderer {
                 )
                 .unwrap_or_else(|_| vec![]);
 
-            let nickname_spans = self
-                .render_message_nickname(lua, lua_message, &state.nickname)
-                .unwrap_or_else(|_| vec![]);
+            if time_spans.len() == 1 {
+                time_spans.push(Span::raw(""));
+            }
 
             let message_spans = self
                 .render_message_text(lua, lua_message, &state.nickname)
@@ -242,7 +243,6 @@ impl Renderer {
 
             Some(RenderedMessage {
                 time: time_spans.into_boxed_slice(),
-                nickname: nickname_spans.into_boxed_slice(),
                 message: Box::new(Line::from(message_spans)),
             })
         } else {
