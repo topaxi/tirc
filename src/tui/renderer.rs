@@ -14,8 +14,16 @@ use crate::{
     ui::{Mode, State, TircMessage},
 };
 
+use super::wrap::wrap_line;
+
 #[derive(Debug)]
 pub struct Renderer {}
+
+#[derive(Debug, Clone, Default)]
+pub struct RenderedMessage<'a> {
+    pub time: Box<[Span<'a>]>,
+    pub message: Box<Line<'a>>,
+}
 
 impl Default for Renderer {
     fn default() -> Self {
@@ -120,24 +128,24 @@ impl Renderer {
         }
     }
 
-    fn render_time(
+    fn render_message_time(
         &self,
         lua: &mlua::Lua,
         date_time: &mlua::Table,
         message: &mlua::Table,
     ) -> Result<Vec<Span>, anyhow::Error> {
-        let v = config::emit_sync_callback(lua, "format-time", (date_time, message))?;
+        let v = config::emit_sync_callback(lua, "format-message-time", (date_time, message))?;
 
         self.lua_value_to_spans(lua, v)
     }
 
-    fn render_message(
+    fn render_message_text(
         &self,
         lua: &mlua::Lua,
         message: &mlua::Table,
         nickname: &str,
     ) -> Result<Vec<Span>, anyhow::Error> {
-        let v = config::emit_sync_callback(lua, "format-message", (message, nickname))?;
+        let v = config::emit_sync_callback(lua, "format-message-text", (message, nickname))?;
 
         self.lua_value_to_spans(lua, v)
     }
@@ -148,37 +156,50 @@ impl Renderer {
 
         let current_buffer = buffers.get(current_buffer_name).unwrap();
 
-        let messages: Vec<_> = current_buffer
+        let messages = current_buffer
             .messages
             .iter()
             .rev()
-            .map(|tirc_message| {
-                if let TircMessage::Irc(date_time, message, lua_message) = tirc_message {
-                    let time_spans = self
-                        .render_time(
-                            lua,
-                            &date_time_to_table(lua, date_time).unwrap(),
-                            lua_message,
-                        )
-                        .unwrap_or_else(|_| vec![]);
+            .filter_map(|tirc_message| self.render_message(state, lua, tirc_message))
+            .collect::<Vec<_>>();
 
-                    let message_spans = self
-                        .render_message(lua, lua_message, &state.nickname)
-                        .unwrap_or_else(|_| vec![Span::raw(message.to_string())]);
+        let messages = messages
+            .iter()
+            .filter(|message| !message.message.width() > 0)
+            .map(|message| {
+                let initial_indent = message.time.clone();
 
-                    if message_spans.is_empty() {
-                        return message_spans;
-                    }
-
-                    [time_spans, message_spans].concat()
+                // TODO: This is a hack to have the time | user separator included in the
+                // subsequent indent. It would be better to have a more explicit solution.
+                let subsequent_indent = if initial_indent.len() > 0 {
+                    Box::new([
+                        Span::raw(
+                            " ".repeat(
+                                initial_indent
+                                    .iter()
+                                    .take(initial_indent.len() - 1)
+                                    .map(|span| span.width())
+                                    .sum(),
+                            ),
+                        ),
+                        initial_indent.iter().last().unwrap().clone(),
+                    ])
                 } else {
-                    vec![]
-                }
+                    Box::new([Span::raw(""), Span::raw("")])
+                };
+
+                wrap_line(
+                    &message.message,
+                    super::wrap::Options {
+                        width: rect.width as usize,
+                        initial_indent,
+                        subsequent_indent,
+                        break_words: true,
+                    },
+                )
             })
-            .filter(|spans| !spans.is_empty())
-            .map(Line::from)
             .map(ListItem::new)
-            .collect();
+            .collect::<Vec<_>>();
 
         let list = List::new(messages)
             .block(
@@ -189,6 +210,42 @@ impl Renderer {
             .direction(ListDirection::BottomToTop);
 
         f.render_widget(list, rect);
+    }
+
+    fn render_message(
+        &self,
+        state: &State,
+        lua: &mlua::Lua,
+        tirc_message: &TircMessage,
+    ) -> Option<RenderedMessage> {
+        if let TircMessage::Irc(date_time, message, lua_message) = tirc_message {
+            let mut time_spans = self
+                .render_message_time(
+                    lua,
+                    &date_time_to_table(lua, date_time).unwrap(),
+                    lua_message,
+                )
+                .unwrap_or_else(|_| vec![]);
+
+            if time_spans.len() == 1 {
+                time_spans.push(Span::raw(""));
+            }
+
+            let message_spans = self
+                .render_message_text(lua, lua_message, &state.nickname)
+                .unwrap_or_else(|_| vec![Span::raw(message.to_string())]);
+
+            if message_spans.is_empty() {
+                return None;
+            }
+
+            Some(RenderedMessage {
+                time: time_spans.into_boxed_slice(),
+                message: Box::new(Line::from(message_spans)),
+            })
+        } else {
+            None
+        }
     }
 
     fn render_buffer_bar(&self, f: &mut tui::Frame, state: &State, rect: Rect) {

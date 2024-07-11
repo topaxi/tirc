@@ -39,12 +39,12 @@ function M.format_join(msg)
   return {
     { msg.prefix.Nickname[1], blue },
     msg.command.JOIN[3] and msg.command.JOIN[3] ~= 'Unknown' and {
-      { ' (', gray },
+      { ' (',                gray },
       { msg.command.JOIN[3], blue },
-      { ')', gray },
+      { ')',                 gray },
     } or '',
-    { ' has joined ', twhite },
-    { msg.command.JOIN[1], green },
+    { ' has joined ',         twhite },
+    { msg.command.JOIN[1],    green },
   }
 end
 
@@ -52,8 +52,8 @@ end
 function M.format_part(msg)
   return {
     { msg.prefix.Nickname[1], blue },
-    { ' has parted ', twhite },
-    { msg.command.PART[1], green },
+    { ' has parted ',         twhite },
+    { msg.command.PART[1],    green },
   }
 end
 
@@ -61,9 +61,9 @@ end
 ---@param style TircThemeStyle
 local function format_privmsg_nickname(nickname, style)
   return {
-    { '<', gray },
+    { '<',      gray },
     { nickname, style },
-    { '>', gray },
+    { '>',      gray },
   }
 end
 
@@ -107,7 +107,7 @@ function M.format_privmsg(msg, nickname)
   if is_draft then
     return {
       is_action and format_privmsg_action_nickname(nickname, darkgray)
-        or format_privmsg_nickname(nickname, darkgray),
+      or format_privmsg_nickname(nickname, darkgray),
       ' ',
       { format_privmsg_message(message_str), darkgray },
     }
@@ -115,7 +115,7 @@ function M.format_privmsg(msg, nickname)
 
   return {
     is_action and format_privmsg_action_nickname(msg.prefix.Nickname[1], white)
-      or format_privmsg_nickname(msg.prefix.Nickname[1], blue),
+    or format_privmsg_nickname(msg.prefix.Nickname[1], blue),
     ' ',
     format_privmsg_message(message_str),
   }
@@ -224,7 +224,7 @@ function M.format_user_mode(msg)
   return format_user_or_channel_mode(msg, 'UserMODE', 'umode')
 end
 
-function M.format_message(msg, nickname)
+function M.format_message_text(msg, nickname)
   if msg.command.JOIN then
     return M.format_join(msg)
   elseif msg.command.PART then
@@ -239,8 +239,8 @@ function M.format_message(msg, nickname)
     return M.format_user_mode(msg)
   elseif msg.command.Response then
     if
-      msg.command.Response[1] == 'RPL_NAMREPLY'
-      or msg.command.Response[1] == 'RPL_ENDOFNAMES'
+        msg.command.Response[1] == 'RPL_NAMREPLY'
+        or msg.command.Response[1] == 'RPL_ENDOFNAMES'
     then
       return nil
     end
@@ -272,7 +272,7 @@ local function get_time_from_tags(tags)
   end
 end
 
-function M.format_time(dt, msg)
+function M.format_message_time(dt, msg)
   local time_tag = get_time_from_tags(msg.tags)
 
   if time_tag then
@@ -323,8 +323,8 @@ function M.setup(_config)
     end
   end
 
-  tirc.on('format-time', handle_event(M.format_time))
-  tirc.on('format-message', handle_event(M.format_message))
+  tirc.on('format-message-time', handle_event(M.format_message_time))
+  tirc.on('format-message-text', handle_event(M.format_message_text))
   tirc.on('format-user', handle_event(M.format_user))
 end
 
