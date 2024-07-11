@@ -153,7 +153,7 @@ fn wrap_single_line_slow_path<'a>(
             output_line.extend_from_slice(&options.subsequent_indent);
         }
 
-        for (position, word) in words.into_iter().with_position() {
+        for (position, word) in words.iter().with_position() {
             match position {
                 Position::First | Position::Middle => {
                     output_line.extend(word.word_span());
@@ -172,7 +172,7 @@ fn wrap_single_line_slow_path<'a>(
     }
 }
 
-fn find_words_in_spans<'a>(spans: &'a Vec<Span<'_>>) -> impl Iterator<Item = StyledWord<'a>> {
+fn find_words_in_spans<'a>(spans: &'a [Span<'_>]) -> impl Iterator<Item = StyledWord<'a>> {
     spans.iter().flat_map(find_words_in_span)
 }
 
