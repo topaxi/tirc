@@ -446,6 +446,26 @@ mod tests {
         let value = lua
             .load(indoc! {"
                 local theme = require('tirc.tui.theme')
+                local blue = theme.style { fg = 'blue' }
+                return { 'a', blue }
+            "})
+            .eval()?;
+        let spans = renderer.lua_value_to_spans(&lua, value)?;
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "a");
+        assert_eq!(spans[0].style.fg, Some(Color::Blue));
+        Ok(())
+    }
+
+    #[test]
+    fn test_lua_value_to_styled_spans_deeply_nested() -> anyhow::Result<(), anyhow::Error> {
+        use super::*;
+        let renderer = Renderer::new();
+        let lua = mlua::Lua::new();
+        create_tirc_theme_lua_module(&lua)?;
+        let value = lua
+            .load(indoc! {"
+                local theme = require('tirc.tui.theme')
 
                 local blue = theme.style { fg = 'blue' }
                 local green = theme.style { fg = 'green' }
