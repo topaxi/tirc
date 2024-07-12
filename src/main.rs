@@ -40,14 +40,14 @@ fn create_lua_irc_sender(
     Ok(tbl)
 }
 
-#[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
-    let (config, lua) = load_config().await?;
-
-    let mut irc = create_irc_client(&config).await?;
+async fn setup_irc(
+    config: &TircConfig,
+    lua: &mlua::Lua,
+) -> Result<(Client, ClientStream), anyhow::Error> {
+    let mut irc = create_irc_client(config).await?;
     let stream = irc.stream()?;
 
-    lua.set_named_registry_value("sender", create_lua_irc_sender(&lua, irc.sender())?)?;
+    lua.set_named_registry_value("sender", create_lua_irc_sender(lua, irc.sender())?)?;
 
     irc.send_cap_req(&[
         Capability::EchoMessage,
@@ -63,6 +63,14 @@ async fn main() -> Result<(), anyhow::Error> {
     ])?;
 
     irc.identify()?;
+
+    Ok((irc, stream))
+}
+
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
+    let (config, lua) = load_config().await?;
+    let (irc, stream) = setup_irc(&config, &lua).await?;
 
     let (tx, mut rx) = mpsc::channel(16);
 
@@ -128,13 +136,12 @@ async fn poll_input(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), failure::Er
             }
         }
 
-        if last_tick.elapsed() < tick_rate {
-            continue;
+        if last_tick.elapsed() >= tick_rate {
+            last_tick = Instant::now();
+            tx.send(Event::Tick).await?;
         }
 
-        if (tx.send(Event::Tick).await).is_ok() {
-            last_tick = Instant::now();
-        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
