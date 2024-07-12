@@ -160,6 +160,11 @@ impl Renderer {
             .messages
             .iter()
             .rev()
+            // Do not render _all_ messages, only the ones that fit in the available space
+            // We render a bit more as some messages might get filtered out. Although some might
+            // wrap and make even out the edge case.
+            // TODO: Make message list scrollable
+            .take((rect.height as usize) + (rect.height as usize) / 2)
             .filter_map(|tirc_message| self.render_message(state, lua, tirc_message))
             .collect::<Vec<_>>();
 
@@ -319,6 +324,9 @@ impl Renderer {
     fn render_users(&self, f: &mut tui::Frame, state: &State, lua: &mlua::Lua, rect: Rect) {
         let mut users = state.users_in_current_buffer.to_vec();
 
+        // TODO: We might not want to sort the users every time we render the user list.
+        //       A good way might be to hold the users in a sorted datastructure on the state
+        //       itself.
         users.sort_unstable_by(|a, b| {
             Self::get_access_level_priority(&a.highest_access_level())
                 .cmp(&Self::get_access_level_priority(&b.highest_access_level()))
@@ -327,6 +335,8 @@ impl Renderer {
 
         let users = users
             .iter()
+            // TODO: Make user list scrollable
+            .take(rect.height as usize)
             .map(|user| {
                 let lua_user = lua.to_value(user);
                 let rendered_user = if let Ok(mlua::Value::Table(tbl)) = lua_user {

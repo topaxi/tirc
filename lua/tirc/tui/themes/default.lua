@@ -89,12 +89,23 @@ local function format_privmsg_message(message)
   end)
 end
 
+local function message_is_draft(msg)
+  -- TODO: On some messages, tags is userdata.
+  --       Figure our why this is the case, crate update? irc server message
+  --       differences?
+  if type(msg.tags) ~= 'table' then
+    return false
+  end
+
+  return utils.list_find(msg.tags, function(tag)
+    return tag[1] == 'time'
+  end) == nil
+end
+
 ---@param msg table
 ---@param nickname string
 function M.format_privmsg(msg, nickname)
-  local is_draft = utils.list_find(msg.tags, function(tag)
-    return tag[1] == 'time'
-  end) == nil
+  local is_draft = message_is_draft(msg)
 
   ---@type string
   local message_str = msg.command.PRIVMSG[2]
