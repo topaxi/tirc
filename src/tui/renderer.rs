@@ -375,59 +375,77 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use indoc::indoc;
     use tui::style::Color;
+    use tui::text::Span;
 
     use crate::tui::lua::create_tirc_theme_lua_module;
 
+    fn run_lua_code<'lua>(
+        lua: &'lua mlua::Lua,
+        code: &'lua str,
+    ) -> mlua::Result<mlua::Value<'lua>> {
+        lua.load(code).eval()
+    }
+
+    fn render_lua_table_to_spans<'lua>(
+        lua: &'lua mlua::Lua,
+        renderer: &'lua Renderer,
+        table: &'lua str,
+    ) -> Result<Vec<Span<'lua>>, anyhow::Error> {
+        let value = run_lua_code(&lua, table)?;
+        let spans = renderer.lua_value_to_spans(&lua, value)?;
+        Ok(spans)
+    }
+
     #[test]
-    fn test_lua_value_to_spans() {
-        use super::*;
+    fn test_lua_value_to_spans() -> anyhow::Result<(), anyhow::Error> {
         let renderer = Renderer::new();
         let lua = mlua::Lua::new();
-        let value = lua
-            .load(indoc! {"
+        let spans = render_lua_table_to_spans(
+            &lua,
+            &renderer,
+            indoc! {"
                 { 'Hello', ', ', 'World!' }
-            "})
-            .eval()
-            .unwrap();
-        let spans = renderer.lua_value_to_spans(&lua, value).unwrap();
+            "},
+        )?;
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[0].content, "Hello");
         assert_eq!(spans[1].content, ", ");
         assert_eq!(spans[2].content, "World!");
+        Ok(())
     }
 
     #[test]
-    fn test_lua_value_to_spans_nested() {
-        use super::*;
+    fn test_lua_value_to_spans_nested() -> anyhow::Result<(), anyhow::Error> {
         let renderer = Renderer::new();
         let lua = mlua::Lua::new();
-        let value = lua
-            .load(indoc! {"
+        let spans = render_lua_table_to_spans(
+            &lua,
+            &renderer,
+            indoc! {"
                 { 'Hello', { ', ' }, 'World!' }
-            "})
-            .eval()
-            .unwrap();
-        let spans = renderer.lua_value_to_spans(&lua, value).unwrap();
+            "},
+        )?;
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[0].content, "Hello");
         assert_eq!(spans[1].content, ", ");
         assert_eq!(spans[2].content, "World!");
+        Ok(())
     }
 
     #[test]
-    fn test_lua_value_to_spans_deeply_nested() {
-        use super::*;
+    fn test_lua_value_to_spans_deeply_nested() -> anyhow::Result<(), anyhow::Error> {
         let renderer = Renderer::new();
         let lua = mlua::Lua::new();
-        let value = lua
-            .load(indoc! {"
+        let spans = render_lua_table_to_spans(
+            &lua,
+            &renderer,
+            indoc! {"
                 { 'a', { 'b', 'c', { 'd', 'e' } }, 'f' }
-            "})
-            .eval()
-            .unwrap();
-        let spans = renderer.lua_value_to_spans(&lua, value).unwrap();
+            "},
+        )?;
         assert_eq!(spans.len(), 6);
         assert_eq!(spans[0].content, "a");
         assert_eq!(spans[1].content, "b");
@@ -435,22 +453,24 @@ mod tests {
         assert_eq!(spans[3].content, "d");
         assert_eq!(spans[4].content, "e");
         assert_eq!(spans[5].content, "f");
+        Ok(())
     }
 
     #[test]
     fn test_lua_value_to_styled_spans() -> anyhow::Result<(), anyhow::Error> {
-        use super::*;
         let renderer = Renderer::new();
         let lua = mlua::Lua::new();
         create_tirc_theme_lua_module(&lua)?;
-        let value = lua
-            .load(indoc! {"
+        let spans = render_lua_table_to_spans(
+            &lua,
+            &renderer,
+            indoc! {"
                 local theme = require('tirc.tui.theme')
                 local blue = theme.style { fg = 'blue' }
+
                 return { 'a', blue }
-            "})
-            .eval()?;
-        let spans = renderer.lua_value_to_spans(&lua, value)?;
+            "},
+        )?;
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content, "a");
         assert_eq!(spans[0].style.fg, Some(Color::Blue));
@@ -459,12 +479,13 @@ mod tests {
 
     #[test]
     fn test_lua_value_to_styled_spans_deeply_nested() -> anyhow::Result<(), anyhow::Error> {
-        use super::*;
         let renderer = Renderer::new();
         let lua = mlua::Lua::new();
         create_tirc_theme_lua_module(&lua)?;
-        let value = lua
-            .load(indoc! {"
+        let spans = render_lua_table_to_spans(
+            &lua,
+            &renderer,
+            indoc! {"
                 local theme = require('tirc.tui.theme')
 
                 local blue = theme.style { fg = 'blue' }
@@ -472,9 +493,8 @@ mod tests {
                 local darkgray = theme.style { fg = 'darkgray', bg = 'white' }
 
                 return { { 'a', blue }, { { 'b', { 'c', { 'd', green }, 'e' } }, darkgray }, 'f' }
-            "})
-            .eval()?;
-        let spans = renderer.lua_value_to_spans(&lua, value)?;
+            "},
+        )?;
         assert_eq!(spans.len(), 6);
         assert_eq!(spans[0].content, "a");
         assert_eq!(spans[0].style.fg, Some(Color::Blue));
