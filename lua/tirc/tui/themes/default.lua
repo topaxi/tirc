@@ -80,13 +80,17 @@ end
 
 ---@param message string
 local function format_privmsg_message(message)
-  return utils.list_flat_map(utils.split(message, '%s'), function(word)
+  local spans = utils.list_flat_map(utils.split(message, '%s'), function(word)
     if is_channel(word) then
       return { { word, green }, ' ' }
     end
 
     return { word, ' ' }
   end)
+
+  table.remove(spans)
+
+  return spans
 end
 
 local function message_is_draft(msg)

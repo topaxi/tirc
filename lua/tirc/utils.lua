@@ -71,11 +71,13 @@ end
 ---@return table<integer, T>
 function M.list_flat_map(list, fn)
   local result = {}
+
   for k, v in ipairs(list) do
     for _, v2 in ipairs(fn(v, k, list)) do
       table.insert(result, v2)
     end
   end
+
   return result
 end
 
@@ -88,7 +90,7 @@ function M.split(str, sep)
   end
 
   local tbl = {}
-  for word in (str .. sep):gmatch(('([^%s]*)%s'):format(sep, sep)) do
+  for word in str:gmatch('([^' .. sep .. ']+)') do
     table.insert(tbl, word)
   end
   return tbl

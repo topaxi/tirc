@@ -67,51 +67,42 @@ impl Renderer {
     ) -> mlua::Result<()> {
         match value {
             mlua::Value::String(str) => {
-                spans.push(Self::string_to_span(str.to_str()?.to_owned(), parent_style));
+                let string = str.to_str()?.to_owned();
+                let span = Self::string_to_span(string, parent_style);
+
+                spans.push(span);
             }
             mlua::Value::Table(v) => {
-                for v in v.sequence_values::<mlua::Value>() {
-                    let v = v?;
-                    match v {
-                        mlua::Value::Table(v) => {
-                            let style = v.get::<_, Option<mlua::Value>>(2)?;
-                            let style = match style {
-                                Some(mlua::Value::Table(_)) => {
-                                    match lua.from_value::<Style>(style.unwrap()) {
-                                        Ok(style) => {
-                                            // Apply parent style onto this style
-                                            let style = if let Some(parent_style) = parent_style {
-                                                parent_style.patch(style)
-                                            } else {
-                                                style
-                                            };
-                                            Some(style)
-                                        }
-                                        _ => None,
-                                    }
+                // Table of two values might be a styled message
+                if v.len()? == 2 {
+                    let style = v.get::<_, Option<mlua::Value>>(2)?;
+                    let style = if matches!(style, Some(mlua::Value::Table(_))) {
+                        lua.from_value::<Style>(style.unwrap())
+                            .map(|style| {
+                                if let Some(parent_style) = parent_style {
+                                    parent_style.patch(style)
+                                } else {
+                                    style
                                 }
-                                _ => None,
-                            };
+                            })
+                            .ok()
+                    } else {
+                        None
+                    };
 
-                            if let Some(style) = style {
-                                let value = v.get::<_, Option<mlua::Value>>(1)?;
+                    if let Some(style) = style {
+                        let value = v.get::<_, Option<mlua::Value>>(1)?;
 
-                                if let Some(value) = value {
-                                    Self::flatten_lua_value(lua, value, spans, Some(style))?;
-                                }
-                            } else {
-                                Self::flatten_lua_value(
-                                    lua,
-                                    mlua::Value::Table(v),
-                                    spans,
-                                    parent_style,
-                                )?;
-                            }
+                        if let Some(value) = value {
+                            Self::flatten_lua_value(lua, value, spans, Some(style))?;
                         }
-                        _ => {
-                            Self::flatten_lua_value(lua, v, spans, parent_style)?;
-                        }
+
+                        return Ok(());
                     }
+                }
+
+                for v in v.sequence_values::<mlua::Value>() {
+                    Self::flatten_lua_value(lua, v?, spans, parent_style)?;
                 }
             }
             _ => {}
