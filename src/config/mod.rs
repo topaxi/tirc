@@ -155,7 +155,7 @@ fn get_version_lua_value(lua: &Lua) -> mlua::Table<'_> {
     table
 }
 
-pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
+pub fn load_config(lua: &Lua) -> Result<TircConfig, anyhow::Error> {
     let config_filename =
         xdg::BaseDirectories::with_prefix("tirc")?.place_config_file("init.lua")?;
     let config_dirname = config_filename
@@ -170,14 +170,12 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
 
     let config_lua_code = std::fs::read_to_string(&config_filename)?;
 
-    let lua = Lua::new();
-
     let config = {
         let globals = lua.globals();
-        let tirc_mod = get_or_create_module(&lua, "_tirc")?;
+        let tirc_mod = get_or_create_module(lua, "_tirc")?;
 
         tirc_mod.set("config_dir", config_dirname.display().to_string())?;
-        tirc_mod.set("version", get_version_lua_value(&lua))?;
+        tirc_mod.set("version", get_version_lua_value(lua))?;
         tirc_mod.set("on", lua.create_function(register_event)?)?;
 
         let package: Table = globals.get("package")?;
@@ -193,36 +191,36 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
 
         package.set("path", path_array.join(";"))?;
 
-        create_date_time_module(&lua)?;
-        create_tirc_theme_lua_module(&lua)?;
+        create_date_time_module(lua)?;
+        create_tirc_theme_lua_module(lua)?;
 
         let public_tirc_module: Table = lua
             .load(include_str!("../../lua/tirc/init.lua"))
             .set_name("{builtin}/lua/tirc/init.lua")
             .call(())?;
 
-        set_loaded_modules(&lua, "tirc", public_tirc_module)?;
+        set_loaded_modules(lua, "tirc", public_tirc_module)?;
 
         let config_module: Table = lua
             .load(include_str!("../../lua/tirc/config.lua"))
             .set_name("{builtin}/lua/tirc/config.lua")
             .call(())?;
 
-        set_loaded_modules(&lua, "tirc.config", config_module)?;
+        set_loaded_modules(lua, "tirc.config", config_module)?;
 
         let utils_module: Table = lua
             .load(include_str!("../../lua/tirc/utils.lua"))
             .set_name("{builtin}/lua/tirc/utils.lua")
             .call(())?;
 
-        set_loaded_modules(&lua, "tirc.utils", utils_module)?;
+        set_loaded_modules(lua, "tirc.utils", utils_module)?;
 
         let default_theme_module: Table = lua
             .load(include_str!("../../lua/tirc/tui/themes/default.lua"))
             .set_name("{builtin}/lua/tirc/tui/themes/default.lua")
             .call(())?;
 
-        set_loaded_modules(&lua, "tirc.tui.themes.default", default_theme_module)?;
+        set_loaded_modules(lua, "tirc.tui.themes.default", default_theme_module)?;
 
         let value: Value = lua
             .load(&config_lua_code)
@@ -234,5 +232,5 @@ pub async fn load_config() -> Result<(TircConfig, Lua), anyhow::Error> {
         lua.from_value(value)?
     };
 
-    Ok((config, lua))
+    Ok(config)
 }

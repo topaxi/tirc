@@ -67,9 +67,11 @@ async fn setup_irc(
     Ok((irc, stream))
 }
 
-#[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
-    let (config, lua) = load_config().await?;
+async fn root_task(
+    rt: &tokio::runtime::Runtime,
+    lua: &mlua::Lua,
+    config: &TircConfig,
+) -> Result<(), anyhow::Error> {
     let (irc, stream) = setup_irc(&config, &lua).await?;
 
     let (tx, mut rx) = mpsc::channel(16);
@@ -77,8 +79,8 @@ async fn main() -> Result<(), anyhow::Error> {
     let input_sender = tx.clone();
     let irc_sender = tx.clone();
 
-    let input_handle = tokio::spawn(async move { poll_input(input_sender).await });
-    let irc_handle = tokio::spawn(async move { connect_irc(stream, irc_sender).await });
+    let input_handle = rt.spawn(async move { poll_input(input_sender).await });
+    let irc_handle = rt.spawn(async move { connect_irc(stream, irc_sender).await });
 
     let mut state = ui::State {
         server: config.servers.first().unwrap().host.clone(),
@@ -119,6 +121,19 @@ async fn main() -> Result<(), anyhow::Error> {
             }
         }
     }?)
+}
+
+fn main() -> Result<(), anyhow::Error> {
+    let lua = mlua::Lua::new();
+    let config = load_config(&lua)?;
+
+    let threads = usize::min(2, num_cpus::get());
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(threads)
+        .enable_all()
+        .build()?;
+
+    rt.block_on(root_task(&rt, &lua, &config))
 }
 
 async fn poll_input(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), failure::Error> {
