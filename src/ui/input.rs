@@ -68,7 +68,7 @@ impl<'lua> InputHandler<'lua> {
         Ok(())
     }
 
-    pub fn render_ui(&mut self, state: &State) -> Result<(), anyhow::Error> {
+    pub fn render_ui(&mut self, state: &mut State) -> Result<(), anyhow::Error> {
         self.ui.render(&self.irc, self.lua, state)?;
 
         Ok(())
@@ -192,6 +192,24 @@ impl<'lua> InputHandler<'lua> {
             }
             (Mode::Normal, Event::Input(event)) if event.code == KeyCode::BackTab => {
                 state.previous_buffer();
+            }
+            (Mode::Normal, Event::Input(event))
+                if event.code == KeyCode::PageUp || event.code == KeyCode::PageDown =>
+            {
+                let messages_rect = state.ui_layout_rects[0];
+                let current_buffer: &mut ChatBuffer<'lua> = state
+                    .get_current_buffer()
+                    .ok_or_else(|| anyhow::Error::msg("current buffer not found"))?;
+
+                if event.code == KeyCode::PageDown {
+                    current_buffer.scroll_position = current_buffer
+                        .scroll_position
+                        .saturating_add(messages_rect.height.saturating_sub(2) as usize);
+                } else {
+                    current_buffer.scroll_position = current_buffer
+                        .scroll_position
+                        .saturating_sub(messages_rect.height.saturating_sub(2) as usize);
+                }
             }
             (Mode::Normal, Event::Input(event)) if InputHandler::key_code_is_digit(event.code) => {
                 let index = InputHandler::get_key_code_as_digit(event.code) as usize;
