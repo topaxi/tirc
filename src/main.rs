@@ -95,7 +95,7 @@ async fn root_task(
 
     loop {
         input_handler.sync_state(&mut state)?;
-        input_handler.render_ui(&state)?;
+        input_handler.render_ui(&mut state)?;
 
         if let Some(event) = rx.recv().await {
             if let Err(err) = input_handler.handle_event(&mut state, event) {

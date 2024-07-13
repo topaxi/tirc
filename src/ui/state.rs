@@ -24,6 +24,7 @@ pub struct ChatBuffer<'lua> {
 
 #[derive(Debug)]
 pub struct State<'lua> {
+    pub ui_layout_rects: Rc<[tui::layout::Rect]>,
     pub mode: Mode,
     pub nickname: String,
     pub server: String,
@@ -49,6 +50,7 @@ impl<'lua> State<'lua> {
         };
 
         State {
+            ui_layout_rects: Rc::new([]),
             mode: Mode::Normal,
             nickname: String::new(),
             server: String::new(),
@@ -76,6 +78,10 @@ impl<'lua> State<'lua> {
             .keys()
             .position(|name| name == current_buffer_name)
             .unwrap()
+    }
+
+    pub fn get_current_buffer(&mut self) -> Option<&mut ChatBuffer<'lua>> {
+        self.buffers.get_mut(&self.current_buffer)
     }
 
     pub fn next_buffer(&mut self) {

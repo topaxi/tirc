@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use irc::client::data::AccessLevel;
 use mlua::LuaSerdeExt;
 use tui::{
@@ -351,10 +353,23 @@ impl Renderer {
         f.render_widget(list, rect);
     }
 
-    pub fn render(&mut self, f: &mut tui::Frame, state: &State, lua: &mlua::Lua, input: &Input) {
+    pub fn render(
+        &mut self,
+        f: &mut tui::Frame,
+        state: &mut State,
+        lua: &mlua::Lua,
+        input: &Input,
+    ) {
+        // TODO: We might want to get the layout before rendering (in state sync or before).
+        //       This will require refactoring the ui render method, would be a good idea to have
+        //       the tui::Frame available in main, just before the sync_state method.
+        //       Alternatively, InputHandler has a reference to TUI which in turn has a reference
+        //       to the Renderer, where we could store the current layout on.
         let layout = self.get_layout();
         let size = f.area();
         let chunks = layout.split(size);
+
+        state.ui_layout_rects = Rc::clone(&chunks);
 
         if state.users_in_current_buffer.len() > 1 {
             let layout_with_sidebar = Layout::default()
@@ -362,14 +377,14 @@ impl Renderer {
                 .constraints([Constraint::Percentage(90), Constraint::Percentage(10)].as_ref())
                 .split(chunks[0]);
 
-            self.render_users(f, state, lua, layout_with_sidebar[1]);
             self.render_messages(f, state, lua, layout_with_sidebar[0]);
+            self.render_users(f, state, lua, layout_with_sidebar[1]);
         } else {
             self.render_messages(f, state, lua, chunks[0]);
         }
 
-        self.render_buffer_bar(f, state, chunks[2]);
         self.render_input(f, state, input, chunks[1]);
+        self.render_buffer_bar(f, state, chunks[2]);
     }
 }
 

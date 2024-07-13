@@ -59,7 +59,12 @@ impl Tui {
         Ok(())
     }
 
-    pub fn render(&mut self, _irc: &Client, lua: &Lua, state: &State) -> Result<(), anyhow::Error> {
+    pub fn render(
+        &mut self,
+        _irc: &Client,
+        lua: &Lua,
+        state: &mut State,
+    ) -> Result<(), anyhow::Error> {
         self.terminal.draw(|f| {
             self.renderer.render(f, state, lua, &self.input);
         })?;
