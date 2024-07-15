@@ -72,7 +72,7 @@ async fn root_task(
     lua: &mlua::Lua,
     config: &TircConfig,
 ) -> Result<(), anyhow::Error> {
-    let (irc, stream) = setup_irc(&config, &lua).await?;
+    let (irc, stream) = setup_irc(config, lua).await?;
 
     let (tx, mut rx) = mpsc::channel(16);
 
