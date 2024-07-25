@@ -98,13 +98,11 @@ async fn root_task(
         input_handler.render_ui(&state)?;
 
         if let Some(event) = rx.recv().await {
-            match input_handler.handle_event(&mut state, event) {
-                Ok(_) => {}
-                Err(_) => {
-                    input_handle.abort();
-                    irc_handle.abort();
-                    break;
-                }
+            if let Err(err) = input_handler.handle_event(&mut state, event) {
+                eprintln!("Error: {:?}", err);
+                input_handle.abort();
+                irc_handle.abort();
+                break;
             }
         }
     }

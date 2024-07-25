@@ -394,8 +394,8 @@ mod tests {
         renderer: &'lua Renderer,
         table: &'lua str,
     ) -> Result<Vec<Span<'lua>>, anyhow::Error> {
-        let value = run_lua_code(&lua, table)?;
-        let spans = renderer.lua_value_to_spans(&lua, value)?;
+        let value = run_lua_code(lua, table)?;
+        let spans = renderer.lua_value_to_spans(lua, value)?;
         Ok(spans)
     }
 
