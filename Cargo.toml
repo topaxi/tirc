@@ -12,22 +12,22 @@ irc = { git = "https://github.com/topaxi/irc.git", branch = "feat/message-serde"
   "channel-lists",
   "serde",
 ] }
-tokio = { version = "1.37", features = ["full"] }
-crossterm = { version = "0.27", features = ["serde"] }
-tui = { version = "0.27", package = "ratatui", features = [
+tokio = { version = "1.39", features = ["full"] }
+crossterm = { version = "0.28", features = ["serde"] }
+tui = { version = "0.28", package = "ratatui", features = [
   "crossterm",
   "serde",
 ] }
 tui-input = { version = "*", features = ["crossterm"] }
-anyhow = "1.0.83"
-mlua = { version = "0.9.7", features = ["luajit52", "async", "serialize"] }
-xdg = "2.5.2"
-serde = "1.0.201"
-indoc = "2.0.5"
-indexmap = "2"
-semver = { version = "1.0.23", features = ["serde"] }
+anyhow = "1.0"
+mlua = { version = "0.9", features = ["luajit52", "async", "serialize"] }
+xdg = "2.5"
+serde = "1.0"
+indoc = "2.0"
+indexmap = "2.3"
+semver = { version = "1.0", features = ["serde"] }
 chrono = { version = "0.4.38", features = ["serde"] }
 textwrap = "0.16.1"
 itertools = "0.13.0"
 unicode-width = "0.1.13"
-num_cpus = "1.16.0"
+num_cpus = "1.16"

@@ -273,7 +273,7 @@ impl Renderer {
             Mode::Insert => "❯ ",
         };
         let prefix_len = prefix.chars().count() as u16;
-        let width = f.size().width.max(3) - prefix_len; // keep 2 for borders and 1 for cursor
+        let width = f.area().width.max(3) - prefix_len; // keep 2 for borders and 1 for cursor
         let scroll = input.visual_scroll(width as usize);
         let p = Paragraph::new(format!("{}{}", prefix, input.value()))
             .scroll((0, scroll as u16))
@@ -285,12 +285,12 @@ impl Renderer {
 
             Mode::Command | Mode::Insert => {
                 // Make the cursor visible and ask tui-rs to put it at the specified coordinates after rendering
-                f.set_cursor(
+                f.set_cursor_position((
                     // Put cursor past the end of the input text
                     rect.x + ((input.visual_cursor()).max(scroll) - scroll) as u16 + prefix_len,
                     // Move one line down, from the border to the input line
                     rect.y + 1,
-                )
+                ))
             }
         }
     }
@@ -353,7 +353,7 @@ impl Renderer {
 
     pub fn render(&mut self, f: &mut tui::Frame, state: &State, lua: &mlua::Lua, input: &Input) {
         let layout = self.get_layout();
-        let size = f.size();
+        let size = f.area();
         let chunks = layout.split(size);
 
         if state.users_in_current_buffer.len() > 1 {
