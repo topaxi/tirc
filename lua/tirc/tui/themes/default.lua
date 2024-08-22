@@ -335,6 +335,9 @@ function M.format_user(user)
   }
 end
 
+---@class (exact) TircThemeDefaultOptions
+
+---@param _config TircThemeDefaultOptions
 function M.setup(_config)
   local function handle_event(callback)
     return function(...)

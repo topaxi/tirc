@@ -42,7 +42,7 @@ pub struct ServerConfig {
 
 #[derive(Deserialize, Debug)]
 pub struct TircConfig {
-    pub servers: Vec<ServerConfig>,
+    pub servers: Box<[ServerConfig]>,
 }
 
 fn get_default_config() -> &'static str {
@@ -62,9 +62,7 @@ fn get_default_config() -> &'static str {
           },
         }
 
-        local theme_config = {}
-
-        theme.setup(theme_config)
+        tirc.use(theme)
 
         return config
     "}
