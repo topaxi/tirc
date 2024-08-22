@@ -141,6 +141,24 @@ impl Renderer {
         self.lua_value_to_spans(lua, v)
     }
 
+    fn render_buffer_title(
+        &self,
+        lua: &mlua::Lua,
+        state: &State,
+    ) -> Result<Vec<Span>, anyhow::Error> {
+        let v = config::emit_sync_callback(
+            lua,
+            "format-buffer-title",
+            (
+                state.server.clone(),
+                state.nickname.clone(),
+                state.current_buffer.clone(),
+            ),
+        )?;
+
+        self.lua_value_to_spans(lua, v)
+    }
+
     fn render_messages(&self, f: &mut tui::Frame, state: &State, lua: &mlua::Lua, rect: Rect) {
         let current_buffer_name = &state.current_buffer;
         let buffers = &state.buffers;
@@ -200,7 +218,10 @@ impl Renderer {
         let list = List::new(messages)
             .block(
                 Block::default()
-                    .title(format!("{}@{}", state.nickname, state.server))
+                    .title(
+                        self.render_buffer_title(lua, state)
+                            .unwrap_or_else(|_| vec![]),
+                    )
                     .borders(Borders::NONE),
             )
             .direction(ListDirection::BottomToTop);

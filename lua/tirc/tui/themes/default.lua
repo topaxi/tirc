@@ -287,6 +287,16 @@ local function get_time_from_tags(tags)
   end
 end
 
+function M.format_buffer_title(server, nickname, buffer_name)
+  return {
+    { nickname,    blue },
+    { '@',         twhite },
+    { server,      green },
+    { ' in ',      twhite },
+    { buffer_name, green },
+  }
+end
+
 function M.format_message_time(dt, msg)
   local time_tag = get_time_from_tags(msg.tags)
 
@@ -338,6 +348,7 @@ function M.setup(_config)
     end
   end
 
+  tirc.on('format-buffer-title', handle_event(M.format_buffer_title))
   tirc.on('format-message-time', handle_event(M.format_message_time))
   tirc.on('format-message-text', handle_event(M.format_message_text))
   tirc.on('format-user', handle_event(M.format_user))
