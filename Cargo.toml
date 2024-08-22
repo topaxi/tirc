@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-failure = "0.1.8"
 futures = "0.3.30"
 irc = { git = "https://github.com/topaxi/irc.git", branch = "feat/message-serde", features = [
   "ctcp",

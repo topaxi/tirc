@@ -134,7 +134,7 @@ fn main() -> Result<(), anyhow::Error> {
     rt.block_on(root_task(&rt, &lua, &config))
 }
 
-async fn poll_input(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), failure::Error> {
+async fn poll_input(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), anyhow::Error> {
     let tick_rate = Duration::from_millis(1000);
     let mut last_tick = Instant::now();
 
@@ -191,7 +191,7 @@ async fn create_irc_client(config: &TircConfig) -> Result<Client, anyhow::Error>
 async fn connect_irc(
     mut stream: ClientStream,
     tx: mpsc::Sender<Event<KeyEvent>>,
-) -> Result<(), failure::Error> {
+) -> Result<(), anyhow::Error> {
     while let Some(message) = stream.next().await.transpose()? {
         tx.send(Event::Message(Box::new(message))).await?;
     }
