@@ -212,8 +212,7 @@ impl Renderer {
                     },
                 )
             })
-            .map(ListItem::new)
-            .collect::<Vec<_>>();
+            .map(ListItem::new);
 
         let list = List::new(messages)
             .block(
@@ -362,8 +361,7 @@ impl Renderer {
                 }
 
                 ListItem::new(Line::from(rendered_user))
-            })
-            .collect::<Vec<_>>();
+            });
         let list = List::new(users).block(
             Block::default()
                 .title(state.current_buffer.to_owned())
