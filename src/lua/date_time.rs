@@ -4,10 +4,10 @@ use mlua::Lua;
 
 use super::get_or_create_module;
 
-pub fn date_time_to_table<'a>(
-    lua: &'a Lua,
+pub fn date_time_to_table(
+    lua: &Lua,
     date_time: &chrono::DateTime<chrono::Local>,
-) -> mlua::Result<mlua::Table<'a>> {
+) -> mlua::Result<mlua::Table> {
     let table = lua.create_table()?;
     table.set("year", date_time.year())?;
     table.set("month", date_time.month())?;
@@ -18,7 +18,7 @@ pub fn date_time_to_table<'a>(
     Ok(table)
 }
 
-pub fn create_date_time_module(lua: &Lua) -> anyhow::Result<mlua::Table<'_>> {
+pub fn create_date_time_module(lua: &Lua) -> anyhow::Result<mlua::Table> {
     let module = get_or_create_module(lua, "tirc.date_time")?;
 
     module.set(

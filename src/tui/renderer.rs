@@ -75,7 +75,7 @@ impl Renderer {
             mlua::Value::Table(v) => {
                 // Table of two values might be a styled message
                 if v.len()? == 2 {
-                    let style = v.get::<_, Option<mlua::Value>>(2)?;
+                    let style = v.get::<Option<mlua::Value>>(2)?;
                     let style = if matches!(style, Some(mlua::Value::Table(_))) {
                         lua.from_value::<Style>(style.unwrap())
                             .map(|style| {
@@ -91,7 +91,7 @@ impl Renderer {
                     };
 
                     if let Some(style) = style {
-                        let value = v.get::<_, Option<mlua::Value>>(1)?;
+                        let value = v.get::<Option<mlua::Value>>(1)?;
 
                         if let Some(value) = value {
                             Self::flatten_lua_value(lua, value, spans, Some(style))?;
@@ -401,10 +401,7 @@ mod tests {
 
     use crate::tui::lua::create_tirc_theme_lua_module;
 
-    fn run_lua_code<'lua>(
-        lua: &'lua mlua::Lua,
-        code: &'lua str,
-    ) -> mlua::Result<mlua::Value<'lua>> {
+    fn run_lua_code(lua: &mlua::Lua, code: &str) -> mlua::Result<mlua::Value> {
         lua.load(code).eval()
     }
 

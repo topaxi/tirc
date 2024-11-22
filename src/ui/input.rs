@@ -27,14 +27,14 @@ pub enum Event<I> {
     Tick,
 }
 
-pub struct InputHandler<'lua> {
-    lua: &'lua Lua,
+pub struct InputHandler<'a> {
+    lua: &'a Lua,
     irc: Client,
     ui: Tui,
 }
 
-impl<'lua> InputHandler<'lua> {
-    pub fn new(lua: &'lua Lua, irc: Client, ui: Tui) -> Self {
+impl InputHandler<'_> {
+    pub fn new(lua: &Lua, irc: Client, ui: Tui) -> Self {
         Self { lua, irc, ui }
     }
 
@@ -88,7 +88,7 @@ impl<'lua> InputHandler<'lua> {
         Ok(message)
     }
 
-    fn handle_command(&mut self, state: &mut State<'lua>) -> Result<(), anyhow::Error> {
+    fn handle_command(&mut self, state: &mut State) -> Result<(), anyhow::Error> {
         state.mode = Mode::Normal;
 
         let command: Box<[&str]> = self.ui.input().value().splitn(2, ' ').collect();
@@ -183,7 +183,7 @@ impl<'lua> InputHandler<'lua> {
 
     pub fn handle_event(
         &mut self,
-        state: &mut State<'lua>,
+        state: &mut State,
         event: Event<crossterm::event::KeyEvent>,
     ) -> Result<(), anyhow::Error> {
         match (state.mode, event) {

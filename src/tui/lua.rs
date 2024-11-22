@@ -28,11 +28,11 @@ pub fn create_tirc_theme_lua_module(lua: &mlua::Lua) -> mlua::Result<mlua::Table
         lua.create_function(|lua, tbl: mlua::Table| {
             let mut style = tui::style::Style::default();
 
-            if let Ok(Some(color)) = tbl.get::<_, Option<String>>("fg") {
+            if let Ok(Some(color)) = tbl.get::<Option<String>>("fg") {
                 style = style.fg(Color::from_str(&color).unwrap());
             }
 
-            if let Ok(Some(color)) = tbl.get::<_, Option<String>>("bg") {
+            if let Ok(Some(color)) = tbl.get::<Option<String>>("bg") {
                 style = style.bg(Color::from_str(&color).unwrap());
             }
 
@@ -43,10 +43,7 @@ pub fn create_tirc_theme_lua_module(lua: &mlua::Lua) -> mlua::Result<mlua::Table
     Ok(module)
 }
 
-pub fn to_lua_message<'lua>(
-    lua: &'lua mlua::Lua,
-    message: &Message,
-) -> mlua::Result<mlua::Table<'lua>> {
+pub fn to_lua_message(lua: &mlua::Lua, message: &Message) -> mlua::Result<mlua::Table> {
     let lua_message = lua.to_value(message)?;
 
     match lua_message {
@@ -58,9 +55,9 @@ pub fn to_lua_message<'lua>(
             metatable
                 .set(
                     "__tostring",
-                    lua.create_function(|_, lua_message: mlua::Value<'_>| {
+                    lua.create_function(|_, lua_message: mlua::Value| {
                         Ok(match lua_message {
-                            mlua::Value::Table(tbl) => tbl.get_metatable().unwrap().get("__str"),
+                            mlua::Value::Table(tbl) => tbl.metatable().unwrap().get("__str"),
                             _ => Ok(None::<String>),
                         })
                     })

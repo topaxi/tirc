@@ -91,13 +91,9 @@ fn register_event(lua: &Lua, (name, func): (String, mlua::Function)) -> mlua::Re
     }
 }
 
-pub fn emit_sync_callback<'lua, Args>(
-    lua: &'lua Lua,
-    name: &str,
-    args: Args,
-) -> mlua::Result<mlua::Value<'lua>>
+pub fn emit_sync_callback<Args>(lua: &Lua, name: &str, args: Args) -> mlua::Result<mlua::Value>
 where
-    Args: IntoLuaMulti<'lua>,
+    Args: IntoLuaMulti,
 {
     let decorated_name = format!("tirc-event-{}", name);
     let tbl: mlua::Value = lua.named_registry_value(&decorated_name)?;
@@ -119,7 +115,7 @@ fn get_version() -> semver::Version {
     semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("Unable to parse version")
 }
 
-fn get_version_lua_value(lua: &Lua) -> mlua::Table<'_> {
+fn get_version_lua_value(lua: &Lua) -> mlua::Table {
     let version = get_version();
     let table = lua.create_table().expect("Unable to create table");
     let metatable = lua.create_table().expect("Unable to create metatable");
