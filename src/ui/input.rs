@@ -88,7 +88,7 @@ impl<'lua> InputHandler<'lua> {
         Ok(message)
     }
 
-    fn handle_command(&mut self, state: &mut State<'lua>) -> Result<(), anyhow::Error> {
+    fn handle_command(&mut self, state: &mut State) -> Result<(), anyhow::Error> {
         state.mode = Mode::Normal;
 
         let command: Box<[&str]> = self.ui.input().value().splitn(2, ' ').collect();
@@ -183,7 +183,7 @@ impl<'lua> InputHandler<'lua> {
 
     pub fn handle_event(
         &mut self,
-        state: &mut State<'lua>,
+        state: &mut State,
         event: Event<crossterm::event::KeyEvent>,
     ) -> Result<(), anyhow::Error> {
         match (state.mode, event) {

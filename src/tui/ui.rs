@@ -6,7 +6,7 @@ use crossterm::terminal::{
 use irc::client::Client;
 use mlua::Lua;
 use std::io::{self, Stdout};
-use tui::backend::CrosstermBackend;
+use ratatui::backend::CrosstermBackend;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
@@ -15,7 +15,7 @@ use crate::ui::State;
 use super::renderer::Renderer;
 
 pub struct Tui {
-    terminal: tui::Terminal<CrosstermBackend<Stdout>>,
+    terminal: ratatui::Terminal<CrosstermBackend<Stdout>>,
     input: Input,
     renderer: Renderer,
 }
@@ -24,7 +24,7 @@ impl Tui {
     pub fn new() -> io::Result<Self> {
         let stdout = io::stdout();
         let backend = CrosstermBackend::new(stdout);
-        let terminal = tui::Terminal::new(backend)?;
+        let terminal = ratatui::Terminal::new(backend)?;
 
         Ok(Self {
             terminal,

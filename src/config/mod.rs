@@ -91,13 +91,13 @@ fn register_event(lua: &Lua, (name, func): (String, mlua::Function)) -> mlua::Re
     }
 }
 
-pub fn emit_sync_callback<'lua, Args>(
-    lua: &'lua Lua,
+pub fn emit_sync_callback<Args>(
+    lua: &Lua,
     name: &str,
     args: Args,
-) -> mlua::Result<mlua::Value<'lua>>
+) -> mlua::Result<mlua::Value>
 where
-    Args: IntoLuaMulti<'lua>,
+    Args: IntoLuaMulti,
 {
     let decorated_name = format!("tirc-event-{}", name);
     let tbl: mlua::Value = lua.named_registry_value(&decorated_name)?;
@@ -119,7 +119,7 @@ fn get_version() -> semver::Version {
     semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("Unable to parse version")
 }
 
-fn get_version_lua_value(lua: &Lua) -> mlua::Table<'_> {
+fn get_version_lua_value(lua: &Lua) -> mlua::Table {
     let version = get_version();
     let table = lua.create_table().expect("Unable to create table");
     let metatable = lua.create_table().expect("Unable to create metatable");
@@ -148,14 +148,60 @@ fn get_version_lua_value(lua: &Lua) -> mlua::Table<'_> {
         )
         .expect("Unable to set __tostring");
 
-    table.set_metatable(Some(metatable));
+    table
+        .set_metatable(Some(metatable))
+        .expect("Unable to set metatable");
 
     table
 }
 
+/// Registers the `_tirc` runtime module and all builtin `tirc.*` Lua modules.
+///
+/// This is everything needed to evaluate a user config or a theme, without
+/// touching the filesystem, which also makes it usable from tests.
+pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
+    let tirc_mod = get_or_create_module(lua, "_tirc")?;
+
+    tirc_mod.set("version", get_version_lua_value(lua))?;
+    tirc_mod.set("on", lua.create_function(register_event)?)?;
+
+    create_date_time_module(lua)?;
+    create_tirc_theme_lua_module(lua)?;
+
+    let public_tirc_module: Table = lua
+        .load(include_str!("../../lua/tirc/init.lua"))
+        .set_name("{builtin}/lua/tirc/init.lua")
+        .call(())?;
+
+    set_loaded_modules(lua, "tirc", public_tirc_module)?;
+
+    let config_module: Table = lua
+        .load(include_str!("../../lua/tirc/config.lua"))
+        .set_name("{builtin}/lua/tirc/config.lua")
+        .call(())?;
+
+    set_loaded_modules(lua, "tirc.config", config_module)?;
+
+    let utils_module: Table = lua
+        .load(include_str!("../../lua/tirc/utils.lua"))
+        .set_name("{builtin}/lua/tirc/utils.lua")
+        .call(())?;
+
+    set_loaded_modules(lua, "tirc.utils", utils_module)?;
+
+    let default_theme_module: Table = lua
+        .load(include_str!("../../lua/tirc/tui/themes/default.lua"))
+        .set_name("{builtin}/lua/tirc/tui/themes/default.lua")
+        .call(())?;
+
+    set_loaded_modules(lua, "tirc.tui.themes.default", default_theme_module)?;
+
+    Ok(())
+}
+
 pub fn load_config(lua: &Lua) -> Result<TircConfig, anyhow::Error> {
     let config_filename =
-        xdg::BaseDirectories::with_prefix("tirc")?.place_config_file("init.lua")?;
+        xdg::BaseDirectories::with_prefix("tirc").place_config_file("init.lua")?;
     let config_dirname = config_filename
         .parent()
         .expect("Unable to create config directory");
@@ -173,8 +219,6 @@ pub fn load_config(lua: &Lua) -> Result<TircConfig, anyhow::Error> {
         let tirc_mod = get_or_create_module(lua, "_tirc")?;
 
         tirc_mod.set("config_dir", config_dirname.display().to_string())?;
-        tirc_mod.set("version", get_version_lua_value(lua))?;
-        tirc_mod.set("on", lua.create_function(register_event)?)?;
 
         let package: Table = globals.get("package")?;
         let package_path: String = package.get("path")?;
@@ -189,36 +233,7 @@ pub fn load_config(lua: &Lua) -> Result<TircConfig, anyhow::Error> {
 
         package.set("path", path_array.join(";"))?;
 
-        create_date_time_module(lua)?;
-        create_tirc_theme_lua_module(lua)?;
-
-        let public_tirc_module: Table = lua
-            .load(include_str!("../../lua/tirc/init.lua"))
-            .set_name("{builtin}/lua/tirc/init.lua")
-            .call(())?;
-
-        set_loaded_modules(lua, "tirc", public_tirc_module)?;
-
-        let config_module: Table = lua
-            .load(include_str!("../../lua/tirc/config.lua"))
-            .set_name("{builtin}/lua/tirc/config.lua")
-            .call(())?;
-
-        set_loaded_modules(lua, "tirc.config", config_module)?;
-
-        let utils_module: Table = lua
-            .load(include_str!("../../lua/tirc/utils.lua"))
-            .set_name("{builtin}/lua/tirc/utils.lua")
-            .call(())?;
-
-        set_loaded_modules(lua, "tirc.utils", utils_module)?;
-
-        let default_theme_module: Table = lua
-            .load(include_str!("../../lua/tirc/tui/themes/default.lua"))
-            .set_name("{builtin}/lua/tirc/tui/themes/default.lua")
-            .call(())?;
-
-        set_loaded_modules(lua, "tirc.tui.themes.default", default_theme_module)?;
+        register_builtin_modules(lua)?;
 
         let value: Value = lua
             .load(&config_lua_code)
@@ -231,4 +246,62 @@ pub fn load_config(lua: &Lua) -> Result<TircConfig, anyhow::Error> {
     };
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::lua::to_lua_message;
+
+    /// Loads the builtin modules and activates the default theme, returning a
+    /// closure that renders a raw IRC line through `format-message-text`.
+    fn render_message_text(lua: &Lua, raw: &str) -> mlua::Value {
+        let message: irc::proto::Message = raw.parse().expect("valid irc message");
+        let table = to_lua_message(lua, &message).expect("message table");
+
+        emit_sync_callback(lua, "format-message-text", (table, "me".to_string()))
+            .expect("format-message-text callback")
+    }
+
+    fn setup_theme() -> Lua {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).expect("builtin modules");
+
+        lua.load("require('tirc.tui.themes.default').setup({})")
+            .exec()
+            .expect("theme setup");
+
+        lua
+    }
+
+    #[test]
+    fn theme_renders_common_messages_without_error() {
+        let lua = setup_theme();
+
+        let lines = [
+            ":alice!~alice@example.com PRIVMSG #tirc :hello #other world\r\n",
+            ":alice!~alice@example.com PRIVMSG #tirc :\u{1}ACTION waves\u{1}\r\n",
+            ":alice!~alice@example.com JOIN #tirc\r\n",
+            ":alice!~alice@example.com PART #tirc\r\n",
+            ":irc.example.com NOTICE * :server notice\r\n",
+            ":op!~op@example.com MODE #tirc +o-v alice bob\r\n",
+            ":irc.example.com 001 me :Welcome to the network\r\n",
+        ];
+
+        for line in lines {
+            let value = render_message_text(&lua, line);
+            assert!(
+                matches!(value, mlua::Value::Table(_)),
+                "expected a table of spans for {line:?}, got {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn theme_suppresses_names_replies() {
+        let lua = setup_theme();
+
+        let value = render_message_text(&lua, ":irc.example.com 366 me #tirc :End of /NAMES\r\n");
+        assert!(matches!(value, mlua::Value::Nil));
+    }
 }

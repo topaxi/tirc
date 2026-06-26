@@ -2,24 +2,24 @@ use mlua::{Lua, Table, Value};
 
 pub mod date_time;
 
-pub fn get_loaded_modules(lua: &Lua) -> mlua::Result<mlua::Table<'_>> {
+pub fn get_loaded_modules(lua: &Lua) -> mlua::Result<mlua::Table> {
     let globals = lua.globals();
     let package: Table = globals.get("package")?;
     let loaded: Table = package.get("loaded")?;
     Ok(loaded)
 }
 
-pub fn set_loaded_modules<'lua>(
+pub fn set_loaded_modules(
     lua: &Lua,
     name: &str,
-    module: mlua::Table<'lua>,
-) -> anyhow::Result<mlua::Table<'lua>> {
+    module: mlua::Table,
+) -> anyhow::Result<mlua::Table> {
     let loaded: Table = get_loaded_modules(lua)?;
     loaded.set(name, &module)?;
     Ok(module)
 }
 
-pub fn get_or_create_module<'lua>(lua: &'lua Lua, name: &str) -> anyhow::Result<mlua::Table<'lua>> {
+pub fn get_or_create_module(lua: &Lua, name: &str) -> anyhow::Result<mlua::Table> {
     let loaded: Table = get_loaded_modules(lua)?;
 
     let module = loaded.get(name)?;

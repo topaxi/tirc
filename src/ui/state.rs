@@ -17,29 +17,29 @@ pub enum Mode {
 }
 
 #[derive(Debug, Default)]
-pub struct ChatBuffer<'lua> {
-    pub messages: Vec<TircMessage<'lua>>,
+pub struct ChatBuffer {
+    pub messages: Vec<TircMessage>,
     pub scroll_position: usize,
 }
 
 #[derive(Debug)]
-pub struct State<'lua> {
+pub struct State {
     pub mode: Mode,
     pub nickname: String,
     pub server: String,
     pub current_buffer: String,
-    pub buffers: IndexMap<String, ChatBuffer<'lua>>,
+    pub buffers: IndexMap<String, ChatBuffer>,
     pub users_in_current_buffer: Rc<[User]>,
 }
 
-impl<'lua> Default for State<'lua> {
+impl Default for State {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<'lua> State<'lua> {
-    pub fn new() -> State<'lua> {
+impl State {
+    pub fn new() -> State {
         let default_buffer_name = State::get_default_buffer_name();
 
         let buffers = {
@@ -108,7 +108,7 @@ impl<'lua> State<'lua> {
         }
     }
 
-    fn push_message_to_buffer(&mut self, buffer_name: &str, message: TircMessage<'lua>) {
+    fn push_message_to_buffer(&mut self, buffer_name: &str, message: TircMessage) {
         let buffer = self.buffers.get_mut(buffer_name).unwrap();
 
         if let TircMessage::Irc(_, m, _) = &message {
@@ -161,7 +161,7 @@ impl<'lua> State<'lua> {
         }
     }
 
-    pub fn push_message(&mut self, message: TircMessage<'lua>) {
+    pub fn push_message(&mut self, message: TircMessage) {
         let buffer_name = match &message {
             TircMessage::Irc(_, m, _) => self.get_target_buffer_name(m),
             _ => State::get_default_buffer_name(),

@@ -18,42 +18,28 @@ local server_notice_icon = {
   ' ',
 }
 
----@param tbl table<integer, unknown>
----@param element unknown
----@return table<integer, unknown>
-local function insert_every_second(tbl, element)
-  local new_tbl = {}
-
-  for _, v in ipairs(tbl) do
-    table.insert(new_tbl, v)
-    table.insert(new_tbl, element)
-  end
-
-  table.remove(new_tbl, #new_tbl)
-
-  return new_tbl
-end
-
 ---@param msg table
 function M.format_join(msg)
+  local realname = msg.params[3]
+
   return {
-    { msg.prefix.Nickname[1], blue },
-    msg.command.JOIN[3] and msg.command.JOIN[3] ~= 'Unknown' and {
-      { ' (',                gray },
-      { msg.command.JOIN[3], blue },
-      { ')',                 gray },
+    { msg.nick,      blue },
+    realname and realname ~= 'Unknown' and {
+      { ' (',      gray },
+      { realname,  blue },
+      { ')',       gray },
     } or '',
-    { ' has joined ',         twhite },
-    { msg.command.JOIN[1],    green },
+    { ' has joined ', twhite },
+    { msg.params[1],  green },
   }
 end
 
 ---@param msg table
 function M.format_part(msg)
   return {
-    { msg.prefix.Nickname[1], blue },
-    { ' has parted ',         twhite },
-    { msg.command.PART[1],    green },
+    { msg.nick,      blue },
+    { ' has parted ', twhite },
+    { msg.params[1],  green },
   }
 end
 
@@ -94,13 +80,6 @@ local function format_privmsg_message(message)
 end
 
 local function message_is_draft(msg)
-  -- TODO: On some messages, tags is userdata.
-  --       Figure our why this is the case, crate update? irc server message
-  --       differences?
-  if type(msg.tags) ~= 'table' then
-    return false
-  end
-
   return utils.list_find(msg.tags, function(tag)
     return tag[1] == 'time'
   end) == nil
@@ -112,7 +91,7 @@ function M.format_privmsg(msg, nickname)
   local is_draft = message_is_draft(msg)
 
   ---@type string
-  local message_str = msg.command.PRIVMSG[2]
+  local message_str = msg.params[2]
   local is_action = message_str:sub(1, 8) == '\001ACTION '
 
   if is_action then
@@ -129,8 +108,8 @@ function M.format_privmsg(msg, nickname)
   end
 
   return {
-    is_action and format_privmsg_action_nickname(msg.prefix.Nickname[1], white)
-    or format_privmsg_nickname(msg.prefix.Nickname[1], blue),
+    is_action and format_privmsg_action_nickname(msg.nick, white)
+    or format_privmsg_nickname(msg.nick, blue),
     ' ',
     format_privmsg_message(message_str),
   }
@@ -138,136 +117,99 @@ end
 
 ---@param msg table
 function M.format_notice(msg)
-  if msg.prefix.ServerName then
+  if msg.server then
     return {
-      { '!' .. msg.prefix.ServerName, green },
+      { '!' .. msg.server, green },
       ' ',
-      msg.command.NOTICE[2],
+      msg.params[2],
     }
-  elseif msg.prefix.Nickname then
+  elseif msg.nick then
     return {
       '-',
-      msg.prefix.Nickname[1],
+      msg.nick,
       '(',
-      msg.prefix.Nickname[3],
+      msg.host,
       ')- ',
-      msg.command.NOTICE[2],
+      msg.params[2],
     }
   end
 end
 
-local function is_string(v)
-  return type(v) == 'string'
-end
+---@param modestring string
+local function format_modestring(modestring)
+  local spans = {}
 
-local function is_added_mode(v)
-  return type(v) == 'table' and v.Plus
-end
-
-local function is_removed_mode(v)
-  return type(v) == 'table' and v.Minus
-end
-
-local function is_noprefix_mode(v)
-  return type(v) == 'table' and v.NoPrefix
-end
-
----@param t table
-local function get_first_table_key(t)
-  for k, _ in pairs(t) do
-    return k
+  for ch in modestring:gmatch('.') do
+    if ch == '+' then
+      spans[#spans + 1] = { ch, green }
+    elseif ch == '-' then
+      spans[#spans + 1] = { ch, red }
+    else
+      spans[#spans + 1] = ch
+    end
   end
+
+  return spans
 end
 
----@param mode_value string|table
-local function format_mode_value(mode_value)
-  if is_string(mode_value) then
-    return mode_value
-  elseif type(mode_value) == 'table' then
-    local key = get_first_table_key(mode_value)
+---@param msg table
+function M.format_mode(msg)
+  local target = msg.params[1]
+  local is_channel_mode = target:match('^[#&]')
+  local prefix = is_channel_mode and 'cmode' or 'umode'
+  local modestring = msg.params[2] or ''
 
-    return key .. '(' .. mode_value[key] .. ')'
+  local args = {}
+  for i = 3, #msg.params do
+    args[#args + 1] = msg.params[i]
   end
-end
 
-function M.format_mode(mode)
-  if mode.Plus then
-    return { { '+', green }, format_mode_value(mode.Plus[1]) }
-  elseif mode.Minus then
-    return { { '-', red }, format_mode_value(mode.Minus[1]) }
-  elseif mode.NoPrefix then
-    return format_mode_value(mode.NoPrefix[1])
-  end
-end
-
-local mode_type_styles = {
-  UserMODE = blue,
-  ChannelMODE = green,
-}
-
-local function format_modes(modes, predicate)
-  return insert_every_second(
-    utils.list_map(utils.list_filter(modes, predicate), M.format_mode),
-    ' '
-  )
-end
-
-local function format_user_or_channel_mode(msg, mode, prefix)
-  local plus = format_modes(msg.command[mode][2], is_added_mode)
-  local minus = format_modes(msg.command[mode][2], is_removed_mode)
-  local noprefix = format_modes(msg.command[mode][2], is_noprefix_mode)
-
-  return {
-    {
-      {
-        prefix .. '/',
-        { msg.command[mode][1], mode_type_styles[mode] },
-        #plus > 0 and { ' [', plus, ']' } or '',
-        #minus > 0 and { ' [', minus, ']' } or '',
-        #noprefix > 0 and { ' [', noprefix, ']' } or '',
-      },
-      twhite,
-    },
+  local result = {
+    { prefix .. '/', twhite },
+    { target,        is_channel_mode and green or blue },
+    ' ',
+    format_modestring(modestring),
   }
+
+  if #args > 0 then
+    result[#result + 1] = ' '
+    result[#result + 1] = table.concat(args, ' ')
+  end
+
+  return result
 end
 
-function M.format_channel_mode(msg)
-  return format_user_or_channel_mode(msg, 'ChannelMODE', 'cmode')
-end
-
-function M.format_user_mode(msg)
-  return format_user_or_channel_mode(msg, 'UserMODE', 'umode')
+---@param command string
+local function is_numeric_reply(command)
+  return command:match('^RPL_') ~= nil or command:match('^ERR_') ~= nil
 end
 
 function M.format_message_text(msg, nickname)
-  if msg.command.JOIN then
+  local command = msg.command
+
+  if command == 'JOIN' then
     return M.format_join(msg)
-  elseif msg.command.PART then
+  elseif command == 'PART' then
     return M.format_part(msg)
-  elseif msg.command.PRIVMSG then
+  elseif command == 'PRIVMSG' then
     return M.format_privmsg(msg, nickname)
-  elseif msg.command.NOTICE then
+  elseif command == 'NOTICE' then
     return M.format_notice(msg)
-  elseif msg.command.ChannelMODE then
-    return M.format_channel_mode(msg)
-  elseif msg.command.UserMODE then
-    return M.format_user_mode(msg)
-  elseif msg.command.Response then
-    if
-        msg.command.Response[1] == 'RPL_NAMREPLY'
-        or msg.command.Response[1] == 'RPL_ENDOFNAMES'
-    then
+  elseif command == 'MODE' then
+    return M.format_mode(msg)
+  elseif is_numeric_reply(command) then
+    if command == 'RPL_NAMREPLY' or command == 'RPL_ENDOFNAMES' then
       return nil
     end
 
     return utils.list_concat(server_notice_icon, {
-      table.concat(msg.command.Response[2], ' ', 2),
+      table.concat(msg.params, ' ', 2),
     })
-  elseif msg.command.PING or msg.command.PONG then
+  elseif command == 'PING' or command == 'PONG' then
     return nil
-  elseif msg.command.CAP then
+  elseif command == 'CAP' then
     return utils.list_concat(server_notice_icon, {
-      'Capabilities ' .. msg.command.CAP[2] .. ' ' .. msg.command.CAP[3],
+      'Capabilities ' .. table.concat(msg.params, ' '),
     })
   end
 
@@ -276,7 +218,7 @@ end
 
 --- @return string|nil
 local function get_time_from_tags(tags)
-  if not tags or type(tags) ~= 'table' then
+  if not tags then
     return
   end
 

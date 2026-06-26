@@ -1,6 +1,6 @@
 extern crate irc;
 
-use std::{rc::Rc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use crossterm::event::{self, Event as CrosstermEvent, KeyEvent};
 use futures::prelude::*;
@@ -16,10 +16,10 @@ fn create_lua_irc_sender(
     lua: &mlua::Lua,
     sender: irc::client::Sender,
 ) -> mlua::Result<mlua::Table> {
-    let shared_sender = Rc::new(sender);
+    let shared_sender = Arc::new(sender);
     let tbl = lua.create_table()?;
 
-    let sender = Rc::clone(&shared_sender);
+    let sender = Arc::clone(&shared_sender);
     tbl.set(
         "send_privmsg",
         lua.create_function(move |_, (target, message): (String, String)| {
@@ -28,7 +28,7 @@ fn create_lua_irc_sender(
         })?,
     )?;
 
-    let sender = Rc::clone(&shared_sender);
+    let sender = Arc::clone(&shared_sender);
     tbl.set(
         "send_notice",
         lua.create_function(move |_, (target, message): (String, String)| {

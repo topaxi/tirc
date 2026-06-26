@@ -1,6 +1,6 @@
 use irc::client::data::AccessLevel;
 use mlua::LuaSerdeExt;
-use tui::{
+use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
@@ -53,7 +53,7 @@ impl Renderer {
         &self,
         lua: &mlua::Lua,
         value: mlua::Value,
-    ) -> Result<Vec<Span>, anyhow::Error> {
+    ) -> Result<Vec<Span<'_>>, anyhow::Error> {
         let mut spans = vec![];
         Self::flatten_lua_value(lua, value, &mut spans, None)?;
         Ok(spans)
@@ -75,7 +75,7 @@ impl Renderer {
             mlua::Value::Table(v) => {
                 // Table of two values might be a styled message
                 if v.len()? == 2 {
-                    let style = v.get::<_, Option<mlua::Value>>(2)?;
+                    let style = v.get::<Option<mlua::Value>>(2)?;
                     let style = if matches!(style, Some(mlua::Value::Table(_))) {
                         lua.from_value::<Style>(style.unwrap())
                             .map(|style| {
@@ -91,7 +91,7 @@ impl Renderer {
                     };
 
                     if let Some(style) = style {
-                        let value = v.get::<_, Option<mlua::Value>>(1)?;
+                        let value = v.get::<Option<mlua::Value>>(1)?;
 
                         if let Some(value) = value {
                             Self::flatten_lua_value(lua, value, spans, Some(style))?;
@@ -124,7 +124,7 @@ impl Renderer {
         lua: &mlua::Lua,
         date_time: &mlua::Table,
         message: &mlua::Table,
-    ) -> Result<Vec<Span>, anyhow::Error> {
+    ) -> Result<Vec<Span<'_>>, anyhow::Error> {
         let v = config::emit_sync_callback(lua, "format-message-time", (date_time, message))?;
 
         self.lua_value_to_spans(lua, v)
@@ -135,7 +135,7 @@ impl Renderer {
         lua: &mlua::Lua,
         message: &mlua::Table,
         nickname: &str,
-    ) -> Result<Vec<Span>, anyhow::Error> {
+    ) -> Result<Vec<Span<'_>>, anyhow::Error> {
         let v = config::emit_sync_callback(lua, "format-message-text", (message, nickname))?;
 
         self.lua_value_to_spans(lua, v)
@@ -145,7 +145,7 @@ impl Renderer {
         &self,
         lua: &mlua::Lua,
         state: &State,
-    ) -> Result<Vec<Span>, anyhow::Error> {
+    ) -> Result<Vec<Span<'_>>, anyhow::Error> {
         let v = config::emit_sync_callback(
             lua,
             "format-buffer-title",
@@ -159,7 +159,7 @@ impl Renderer {
         self.lua_value_to_spans(lua, v)
     }
 
-    fn render_messages(&self, f: &mut tui::Frame, state: &State, lua: &mlua::Lua, rect: Rect) {
+    fn render_messages(&self, f: &mut ratatui::Frame, state: &State, lua: &mlua::Lua, rect: Rect) {
         let current_buffer_name = &state.current_buffer;
         let buffers = &state.buffers;
 
@@ -233,7 +233,7 @@ impl Renderer {
         state: &State,
         lua: &mlua::Lua,
         tirc_message: &TircMessage,
-    ) -> Option<RenderedMessage> {
+    ) -> Option<RenderedMessage<'_>> {
         if let TircMessage::Irc(date_time, message, lua_message) = tirc_message {
             let mut time_spans = self
                 .render_message_time(
@@ -264,7 +264,7 @@ impl Renderer {
         }
     }
 
-    fn render_buffer_bar(&self, f: &mut tui::Frame, state: &State, rect: Rect) {
+    fn render_buffer_bar(&self, f: &mut ratatui::Frame, state: &State, rect: Rect) {
         let current_buffer_name = &state.current_buffer;
 
         let buffers: Vec<Span> = state
@@ -286,7 +286,7 @@ impl Renderer {
         f.render_widget(buffer_bar, rect);
     }
 
-    fn render_input(&mut self, f: &mut tui::Frame, state: &State, input: &Input, rect: Rect) {
+    fn render_input(&mut self, f: &mut ratatui::Frame, state: &State, input: &Input, rect: Rect) {
         let prefix = match state.mode {
             Mode::Normal => "",
             Mode::Command => ":",
@@ -315,7 +315,7 @@ impl Renderer {
         }
     }
 
-    fn render_user(&self, lua: &mlua::Lua, user: &mlua::Table) -> Result<Vec<Span>, anyhow::Error> {
+    fn render_user(&self, lua: &mlua::Lua, user: &mlua::Table) -> Result<Vec<Span<'_>>, anyhow::Error> {
         let v = config::emit_sync_callback(lua, "format-user", user)?;
 
         self.lua_value_to_spans(lua, v)
@@ -332,7 +332,7 @@ impl Renderer {
         }
     }
 
-    fn render_users(&self, f: &mut tui::Frame, state: &State, lua: &mlua::Lua, rect: Rect) {
+    fn render_users(&self, f: &mut ratatui::Frame, state: &State, lua: &mlua::Lua, rect: Rect) {
         let mut users = state.users_in_current_buffer.to_vec();
 
         // TODO: We might not want to sort the users every time we render the user list.
@@ -349,8 +349,8 @@ impl Renderer {
             // TODO: Make user list scrollable
             .take(rect.height as usize)
             .map(|user| {
-                let lua_user = lua.to_value(user);
-                let rendered_user = if let Ok(mlua::Value::Table(tbl)) = lua_user {
+                let lua_user = super::lua::to_lua_user(lua, user);
+                let rendered_user = if let Ok(tbl) = lua_user {
                     self.render_user(lua, &tbl).unwrap_or_default()
                 } else {
                     vec![]
@@ -370,7 +370,7 @@ impl Renderer {
         f.render_widget(list, rect);
     }
 
-    pub fn render(&mut self, f: &mut tui::Frame, state: &State, lua: &mlua::Lua, input: &Input) {
+    pub fn render(&mut self, f: &mut ratatui::Frame, state: &State, lua: &mlua::Lua, input: &Input) {
         let layout = self.get_layout();
         let size = f.area();
         let chunks = layout.split(size);
@@ -396,15 +396,12 @@ impl Renderer {
 mod tests {
     use super::*;
     use indoc::indoc;
-    use tui::style::Color;
-    use tui::text::Span;
+    use ratatui::style::Color;
+    use ratatui::text::Span;
 
     use crate::tui::lua::create_tirc_theme_lua_module;
 
-    fn run_lua_code<'lua>(
-        lua: &'lua mlua::Lua,
-        code: &'lua str,
-    ) -> mlua::Result<mlua::Value<'lua>> {
+    fn run_lua_code(lua: &mlua::Lua, code: &str) -> mlua::Result<mlua::Value> {
         lua.load(code).eval()
     }
 

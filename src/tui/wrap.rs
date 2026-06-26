@@ -34,12 +34,12 @@
 //! newlines in it, but we could in the future if necessary. (Embedded newlines
 //! won't break the output, but they might make the output look a bit weird.)
 
-use itertools::{Itertools, Position};
+use itertools::Itertools;
 use textwrap::{
     core::{display_width, Fragment},
     wrap_algorithms::{wrap_optimal_fit, Penalties},
 };
-use tui::text::{Line, Span, Text};
+use ratatui::text::{Line, Span, Text};
 
 pub struct Options<'a> {
     /// The width in columns at which the text will be wrapped.
@@ -154,17 +154,14 @@ fn wrap_single_line_slow_path<'a>(
         }
 
         for (position, word) in words.iter().with_position() {
-            match position {
-                Position::First | Position::Middle => {
-                    output_line.extend(word.word_span());
-                    output_line.extend(word.whitespace_span());
-                }
-                Position::Last | Position::Only => {
-                    // Don't add trailing whitespace, just the content.
-                    output_line.extend(word.word_span());
-                    // We don't support hyphenation at the moment, but if we
-                    // did, this is where they would go.
-                }
+            output_line.extend(word.word_span());
+
+            if position.is_last() {
+                // Don't add trailing whitespace, just the content.
+                // We don't support hyphenation at the moment, but if we
+                // did, this is where they would go.
+            } else {
+                output_line.extend(word.whitespace_span());
             }
         }
 
@@ -217,7 +214,7 @@ struct StyledWord<'a> {
     word: &'a str,
     width: usize,
     whitespace: &'a str,
-    style: tui::style::Style,
+    style: ratatui::style::Style,
 }
 
 impl<'a> StyledWord<'a> {
@@ -233,7 +230,7 @@ impl<'a> StyledWord<'a> {
         Self::new_impl(content, span.style)
     }
 
-    fn new_impl(content: &'a str, style: tui::style::Style) -> Self {
+    fn new_impl(content: &'a str, style: ratatui::style::Style) -> Self {
         let trimmed = content.trim_end_matches(' ');
         Self {
             word: trimmed,
@@ -248,7 +245,7 @@ impl<'a> StyledWord<'a> {
             word: "",
             width: 0,
             whitespace: "",
-            style: tui::style::Style::default(),
+            style: ratatui::style::Style::default(),
         }
     }
 
