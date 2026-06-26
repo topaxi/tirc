@@ -139,19 +139,30 @@ impl State {
         let default_buffer_name = State::get_default_buffer_name();
 
         match &message.command {
-            Command::PRIVMSG(nickname, _) | Command::NOTICE(nickname, _) => {
-                let mut target = match message.response_target() {
-                    Some(response_target) if response_target != self.nickname => {
-                        response_target.to_owned()
+            Command::PRIVMSG(target, _) | Command::NOTICE(target, _) => {
+                let buffer = match message.source_nickname() {
+                    // Incoming message from someone else: a channel message goes
+                    // to the channel, a direct message goes to the sender's nick.
+                    Some(source) if source != self.nickname => {
+                        message.response_target().unwrap_or(source).to_owned()
                     }
-                    _ => nickname.to_owned(),
+                    // An echo of one of our own messages (server replied with our
+                    // nick as the source): file it under the conversation partner,
+                    // which for a message to ourselves is our own nick.
+                    Some(_) => target.to_owned(),
+                    // No nick prefix. Either our own outgoing message (no prefix at
+                    // all) which belongs with its recipient, or a server-originated
+                    // message (server-name prefix) which belongs in the status
+                    // buffer.
+                    None if message.prefix.is_none() => target.to_owned(),
+                    None => default_buffer_name.clone(),
                 };
 
-                if target == "*" || target == self.nickname {
-                    target = default_buffer_name;
+                if buffer == "*" {
+                    default_buffer_name
+                } else {
+                    buffer
                 }
-
-                target
             }
             Command::TOPIC(channel, _)
             | Command::ChannelMODE(channel, _)
@@ -175,6 +186,54 @@ impl State {
 #[cfg(test)]
 mod tests {
     use crate::ui::state::ChatBuffer;
+
+    fn target_buffer(nickname: &str, raw: &str) -> String {
+        let mut state = super::State::default();
+        state.nickname = nickname.to_string();
+        let message: irc::proto::Message = raw.parse().expect("valid irc message");
+        state.get_target_buffer_name(&message)
+    }
+
+    #[test]
+    fn test_target_buffer_incoming_channel_message() {
+        assert_eq!(
+            target_buffer("me", ":alice!u@h PRIVMSG #tirc :hi\r\n"),
+            "#tirc"
+        );
+    }
+
+    #[test]
+    fn test_target_buffer_incoming_direct_message() {
+        assert_eq!(target_buffer("me", ":alice!u@h PRIVMSG me :hi\r\n"), "alice");
+    }
+
+    #[test]
+    fn test_target_buffer_outgoing_direct_message() {
+        // Our own outgoing message has no prefix; it belongs with the recipient.
+        assert_eq!(target_buffer("me", "PRIVMSG bob :hi\r\n"), "bob");
+    }
+
+    #[test]
+    fn test_target_buffer_self_message_outgoing() {
+        assert_eq!(target_buffer("me", "PRIVMSG me :hi\r\n"), "me");
+    }
+
+    #[test]
+    fn test_target_buffer_self_message_echo() {
+        assert_eq!(target_buffer("me", ":me!u@h PRIVMSG me :hi\r\n"), "me");
+    }
+
+    #[test]
+    fn test_target_buffer_server_notice_goes_to_status() {
+        assert_eq!(
+            target_buffer("me", ":irc.example.com NOTICE me :Welcome\r\n"),
+            "(status)"
+        );
+        assert_eq!(
+            target_buffer("me", ":irc.example.com NOTICE * :Checking ident\r\n"),
+            "(status)"
+        );
+    }
 
     #[test]
     fn test_get_buffer_name_by_index() {
