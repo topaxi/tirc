@@ -2,7 +2,7 @@ use irc::client::data::AccessLevel;
 use mlua::LuaSerdeExt;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListDirection, ListItem, Paragraph},
 };
@@ -119,15 +119,37 @@ impl Renderer {
         }
     }
 
+    /// Calls the named UI formatter and converts its result into spans.
+    ///
+    /// Error handling is centralized here: a missing formatter yields no spans,
+    /// and a formatter that raises is rendered as a red `ERR: ...` span instead
+    /// of crashing the renderer.
+    fn format_spans<Args>(
+        &self,
+        lua: &mlua::Lua,
+        name: &str,
+        args: Args,
+    ) -> Result<Vec<Span<'_>>, anyhow::Error>
+    where
+        Args: mlua::IntoLuaMulti,
+    {
+        match config::call_formatter(lua, name, args) {
+            None => Ok(vec![]),
+            Some(Ok(value)) => self.lua_value_to_spans(lua, value),
+            Some(Err(err)) => Ok(vec![Self::string_to_span(
+                format!("ERR: {err}"),
+                Some(Style::default().fg(Color::Red)),
+            )]),
+        }
+    }
+
     fn render_message_time(
         &self,
         lua: &mlua::Lua,
         date_time: &mlua::Table,
         message: &mlua::Table,
     ) -> Result<Vec<Span<'_>>, anyhow::Error> {
-        let v = config::emit_sync_callback(lua, "format-message-time", (date_time, message))?;
-
-        self.lua_value_to_spans(lua, v)
+        self.format_spans(lua, "message_time", (date_time, message))
     }
 
     fn render_message_text(
@@ -136,9 +158,7 @@ impl Renderer {
         message: &mlua::Table,
         nickname: &str,
     ) -> Result<Vec<Span<'_>>, anyhow::Error> {
-        let v = config::emit_sync_callback(lua, "format-message-text", (message, nickname))?;
-
-        self.lua_value_to_spans(lua, v)
+        self.format_spans(lua, "message_text", (message, nickname))
     }
 
     fn render_buffer_title(
@@ -146,17 +166,15 @@ impl Renderer {
         lua: &mlua::Lua,
         state: &State,
     ) -> Result<Vec<Span<'_>>, anyhow::Error> {
-        let v = config::emit_sync_callback(
+        self.format_spans(
             lua,
-            "format-buffer-title",
+            "buffer_title",
             (
                 state.server.clone(),
                 state.nickname.clone(),
                 state.current_buffer.clone(),
             ),
-        )?;
-
-        self.lua_value_to_spans(lua, v)
+        )
     }
 
     fn render_messages(&self, f: &mut ratatui::Frame, state: &State, lua: &mlua::Lua, rect: Rect) {
@@ -319,9 +337,7 @@ impl Renderer {
         lua: &mlua::Lua,
         user: &mlua::Table,
     ) -> Result<Vec<Span<'_>>, anyhow::Error> {
-        let v = config::emit_sync_callback(lua, "format-user", user)?;
-
-        self.lua_value_to_spans(lua, v)
+        self.format_spans(lua, "user", user)
     }
 
     fn get_access_level_priority(access_level: &AccessLevel) -> i32 {

@@ -11,7 +11,7 @@ use irc::{
 };
 use mlua::Lua;
 
-use crate::{config::emit_sync_callback, tui::Tui};
+use crate::{config::emit_event, tui::Tui};
 
 use super::{state::ChatBuffer, Mode, State, TircMessage};
 
@@ -246,7 +246,7 @@ impl<'lua> InputHandler<'lua> {
                 let lua_message = tirc_message.get_lua_message().to_owned();
                 let lua_irc_sender: mlua::Table = self.lua.named_registry_value("sender")?;
 
-                emit_sync_callback(self.lua, "message", (lua_message, lua_irc_sender))?;
+                emit_event(self.lua, "message", (lua_message, lua_irc_sender))?;
 
                 state.push_message(tirc_message);
             }

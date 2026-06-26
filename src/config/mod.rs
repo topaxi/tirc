@@ -91,28 +91,100 @@ fn register_event(lua: &Lua, (name, func): (String, mlua::Function)) -> mlua::Re
     }
 }
 
-pub fn emit_sync_callback<Args>(
-    lua: &Lua,
-    name: &str,
-    args: Args,
-) -> mlua::Result<mlua::Value>
+/// Dispatches a fire-and-forget event to every handler registered via
+/// `tirc.on(name, ...)`. Handler return values are ignored.
+pub fn emit_event<Args>(lua: &Lua, name: &str, args: Args) -> mlua::Result<()>
 where
-    Args: IntoLuaMulti,
+    Args: IntoLuaMulti + Clone,
 {
     let decorated_name = format!("tirc-event-{}", name);
     let tbl: mlua::Value = lua.named_registry_value(&decorated_name)?;
 
-    match tbl {
-        mlua::Value::Table(tbl) => {
-            #[allow(clippy::never_loop)]
-            for func in tbl.sequence_values::<mlua::Function>() {
-                return func?.call(args);
-            }
-
-            Ok(mlua::Value::Nil)
+    if let mlua::Value::Table(tbl) = tbl {
+        for func in tbl.sequence_values::<mlua::Function>() {
+            func?.call::<()>(args.clone())?;
         }
-        _ => Ok(mlua::Value::Nil),
     }
+
+    Ok(())
+}
+
+/// Returns the `tirc-ui` registry table, creating it on first access so reads
+/// and merges always have a backing store.
+fn ui_registry_table(lua: &Lua) -> mlua::Result<Table> {
+    match lua.named_registry_value::<Value>("tirc-ui")? {
+        Value::Table(tbl) => Ok(tbl),
+        _ => {
+            let tbl = lua.create_table()?;
+            lua.set_named_registry_value("tirc-ui", &tbl)?;
+            Ok(tbl)
+        }
+    }
+}
+
+/// Backs the `tirc.ui` property getter; exposed to Lua as `_tirc.__get_ui`.
+fn get_ui(lua: &Lua, _: ()) -> mlua::Result<Table> {
+    ui_registry_table(lua)
+}
+
+/// Backs the `tirc.ui` property setter; exposed to Lua as `_tirc.__set_ui`.
+///
+/// Merges `value` into the stored `tirc-ui` table two levels deep: top-level
+/// categories (e.g. `format`) merge, and within each category individual entries
+/// merge. This lets a theme or plugin override just a subset of formatters.
+fn set_ui(lua: &Lua, value: Table) -> mlua::Result<()> {
+    let target = ui_registry_table(lua)?;
+
+    for pair in value.pairs::<String, Value>() {
+        let (key, value) = pair?;
+
+        match value {
+            Value::Table(category) => {
+                let dst = match target.get::<Value>(key.as_str())? {
+                    Value::Table(tbl) => tbl,
+                    _ => {
+                        let tbl = lua.create_table()?;
+                        target.set(key.as_str(), &tbl)?;
+                        tbl
+                    }
+                };
+
+                for entry in category.pairs::<Value, Value>() {
+                    let (entry_key, entry_value) = entry?;
+                    dst.set(entry_key, entry_value)?;
+                }
+            }
+            other => target.set(key, other)?,
+        }
+    }
+
+    Ok(())
+}
+
+/// Invokes the UI formatter named `name` (registered under `tirc.ui.format`).
+///
+/// Returns `None` when no formatter is registered for `name`, otherwise the
+/// formatter's `mlua::Result` (an `Err` if the Lua callback raised). The caller
+/// is responsible for rendering errors.
+pub fn call_formatter<Args>(
+    lua: &Lua,
+    name: &str,
+    args: Args,
+) -> Option<mlua::Result<mlua::Value>>
+where
+    Args: IntoLuaMulti,
+{
+    let ui = ui_registry_table(lua).ok()?;
+    let format: Table = match ui.get("format") {
+        Ok(Value::Table(tbl)) => tbl,
+        _ => return None,
+    };
+    let func: mlua::Function = match format.get(name) {
+        Ok(Some(func)) => func,
+        _ => return None,
+    };
+
+    Some(func.call(args))
 }
 
 fn get_version() -> semver::Version {
@@ -164,6 +236,8 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
 
     tirc_mod.set("version", get_version_lua_value(lua))?;
     tirc_mod.set("on", lua.create_function(register_event)?)?;
+    tirc_mod.set("__get_ui", lua.create_function(get_ui)?)?;
+    tirc_mod.set("__set_ui", lua.create_function(set_ui)?)?;
 
     create_date_time_module(lua)?;
     create_tirc_theme_lua_module(lua)?;
@@ -254,13 +328,14 @@ mod tests {
     use crate::tui::lua::to_lua_message;
 
     /// Loads the builtin modules and activates the default theme, returning a
-    /// closure that renders a raw IRC line through `format-message-text`.
+    /// closure that renders a raw IRC line through the `message_text` formatter.
     fn render_message_text(lua: &Lua, raw: &str) -> mlua::Value {
         let message: irc::proto::Message = raw.parse().expect("valid irc message");
         let table = to_lua_message(lua, &message).expect("message table");
 
-        emit_sync_callback(lua, "format-message-text", (table, "me".to_string()))
-            .expect("format-message-text callback")
+        call_formatter(lua, "message_text", (table, "me".to_string()))
+            .expect("message_text formatter registered")
+            .expect("message_text formatter callback")
     }
 
     fn setup_theme() -> Lua {

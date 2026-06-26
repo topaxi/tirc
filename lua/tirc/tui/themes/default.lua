@@ -18,28 +18,28 @@ local server_notice_icon = {
   ' ',
 }
 
----@param msg table
-function M.format_join(msg)
+---@param msg TircMessage
+local function format_join(msg)
   local realname = msg.params[3]
 
   return {
-    { msg.nick,      blue },
+    { msg.nick, blue },
     realname and realname ~= 'Unknown' and {
-      { ' (',      gray },
-      { realname,  blue },
-      { ')',       gray },
+      { ' (', gray },
+      { realname, blue },
+      { ')', gray },
     } or '',
     { ' has joined ', twhite },
-    { msg.params[1],  green },
+    { msg.params[1], green },
   }
 end
 
----@param msg table
-function M.format_part(msg)
+---@param msg TircMessage
+local function format_part(msg)
   return {
-    { msg.nick,      blue },
+    { msg.nick, blue },
     { ' has parted ', twhite },
-    { msg.params[1],  green },
+    { msg.params[1], green },
   }
 end
 
@@ -47,9 +47,9 @@ end
 ---@param style TircThemeStyle
 local function format_privmsg_nickname(nickname, style)
   return {
-    { '<',      gray },
+    { '<', gray },
     { nickname, style },
-    { '>',      gray },
+    { '>', gray },
   }
 end
 
@@ -85,9 +85,9 @@ local function message_is_draft(msg)
   end) == nil
 end
 
----@param msg table
+---@param msg TircMessage
 ---@param nickname string
-function M.format_privmsg(msg, nickname)
+local function format_privmsg(msg, nickname)
   local is_draft = message_is_draft(msg)
 
   ---@type string
@@ -101,7 +101,7 @@ function M.format_privmsg(msg, nickname)
   if is_draft then
     return {
       is_action and format_privmsg_action_nickname(nickname, darkgray)
-      or format_privmsg_nickname(nickname, darkgray),
+        or format_privmsg_nickname(nickname, darkgray),
       ' ',
       { format_privmsg_message(message_str), darkgray },
     }
@@ -109,14 +109,14 @@ function M.format_privmsg(msg, nickname)
 
   return {
     is_action and format_privmsg_action_nickname(msg.nick, white)
-    or format_privmsg_nickname(msg.nick, blue),
+      or format_privmsg_nickname(msg.nick, blue),
     ' ',
     format_privmsg_message(message_str),
   }
 end
 
----@param msg table
-function M.format_notice(msg)
+---@param msg TircMessage
+local function format_notice(msg)
   if msg.server then
     return {
       { '!' .. msg.server, green },
@@ -152,8 +152,8 @@ local function format_modestring(modestring)
   return spans
 end
 
----@param msg table
-function M.format_mode(msg)
+---@param msg TircMessage
+local function format_mode(msg)
   local target = msg.params[1]
   local is_channel_mode = target:match('^[#&]')
   local prefix = is_channel_mode and 'cmode' or 'umode'
@@ -166,7 +166,7 @@ function M.format_mode(msg)
 
   local result = {
     { prefix .. '/', twhite },
-    { target,        is_channel_mode and green or blue },
+    { target, is_channel_mode and green or blue },
     ' ',
     format_modestring(modestring),
   }
@@ -184,39 +184,8 @@ local function is_numeric_reply(command)
   return command:match('^RPL_') ~= nil or command:match('^ERR_') ~= nil
 end
 
-function M.format_message_text(msg, nickname)
-  local command = msg.command
-
-  if command == 'JOIN' then
-    return M.format_join(msg)
-  elseif command == 'PART' then
-    return M.format_part(msg)
-  elseif command == 'PRIVMSG' then
-    return M.format_privmsg(msg, nickname)
-  elseif command == 'NOTICE' then
-    return M.format_notice(msg)
-  elseif command == 'MODE' then
-    return M.format_mode(msg)
-  elseif is_numeric_reply(command) then
-    if command == 'RPL_NAMREPLY' or command == 'RPL_ENDOFNAMES' then
-      return nil
-    end
-
-    return utils.list_concat(server_notice_icon, {
-      table.concat(msg.params, ' ', 2),
-    })
-  elseif command == 'PING' or command == 'PONG' then
-    return nil
-  elseif command == 'CAP' then
-    return utils.list_concat(server_notice_icon, {
-      'Capabilities ' .. table.concat(msg.params, ' '),
-    })
-  end
-
-  return tostring(msg)
-end
-
---- @return string|nil
+---@param tags TircMessageTag[]
+---@return string|nil
 local function get_time_from_tags(tags)
   if not tags then
     return
@@ -227,34 +196,6 @@ local function get_time_from_tags(tags)
       return tag[2]
     end
   end
-end
-
-function M.format_buffer_title(server, nickname, buffer_name)
-  return {
-    { nickname,    blue },
-    { '@',         twhite },
-    { server,      green },
-    { ' in ',      twhite },
-    { buffer_name, green },
-  }
-end
-
-function M.format_message_time(dt, msg)
-  local time_tag = get_time_from_tags(msg.tags)
-
-  if time_tag then
-    dt = date_time.parse_from_rfc3339(time_tag)
-  end
-
-  local is_1337 = dt.hour == 13 and dt.minute == 37
-
-  return {
-    {
-      string.format('%02d:%02d:%02d', dt.hour, dt.minute, dt.second),
-      is_1337 and red or twhite,
-    },
-    { ' ▏', twhite },
-  }
 end
 
 local access_level_styles = {
@@ -270,33 +211,83 @@ local function format_access_level(level)
   return access_level_styles[level]
 end
 
-function M.format_user(user)
-  return {
-    utils.list_map(user.access_levels, format_access_level),
-    { user.nickname, blue },
-  }
-end
+---@type TircUi
+M.ui = {
+  format = {
+    buffer_title = function(server, nickname, buffer_name)
+      return {
+        { nickname, blue },
+        { '@', twhite },
+        { server, green },
+        { ' in ', twhite },
+        { buffer_name, green },
+      }
+    end,
+
+    message_time = function(dt, msg)
+      local time_tag = get_time_from_tags(msg.tags)
+
+      if time_tag then
+        dt = date_time.parse_from_rfc3339(time_tag)
+      end
+
+      local is_1337 = dt.hour == 13 and dt.minute == 37
+
+      return {
+        {
+          string.format('%02d:%02d:%02d', dt.hour, dt.minute, dt.second),
+          is_1337 and red or twhite,
+        },
+        { ' ▏', twhite },
+      }
+    end,
+
+    message_text = function(msg, nickname)
+      local command = msg.command
+
+      if command == 'JOIN' then
+        return format_join(msg)
+      elseif command == 'PART' then
+        return format_part(msg)
+      elseif command == 'PRIVMSG' then
+        return format_privmsg(msg, nickname)
+      elseif command == 'NOTICE' then
+        return format_notice(msg)
+      elseif command == 'MODE' then
+        return format_mode(msg)
+      elseif is_numeric_reply(command) then
+        if command == 'RPL_NAMREPLY' or command == 'RPL_ENDOFNAMES' then
+          return nil
+        end
+
+        return utils.list_concat(server_notice_icon, {
+          table.concat(msg.params, ' ', 2),
+        })
+      elseif command == 'PING' or command == 'PONG' then
+        return nil
+      elseif command == 'CAP' then
+        return utils.list_concat(server_notice_icon, {
+          'Capabilities ' .. table.concat(msg.params, ' '),
+        })
+      end
+
+      return tostring(msg)
+    end,
+
+    user = function(user)
+      return {
+        utils.list_map(user.access_levels, format_access_level),
+        { user.nickname, blue },
+      }
+    end,
+  },
+}
 
 ---@class (exact) TircThemeDefaultOptions
 
 ---@param _config TircThemeDefaultOptions
 function M.setup(_config)
-  local function handle_event(callback)
-    return function(...)
-      local ok, result = pcall(callback, ...)
-
-      if ok then
-        return result
-      else
-        return { 'ERR: ' .. tostring(result), red }
-      end
-    end
-  end
-
-  tirc.on('format-buffer-title', handle_event(M.format_buffer_title))
-  tirc.on('format-message-time', handle_event(M.format_message_time))
-  tirc.on('format-message-text', handle_event(M.format_message_text))
-  tirc.on('format-user', handle_event(M.format_user))
+  tirc.ui = M.ui
 end
 
 return M
