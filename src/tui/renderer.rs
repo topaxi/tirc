@@ -179,7 +179,7 @@ impl Renderer {
 
         let messages = messages
             .iter()
-            .filter(|message| !message.message.width() > 0)
+            .filter(|message| message.message.width() > 0)
             .map(|message| {
                 let initial_indent = message.time.clone();
 
@@ -235,13 +235,12 @@ impl Renderer {
         tirc_message: &TircMessage,
     ) -> Option<RenderedMessage<'_>> {
         if let TircMessage::Irc(date_time, message, lua_message) = tirc_message {
-            let mut time_spans = self
-                .render_message_time(
-                    lua,
-                    &date_time_to_table(lua, date_time).unwrap(),
-                    lua_message,
-                )
-                .unwrap_or_else(|_| vec![]);
+            let mut time_spans = date_time_to_table(lua, date_time)
+                .ok()
+                .and_then(|date_time| {
+                    self.render_message_time(lua, &date_time, lua_message).ok()
+                })
+                .unwrap_or_default();
 
             if time_spans.len() == 1 {
                 time_spans.push(Span::raw(""));
@@ -315,7 +314,11 @@ impl Renderer {
         }
     }
 
-    fn render_user(&self, lua: &mlua::Lua, user: &mlua::Table) -> Result<Vec<Span<'_>>, anyhow::Error> {
+    fn render_user(
+        &self,
+        lua: &mlua::Lua,
+        user: &mlua::Table,
+    ) -> Result<Vec<Span<'_>>, anyhow::Error> {
         let v = config::emit_sync_callback(lua, "format-user", user)?;
 
         self.lua_value_to_spans(lua, v)
@@ -370,7 +373,13 @@ impl Renderer {
         f.render_widget(list, rect);
     }
 
-    pub fn render(&mut self, f: &mut ratatui::Frame, state: &State, lua: &mlua::Lua, input: &Input) {
+    pub fn render(
+        &mut self,
+        f: &mut ratatui::Frame,
+        state: &State,
+        lua: &mlua::Lua,
+        input: &Input,
+    ) {
         let layout = self.get_layout();
         let size = f.area();
         let chunks = layout.split(size);

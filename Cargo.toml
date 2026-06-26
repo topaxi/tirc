@@ -11,7 +11,7 @@ irc = { version = "1.1", default-features = false, features = [
   "channel-lists",
 ] }
 tokio = { version = "1.52", features = ["full"] }
-crossterm = { version = "0.29", features = ["serde"] }
+crossterm = { version = "0.29", features = ["event-stream", "serde"] }
 ratatui = { version = "0.30", features = [
   "crossterm_0_29",
   "serde",

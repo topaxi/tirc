@@ -2,15 +2,17 @@ extern crate irc;
 
 use std::{sync::Arc, time::Duration};
 
-use crossterm::event::{self, Event as CrosstermEvent, KeyEvent};
+use crossterm::event::{Event as CrosstermEvent, EventStream};
 use futures::prelude::*;
+use futures::stream::FusedStream;
 use irc::client::{prelude::*, ClientStream};
 
 use tirc::{
     config::{load_config, TircConfig},
     ui::{self, Event, InputHandler},
 };
-use tokio::{sync::mpsc, time::Instant};
+
+const TICK_RATE: Duration = Duration::from_millis(1000);
 
 fn create_lua_irc_sender(
     lua: &mlua::Lua,
@@ -23,8 +25,9 @@ fn create_lua_irc_sender(
     tbl.set(
         "send_privmsg",
         lua.create_function(move |_, (target, message): (String, String)| {
-            sender.send_privmsg(target, message).unwrap();
-            Ok(())
+            sender
+                .send_privmsg(target, message)
+                .map_err(mlua::Error::external)
         })?,
     )?;
 
@@ -32,8 +35,9 @@ fn create_lua_irc_sender(
     tbl.set(
         "send_notice",
         lua.create_function(move |_, (target, message): (String, String)| {
-            sender.send_notice(target, message).unwrap();
-            Ok(())
+            sender
+                .send_notice(target, message)
+                .map_err(mlua::Error::external)
         })?,
     )?;
 
@@ -67,23 +71,17 @@ async fn setup_irc(
     Ok((irc, stream))
 }
 
-async fn root_task(
-    rt: &tokio::runtime::Runtime,
-    lua: &mlua::Lua,
-    config: &TircConfig,
-) -> Result<(), anyhow::Error> {
-    let (irc, stream) = setup_irc(config, lua).await?;
-
-    let (tx, mut rx) = mpsc::channel(16);
-
-    let input_sender = tx.clone();
-    let irc_sender = tx.clone();
-
-    let input_handle = rt.spawn(async move { poll_input(input_sender).await });
-    let irc_handle = rt.spawn(async move { connect_irc(stream, irc_sender).await });
+async fn root_task(lua: &mlua::Lua, config: &TircConfig) -> Result<(), anyhow::Error> {
+    let (irc, irc_stream) = setup_irc(config, lua).await?;
+    let mut irc_stream = irc_stream.fuse();
 
     let mut state = ui::State {
-        server: config.servers.first().unwrap().host.clone(),
+        server: config
+            .servers
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("No server configured in init.lua"))?
+            .host
+            .clone(),
         ..Default::default()
     };
 
@@ -93,37 +91,73 @@ async fn root_task(
 
     let mut input_handler = InputHandler::new(lua, irc, tui);
 
+    let mut events = EventStream::new();
+    let mut tick = tokio::time::interval(TICK_RATE);
+
+    let terminate = terminate_signal();
+    tokio::pin!(terminate);
+
     loop {
         input_handler.sync_state(&mut state)?;
         input_handler.render_ui(&state)?;
 
-        if let Some(event) = rx.recv().await {
-            if let Err(err) = input_handler.handle_event(&mut state, event) {
-                eprintln!("Error: {:?}", err);
-                input_handle.abort();
-                irc_handle.abort();
-                break;
+        let event = tokio::select! {
+            Some(event) = events.next() => match event? {
+                CrosstermEvent::Key(key) => Event::Input(key),
+                _ => continue,
+            },
+            message = irc_stream.next(), if !irc_stream.is_terminated() => {
+                match message.transpose()? {
+                    Some(message) => Event::Message(Box::new(message)),
+                    None => continue,
+                }
             }
+            _ = tick.tick() => Event::Tick,
+            _ = &mut terminate => break,
+        };
+
+        if let Err(err) = input_handler.handle_event(&mut state, event) {
+            eprintln!("Error: {:?}", err);
+            break;
         }
     }
 
-    let res = tokio::try_join!(input_handle, irc_handle);
+    Ok(())
+}
 
-    Ok(match res {
-        Ok((_, _)) => Ok(()),
-        Err(e) => {
-            if e.is_cancelled() {
-                Ok(())
-            } else {
-                Err(e)
-            }
+/// Resolves when the process receives a termination signal, so the main loop
+/// can break and let `Tui::drop` restore the terminal instead of being killed
+/// mid-render.
+async fn terminate_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut terminate =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        let mut interrupt =
+            signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+        let mut hangup =
+            signal(SignalKind::hangup()).expect("failed to install SIGHUP handler");
+
+        tokio::select! {
+            _ = terminate.recv() => {}
+            _ = interrupt.recv() => {}
+            _ = hangup.recv() => {}
         }
-    }?)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 fn main() -> Result<(), anyhow::Error> {
     let lua = mlua::Lua::new();
     let config = load_config(&lua)?;
+
+    tirc::tui::Tui::install_panic_hook();
 
     let threads = usize::min(2, num_cpus::get());
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -131,44 +165,24 @@ fn main() -> Result<(), anyhow::Error> {
         .enable_all()
         .build()?;
 
-    rt.block_on(root_task(&rt, &lua, &config))
-}
-
-async fn poll_input(tx: mpsc::Sender<Event<KeyEvent>>) -> Result<(), anyhow::Error> {
-    let tick_rate = Duration::from_millis(1000);
-    let mut last_tick = Instant::now();
-
-    loop {
-        let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
-            .unwrap_or_else(|| Duration::from_secs(0));
-
-        if event::poll(timeout)? {
-            if let CrosstermEvent::Key(key) = event::read()? {
-                tx.send(Event::Input(key)).await?;
-            }
-        }
-
-        if last_tick.elapsed() >= tick_rate {
-            last_tick = Instant::now();
-            tx.send(Event::Tick).await?;
-        }
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    rt.block_on(root_task(&lua, &config))
 }
 
 async fn create_irc_client(config: &TircConfig) -> Result<Client, anyhow::Error> {
-    let server_config = config.servers.first().expect("No server config found");
+    let server_config = config
+        .servers
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("No server configured in init.lua (servers is empty)"))?;
+
+    let nickname = server_config.nickname.first().cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Server '{}' has an empty nickname list in init.lua",
+            server_config.host
+        )
+    })?;
 
     let client_config = Config {
-        nickname: Some(
-            server_config
-                .nickname
-                .first()
-                .expect("No nickname found")
-                .clone(),
-        ),
+        nickname: Some(nickname),
         alt_nicks: server_config.nickname[1..].to_vec(),
         realname: server_config.realname.clone(),
         server: Some(server_config.host.clone()),
@@ -186,15 +200,4 @@ async fn create_irc_client(config: &TircConfig) -> Result<Client, anyhow::Error>
     let client = Client::from_config(client_config).await?;
 
     Ok(client)
-}
-
-async fn connect_irc(
-    mut stream: ClientStream,
-    tx: mpsc::Sender<Event<KeyEvent>>,
-) -> Result<(), anyhow::Error> {
-    while let Some(message) = stream.next().await.transpose()? {
-        tx.send(Event::Message(Box::new(message))).await?;
-    }
-
-    Ok(())
 }

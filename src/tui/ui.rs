@@ -33,6 +33,22 @@ impl Tui {
         })
     }
 
+    pub fn install_panic_hook() {
+        let original = std::panic::take_hook();
+
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = Tui::restore_terminal();
+            original(info);
+        }));
+    }
+
+    fn restore_terminal() -> io::Result<()> {
+        disable_raw_mode()?;
+        execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+
+        Ok(())
+    }
+
     pub fn input(&self) -> &Input {
         &self.input
     }
@@ -70,13 +86,12 @@ impl Tui {
 
 impl Drop for Tui {
     fn drop(&mut self) {
-        disable_raw_mode().unwrap();
+        let _ = disable_raw_mode();
 
-        execute!(
+        let _ = execute!(
             self.terminal.backend_mut(),
             LeaveAlternateScreen,
             DisableMouseCapture
-        )
-        .unwrap();
+        );
     }
 }

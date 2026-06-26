@@ -13,10 +13,14 @@ pub enum TircMessage {
 }
 
 impl TircMessage {
-    pub fn from_message(message: Box<irc::proto::Message>, lua: &Lua) -> Self {
-        let lua_message = to_lua_message(lua, &message).unwrap().into();
+    pub fn from_message(message: Box<irc::proto::Message>, lua: &Lua) -> mlua::Result<Self> {
+        let lua_message = to_lua_message(lua, &message)?.into();
 
-        TircMessage::Irc(chrono::Local::now().into(), message, lua_message)
+        Ok(TircMessage::Irc(
+            chrono::Local::now().into(),
+            message,
+            lua_message,
+        ))
     }
 
     pub fn get_lua_message(&self) -> &mlua::Table {

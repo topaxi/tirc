@@ -104,7 +104,7 @@ impl<'lua> InputHandler<'lua> {
                             state.push_message(TircMessage::from_message(
                                 self.send_privmsg(target, message)?.into(),
                                 self.lua,
-                            ))
+                            )?)
                         }
                     }
                     [target] => {
@@ -119,7 +119,7 @@ impl<'lua> InputHandler<'lua> {
                 state.push_message(TircMessage::from_message(
                     self.send_privmsg(&state.current_buffer, message)?.into(),
                     self.lua,
-                ));
+                )?);
             }
             ["desc" | "describe", target_and_message] => {
                 if let [target, message] =
@@ -130,7 +130,7 @@ impl<'lua> InputHandler<'lua> {
                     state.push_message(TircMessage::from_message(
                         self.send_privmsg(target, message)?.into(),
                         self.lua,
-                    ));
+                    )?);
                 }
             }
             ["notice", target_and_message] => {
@@ -227,7 +227,7 @@ impl<'lua> InputHandler<'lua> {
                                 let current_buffer = &state.current_buffer;
                                 let message = self.send_privmsg(current_buffer, message)?;
                                 let tirc_message =
-                                    TircMessage::from_message(message.into(), self.lua);
+                                    TircMessage::from_message(message.into(), self.lua)?;
 
                                 state.push_message(tirc_message);
                             }
@@ -242,7 +242,7 @@ impl<'lua> InputHandler<'lua> {
                 }
             },
             (_, Event::Message(message)) => {
-                let tirc_message = TircMessage::from_message(message, self.lua);
+                let tirc_message = TircMessage::from_message(message, self.lua)?;
                 let lua_message = tirc_message.get_lua_message().to_owned();
                 let lua_irc_sender: mlua::Table = self.lua.named_registry_value("sender")?;
 
