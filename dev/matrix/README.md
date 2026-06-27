@@ -36,10 +36,14 @@ config.servers = {
 }
 ```
 
-A room created and joined by both users (e.g. via another client or a second
-tirc instance with bob) should then appear as a buffer; messages, membership and
-topic changes render through the normalized theme. To create/join a room you can
-use the `/j` command once joined, or create one with another Matrix client.
+Rooms you are already joined to appear as named buffers on startup; messages,
+membership and topic changes render through the normalized theme. From a
+Matrix-focused buffer, `:list` shows the public room directory and `:j <roomid>`
+joins a room.
+
+Note: Conduit's default room version uses **server-less room ids** (just
+`!abc...`, no `:localhost` suffix). Use the exact id returned by `createRoom`;
+an over-qualified id (`!abc...:localhost`) will not resolve.
 
 ## Stop / reset
 

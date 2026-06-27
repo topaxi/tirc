@@ -276,6 +276,10 @@ pub enum ChatEvent {
         who: UserRef,
         reason: Option<String>,
     },
+    /// Sets a human-friendly display name for a buffer (e.g. a Matrix room name)
+    /// without rendering a line. Creates the buffer if it does not exist yet, so
+    /// backends can surface joined rooms proactively.
+    BufferName { target: TargetId, name: String },
     /// Server-originated or otherwise un-normalized line. `target` of `None`
     /// routes to the backend's status buffer. `from` is the originating server
     /// or nick, when known. `code` is a protocol-specific classifier (IRC numeric
@@ -302,7 +306,8 @@ impl ChatEvent {
             | ChatEvent::Redaction { target, .. }
             | ChatEvent::Reaction { target, .. }
             | ChatEvent::Membership { target, .. }
-            | ChatEvent::Topic { target, .. } => Some(target),
+            | ChatEvent::Topic { target, .. }
+            | ChatEvent::BufferName { target, .. } => Some(target),
             ChatEvent::ServerInfo { target, .. } => target.as_ref(),
             ChatEvent::Rename { .. } | ChatEvent::Quit { .. } => None,
         }

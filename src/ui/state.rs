@@ -71,7 +71,18 @@ pub struct ChatBuffer {
     pub messages: Vec<StoredMessage>,
     pub members: Vec<Member>,
     pub topic: Option<String>,
+    /// Friendly name shown instead of the raw target (e.g. a Matrix room name).
+    pub display_name: Option<String>,
     pub scroll_position: usize,
+}
+
+impl ChatBuffer {
+    /// The name to show for this buffer: its display name, else the raw target.
+    pub fn label<'a>(&'a self, target: &'a TargetId) -> &'a str {
+        self.display_name
+            .as_deref()
+            .unwrap_or_else(|| target.as_str())
+    }
 }
 
 impl ChatBuffer {
@@ -196,6 +207,13 @@ impl State {
                 let buffer = self.buffer_mut(backend, target);
                 buffer.topic = Some(topic);
                 buffer.messages.push(StoredMessage::new(event, false));
+            }
+            ChatEvent::BufferName {
+                ref target,
+                ref name,
+            } => {
+                let name = name.clone();
+                self.buffer_mut(backend, target.clone()).display_name = Some(name);
             }
             ChatEvent::Rename { .. } => self.apply_rename(backend, event),
             ChatEvent::Quit { .. } => self.apply_quit(backend, event),

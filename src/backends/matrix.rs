@@ -16,7 +16,7 @@ use matrix_sdk::ruma::{OwnedRoomId, RoomId, UserId};
 use matrix_sdk::{Client, Room};
 
 use crate::core::{
-    BackendEvent, BackendId, BackendMessage, ChatEvent, Command, EventId, Formatted,
+    BackendEvent, BackendId, BackendMessage, ChatEvent, Command, EventId, Formatted, MemberRole,
     MembershipChange, MessageBody, MsgKind, Protocol, TargetId, UserRef,
 };
 
@@ -99,22 +99,38 @@ impl ChatBackend for MatrixBackend {
             event: BackendEvent::Ready { nickname },
         });
 
-        register_handlers(&client, id, events.clone());
+        // Initial sync loads current room state into the store and advances the
+        // store's sync token. Handlers are registered *after* it, so pre-existing
+        // members don't generate spurious "has joined" lines; we surface joined
+        // rooms explicitly instead.
+        let _ = client.sync_once(SyncSettings::default()).await;
 
-        // Autojoin configured rooms (aliases or ids).
-        for room in &self.config.autojoin {
-            let _ = join(&client, room).await;
+        for room in client.joined_rooms() {
+            populate_room(&room, id, &events).await;
         }
 
-        // Drive the SDK sync loop in the background; handle commands here until
-        // the backend's command channel closes.
+        register_handlers(&client, id, events.clone());
+
+        // Drive the SDK sync loop in the background; it resumes from the store's
+        // token (set by sync_once) so it delivers only new events.
         let sync_client = client.clone();
         let sync = tokio::spawn(async move {
             let _ = sync_client.sync(SyncSettings::default()).await;
         });
 
+        // Autojoin configured rooms (aliases or ids), skipping ones we are
+        // already in. Re-joining wastes a round-trip and some homeservers even
+        // return 5xx for it, which the SDK retries with backoff and would stall
+        // command processing.
+        for room in &self.config.autojoin {
+            if already_joined(&client, room) {
+                continue;
+            }
+            let _ = join(&client, room).await;
+        }
+
         while let Some(command) = commands.recv().await {
-            apply_command(&client, command).await;
+            apply_command(&client, id, &events, command).await;
         }
 
         sync.abort();
@@ -224,7 +240,7 @@ fn register_handlers(client: &Client, id: BackendId, events: EventSender) {
 
 /// Applies an outgoing command to the Matrix client. Matrix has native local
 /// echo via the sync timeline, so sends do not emit an optimistic copy.
-async fn apply_command(client: &Client, command: Command) {
+async fn apply_command(client: &Client, id: BackendId, events: &EventSender, command: Command) {
     match command {
         Command::SendMessage {
             target, body, kind, ..
@@ -252,9 +268,137 @@ async fn apply_command(client: &Client, command: Command) {
                 let _ = room.set_room_topic(&topic).await;
             }
         }
+        Command::ListChannels => list_public_rooms(client, id, events).await,
         // Reactions/redactions and IRC-only commands are not handled yet.
         _ => {}
     }
+}
+
+/// Queries the homeserver's public room directory and reports it into the status
+/// buffer, the Matrix analogue of IRC's `/list`.
+async fn list_public_rooms(client: &Client, id: BackendId, events: &EventSender) {
+    let response = match client.public_rooms(Some(50), None, None).await {
+        Ok(response) => response,
+        Err(err) => {
+            emit(events, id, status_line(format!("LIST failed: {err}")));
+            return;
+        }
+    };
+
+    emit(
+        events,
+        id,
+        status_line(format!("{} public room(s):", response.chunk.len())),
+    );
+
+    for room in response.chunk {
+        let handle = room
+            .canonical_alias
+            .map(|alias| alias.to_string())
+            .unwrap_or_else(|| room.room_id.to_string());
+        let name = room.name.unwrap_or_default();
+        emit(
+            events,
+            id,
+            status_line(format!(
+                "{handle}  {name}  ({} members)",
+                room.num_joined_members
+            )),
+        );
+    }
+}
+
+fn status_line(text: String) -> ChatEvent {
+    ChatEvent::ServerInfo {
+        target: None,
+        from: None,
+        code: Some("LIST".to_string()),
+        text,
+        raw: None,
+    }
+}
+
+/// Surfaces an already-joined room as a named buffer with its topic and roster,
+/// so joined rooms are visible on startup without waiting for new activity.
+async fn populate_room(room: &Room, id: BackendId, events: &EventSender) {
+    let target = room_target(room);
+
+    let name = room
+        .display_name()
+        .await
+        .map(|name| name.to_string())
+        .unwrap_or_else(|_| target.0.clone());
+    emit(
+        events,
+        id,
+        ChatEvent::BufferName {
+            target: target.clone(),
+            name,
+        },
+    );
+
+    if let Some(topic) = room.topic() {
+        emit(
+            events,
+            id,
+            ChatEvent::Topic {
+                target: target.clone(),
+                who: None,
+                topic,
+            },
+        );
+    }
+
+    if let Ok(members) = room.members(matrix_sdk::RoomMemberships::JOIN).await {
+        for member in members {
+            emit(
+                events,
+                id,
+                ChatEvent::Membership {
+                    target: target.clone(),
+                    who: UserRef {
+                        id: member.user_id().to_string(),
+                        display: member.display_name().map(str::to_string),
+                    },
+                    change: MembershipChange::Present {
+                        role: role_from_power(member.power_level()),
+                    },
+                },
+            );
+        }
+    }
+}
+
+/// Maps a Matrix power level to a member role (100 = admin, 50 = moderator).
+/// Room creators have "infinite" power and map to owner.
+fn role_from_power(
+    power: matrix_sdk::ruma::events::room::power_levels::UserPowerLevel,
+) -> MemberRole {
+    use matrix_sdk::ruma::events::room::power_levels::UserPowerLevel;
+
+    let value: i64 = match power {
+        UserPowerLevel::Infinite => return MemberRole::Owner,
+        UserPowerLevel::Int(int) => int.into(),
+        _ => 0,
+    };
+
+    if value >= 100 {
+        MemberRole::Owner
+    } else if value >= 50 {
+        MemberRole::Op
+    } else {
+        MemberRole::Member
+    }
+}
+
+/// Whether we are already a joined member of `room` (a room id), so a join can
+/// be skipped.
+fn already_joined(client: &Client, room: &str) -> bool {
+    RoomId::parse(room)
+        .ok()
+        .and_then(|room_id| client.get_room(&room_id))
+        .map(|room| room.state() == matrix_sdk::RoomState::Joined)
+        .unwrap_or(false)
 }
 
 async fn join(client: &Client, room: &str) -> anyhow::Result<()> {
@@ -323,9 +467,13 @@ mod tests {
     /// ```sh
     /// TIRC_TEST_HOMESERVER=http://localhost:6167 \
     /// TIRC_TEST_USER=@alice:localhost TIRC_TEST_PASSWORD=alicepassword \
-    /// TIRC_TEST_ROOM='!...:localhost' \
+    /// TIRC_TEST_ROOM='!roomid' \
     ///   cargo test --lib matrix::tests -- --ignored --nocapture
     /// ```
+    ///
+    /// `TIRC_TEST_ROOM` must be the exact room id returned by `createRoom` -
+    /// modern room versions (e.g. Conduit's default) use server-less ids with no
+    /// `:server` suffix, and an over-qualified id will not resolve.
     #[tokio::test]
     #[ignore = "requires the local matrix homeserver from dev/matrix"]
     async fn login_join_send_roundtrip() {

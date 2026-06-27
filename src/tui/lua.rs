@@ -186,6 +186,10 @@ pub fn to_lua_event(
                 table.set("who", user_table(lua, who)?)?;
             }
         }
+        ChatEvent::BufferName { name, .. } => {
+            table.set("type", "buffer_name")?;
+            table.set("name", name.as_str())?;
+        }
         ChatEvent::Rename { who, new_display } => {
             table.set("type", "rename")?;
             table.set("who", user_table(lua, who)?)?;

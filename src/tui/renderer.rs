@@ -145,7 +145,7 @@ impl Renderer {
         lua: &mlua::Lua,
         backend: &BackendInfo,
         nickname: &str,
-        target: &TargetId,
+        buffer_label: &str,
     ) -> Result<Vec<Span<'_>>, anyhow::Error> {
         self.format_spans(
             lua,
@@ -153,7 +153,7 @@ impl Renderer {
             (
                 backend.name.clone(),
                 nickname.to_string(),
-                target.as_str().to_string(),
+                buffer_label.to_string(),
             ),
         )
     }
@@ -216,7 +216,7 @@ impl Renderer {
             .map(ListItem::new);
 
         let title = self
-            .render_buffer_title(lua, backend, nickname, &buffer_id.target)
+            .render_buffer_title(lua, backend, nickname, buffer.label(&buffer_id.target))
             .unwrap_or_default();
 
         let list = List::new(messages)
@@ -272,8 +272,8 @@ impl Renderer {
 
         let buffers: Vec<Span> = state
             .buffers
-            .keys()
-            .flat_map(|id| {
+            .iter()
+            .flat_map(|(id, buffer)| {
                 let mut style = Style::default();
                 if view.focused.as_ref() == Some(id) {
                     style = style.add_modifier(Modifier::BOLD);
@@ -285,9 +285,9 @@ impl Renderer {
                         .get(&id.backend)
                         .map(|b| b.info.name.as_str())
                         .unwrap_or("?");
-                    format!("{name}/{}", id.target.as_str())
+                    format!("{name}/{}", buffer.label(&id.target))
                 } else {
-                    id.target.as_str().to_string()
+                    buffer.label(&id.target).to_string()
                 };
 
                 [Span::styled(label, style), Span::raw(" ")]
