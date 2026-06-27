@@ -1,0 +1,36 @@
+# Lightweight local Matrix homeserver for tirc development and testing.
+#
+# Conduit is a single-binary homeserver that is quick to start and supports
+# unencrypted rooms, which is all Phase 2 targets. Open registration is enabled
+# for convenience - this is a throwaway local instance, never expose it.
+#
+#   docker compose -f dev/matrix/docker-compose.yml up -d
+#   ./dev/matrix/register.sh alice alicepassword
+#   ./dev/matrix/register.sh bob   bobpassword
+#
+# Then point an init.lua Matrix server entry at http://localhost:6167 with
+# user_id '@alice:localhost'.
+
+services:
+  homeserver:
+    image: matrixconduit/matrix-conduit:latest
+    restart: unless-stopped
+    ports:
+      - "6167:6167"
+    environment:
+      CONDUIT_SERVER_NAME: localhost
+      CONDUIT_DATABASE_BACKEND: rocksdb
+      CONDUIT_DATABASE_PATH: /var/lib/matrix-conduit/
+      CONDUIT_PORT: 6167
+      CONDUIT_MAX_REQUEST_SIZE: "20000000"
+      CONDUIT_ALLOW_REGISTRATION: "true"
+      # Local throwaway instance: permit open registration without a token.
+      CONDUIT_YES_I_AM_VERY_VERY_SURE_I_WANT_AN_OPEN_REGISTRATION_SERVER_PRONE_TO_ABUSE: "true"
+      CONDUIT_ALLOW_FEDERATION: "false"
+      CONDUIT_ALLOW_CHECK_FOR_UPDATES: "false"
+      CONDUIT_TRUSTED_SERVERS: '["matrix.org"]'
+    volumes:
+      - conduit_data:/var/lib/matrix-conduit/
+
+volumes:
+  conduit_data:

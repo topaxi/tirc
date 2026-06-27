@@ -4,30 +4,71 @@ use std::time::Duration;
 use crossterm::event::{Event as CrosstermEvent, EventStream};
 use futures::StreamExt;
 
+use anyhow::Context;
+
 use tirc::backends::irc::{IrcBackend, IrcBackendConfig};
+use tirc::backends::matrix::{MatrixBackend, MatrixBackendConfig};
 use tirc::backends::{self, ChatBackend};
 use tirc::config::{load_config, ServerConfig, TircConfig};
-use tirc::core::{BackendId, BackendMessage, BufferId, TxnAllocator};
+use tirc::core::{BackendId, BackendMessage, BufferId, Protocol, TxnAllocator};
 use tirc::tui::Tui;
 use tirc::ui::{Event, InputHandler, State, ViewState};
 
 const TICK_RATE: Duration = Duration::from_millis(1000);
 
-/// Builds a backend from one server config entry. All servers are IRC in Phase
-/// 1; Phase 2 dispatches on a protocol tag.
+/// Builds a backend from one server config entry, dispatching on its `protocol`
+/// and validating that the required fields for that protocol are present.
 fn build_backend(id: BackendId, server: &ServerConfig) -> anyhow::Result<Box<dyn ChatBackend>> {
-    Ok(Box::new(IrcBackend::new(
-        id,
-        IrcBackendConfig {
-            host: server.host.clone(),
-            port: server.port,
-            use_tls: server.use_tls,
-            accept_invalid_cert: server.accept_invalid_cert,
-            nickname: server.nickname.clone(),
-            realname: server.realname.clone(),
-            autojoin: server.autojoin.clone(),
-        },
-    )))
+    match server.protocol {
+        Protocol::Irc => {
+            let host = server
+                .host
+                .clone()
+                .context("IRC server entry is missing `host`")?;
+
+            if server.nickname.is_empty() {
+                anyhow::bail!("IRC server '{host}' has an empty `nickname` list");
+            }
+
+            Ok(Box::new(IrcBackend::new(
+                id,
+                IrcBackendConfig {
+                    host,
+                    port: server.port,
+                    use_tls: server.use_tls,
+                    accept_invalid_cert: server.accept_invalid_cert,
+                    nickname: server.nickname.clone(),
+                    realname: server.realname.clone(),
+                    autojoin: server.autojoin.clone(),
+                },
+            )))
+        }
+        Protocol::Matrix => {
+            let homeserver = server
+                .homeserver
+                .clone()
+                .context("Matrix server entry is missing `homeserver`")?;
+            let user_id = server
+                .user_id
+                .clone()
+                .with_context(|| format!("Matrix server '{homeserver}' is missing `user_id`"))?;
+            let password = server
+                .password
+                .clone()
+                .with_context(|| format!("Matrix server '{homeserver}' is missing `password`"))?;
+
+            Ok(Box::new(MatrixBackend::new(
+                id,
+                MatrixBackendConfig {
+                    homeserver,
+                    user_id,
+                    password,
+                    device_id: server.device_id.clone(),
+                    autojoin: server.autojoin.clone(),
+                },
+            )))
+        }
+    }
 }
 
 async fn root_task(lua: &mlua::Lua, config: &TircConfig) -> Result<(), anyhow::Error> {

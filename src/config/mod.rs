@@ -6,6 +6,7 @@ use mlua::{IntoLuaMulti, Lua, LuaSerdeExt, Table, Value};
 use serde::Deserialize;
 
 use crate::{
+    core::Protocol,
     lua::{date_time::create_date_time_module, get_or_create_module, set_loaded_modules},
     tui::lua::create_tirc_theme_lua_module,
 };
@@ -20,9 +21,17 @@ fn default_port() -> u16 {
     6697
 }
 
+/// One configured backend. `protocol` selects which fields are required; IRC
+/// fields and Matrix fields share this struct so a Lua config author fills in
+/// only the relevant subset. An entry without `protocol` defaults to IRC, so
+/// existing IRC-only configs keep working unchanged.
 #[derive(Deserialize, Debug)]
 pub struct ServerConfig {
-    pub host: String,
+    #[serde(default)]
+    pub protocol: Protocol,
+
+    // IRC fields.
+    pub host: Option<String>,
 
     #[serde(default = "default_port")]
     pub port: u16,
@@ -33,11 +42,19 @@ pub struct ServerConfig {
     #[serde(default)]
     pub accept_invalid_cert: bool,
 
+    #[serde(default)]
     pub nickname: Vec<String>,
+
     pub realname: Option<String>,
 
     #[serde(default)]
     pub autojoin: Vec<String>,
+
+    // Matrix fields.
+    pub homeserver: Option<String>,
+    pub user_id: Option<String>,
+    pub password: Option<String>,
+    pub device_id: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
