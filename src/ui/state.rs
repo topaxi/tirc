@@ -227,13 +227,14 @@ impl State {
     }
 
     fn apply_message(&mut self, backend: BackendId, event: ChatEvent) {
-        let (target, echo_of, time) = match &event {
+        let (target, echo_of, time, has_id) = match &event {
             ChatEvent::Message {
                 target,
                 echo_of,
                 time,
+                id,
                 ..
-            } => (target.clone(), *echo_of, *time),
+            } => (target.clone(), *echo_of, *time, id.is_some()),
             _ => return,
         };
 
@@ -252,9 +253,15 @@ impl State {
             }
         }
 
+        // Only the optimistic local echo is pending: it carries a `txn` but no
+        // server-assigned id yet. A backfilled or incoming message may also carry
+        // a `txn` (our own messages echo their transaction id) but has a real
+        // event id, so it is already confirmed.
+        let pending = echo_of.is_some() && !has_id;
+
         // Server time when known (incoming/backfilled); local now otherwise (an
         // optimistic send shows the send time until its echo arrives).
-        let mut stored = StoredMessage::new(event, echo_of.is_some());
+        let mut stored = StoredMessage::new(event, pending);
         if let Some(time) = time {
             stored.time = time.with_timezone(&Local);
         }
@@ -502,6 +509,30 @@ mod tests {
         state.apply(backend(), message("#tirc", "me", Some(txn)));
         assert_eq!(buffer(&state, "#tirc").messages.len(), 1);
         assert!(!buffer(&state, "#tirc").messages[0].pending);
+    }
+
+    #[test]
+    fn backfilled_own_message_with_txn_is_not_pending() {
+        let mut state = test_state();
+
+        // A backfilled message we sent: it echoes its transaction id, but it has
+        // a real event id, so it must render confirmed (not dimmed).
+        state.apply(
+            backend(),
+            ChatEvent::Message {
+                target: TargetId::from("#tirc"),
+                id: Some(crate::core::EventId("$evt".to_string())),
+                sender: UserRef::new("me"),
+                body: MessageBody::plain("old message"),
+                kind: MsgKind::Text,
+                echo_of: Some(TxnId(3)),
+                time: None,
+            },
+        );
+
+        let buffer = buffer(&state, "#tirc");
+        assert_eq!(buffer.messages.len(), 1);
+        assert!(!buffer.messages[0].pending);
     }
 
     #[test]
