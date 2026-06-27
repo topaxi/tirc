@@ -16,6 +16,7 @@ use matrix_sdk::ruma::events::room::topic::SyncRoomTopicEvent;
 use matrix_sdk::ruma::events::{
     AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
 };
+use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::ruma::{OwnedRoomId, OwnedTransactionId, RoomId, UserId};
 use matrix_sdk::{Client, Room};
 
@@ -67,6 +68,14 @@ impl MatrixBackend {
         Ok(xdg::BaseDirectories::with_prefix("tirc")
             .create_data_directory(format!("matrix/{sanitized}"))?)
     }
+
+    /// Path of the persisted auth session, alongside the SQLite store. The SDK
+    /// store keeps sync tokens and crypto state but not the login session, so we
+    /// serialize the `MatrixSession` ourselves and restore it next run instead of
+    /// re-running a password login (which mints a brand-new device every time).
+    fn session_path(store_path: &std::path::Path) -> std::path::PathBuf {
+        store_path.join("session.json")
+    }
 }
 
 #[async_trait::async_trait]
@@ -86,21 +95,9 @@ impl ChatBackend for MatrixBackend {
     ) -> anyhow::Result<()> {
         let id = self.id;
         let store_path = self.store_path()?;
+        let session_path = Self::session_path(&store_path);
 
-        let client = Client::builder()
-            .homeserver_url(&self.config.homeserver)
-            .sqlite_store(&store_path, None)
-            .build()
-            .await?;
-
-        let mut login = client
-            .matrix_auth()
-            .login_username(&self.config.user_id, &self.config.password)
-            .initial_device_display_name("tirc");
-        if let Some(device_id) = &self.config.device_id {
-            login = login.device_id(device_id);
-        }
-        login.await?;
+        let client = authenticate(&self.config, &store_path, &session_path).await?;
 
         let user_id = client
             .user_id()
@@ -580,6 +577,82 @@ async fn sender_ref(room: &Room, user: &UserId) -> UserRef {
     UserRef {
         id: user.to_string(),
         display,
+    }
+}
+
+/// Builds and authenticates the client, reusing a persisted session when
+/// possible so we do not register a new device on every connect. A restored
+/// session is validated with a `whoami` round-trip; if the device was signed out
+/// remotely the stale session is discarded and we fall back to a password login.
+///
+/// A fresh client is built for the fallback because `restore_session` and
+/// `login` both panic if a session was already set on the same client.
+async fn authenticate(
+    config: &MatrixBackendConfig,
+    store_path: &std::path::Path,
+    session_path: &std::path::Path,
+) -> anyhow::Result<Client> {
+    let build_client = || async {
+        Client::builder()
+            .homeserver_url(&config.homeserver)
+            .sqlite_store(store_path, None)
+            .build()
+            .await
+    };
+
+    if let Some(session) = load_session(session_path) {
+        let client = build_client().await?;
+        client.restore_session(session).await?;
+        match client.whoami().await {
+            Ok(_) => return Ok(client),
+            Err(err) => {
+                log::warn!("persisted matrix session is no longer valid ({err}); logging in again");
+                let _ = std::fs::remove_file(session_path);
+            }
+        }
+    }
+
+    let client = build_client().await?;
+    let mut login = client
+        .matrix_auth()
+        .login_username(&config.user_id, &config.password)
+        .initial_device_display_name("tirc");
+    if let Some(device_id) = &config.device_id {
+        login = login.device_id(device_id);
+    }
+    login.await?;
+
+    if let Some(session) = client.matrix_auth().session() {
+        save_session(session_path, &session);
+    }
+
+    Ok(client)
+}
+
+/// Reads a previously persisted [`MatrixSession`], returning `None` when there is
+/// no saved session or it cannot be parsed (in which case we fall back to a fresh
+/// password login).
+fn load_session(path: &std::path::Path) -> Option<MatrixSession> {
+    let data = std::fs::read_to_string(path).ok()?;
+    match serde_json::from_str(&data) {
+        Ok(session) => Some(session),
+        Err(err) => {
+            log::warn!("ignoring unreadable matrix session at {path:?}: {err}");
+            None
+        }
+    }
+}
+
+/// Persists the login session so the next run restores it instead of logging in
+/// again. Best-effort: a write failure only means we log in afresh next time.
+fn save_session(path: &std::path::Path, session: &MatrixSession) {
+    match serde_json::to_string(session) {
+        Ok(data) => {
+            if let Err(err) = std::fs::write(path, data) {
+                log::warn!("failed to persist matrix session to {path:?}: {err}");
+            }
+        }
+        Err(err) => log::warn!("failed to serialize matrix session: {err}"),
     }
 }
 
