@@ -1,11 +1,11 @@
 local tirc = require('tirc')
 local utils = require('tirc.utils')
 local theme = require('tirc.tui.theme')
+local Class = require('tirc.class')
 
 --- The bundled default theme, structured as a class so downstream themes can
 --- reuse and extend it. It is a superset of `TircUi`: `new()` returns an instance
---- whose `.format` table satisfies the contract, while every rendering piece is
---- an overridable method.
+--- whose formatter methods satisfy the contract directly on the object.
 ---
 --- Extend by subclassing and overriding methods:
 --- ```lua
@@ -14,89 +14,44 @@ local theme = require('tirc.tui.theme')
 --- function My:format_message(event)
 ---   return Default.format_message(self, event) -- call up to the base
 --- end
---- tirc.use(My) -- or: tirc.ui = My.new()
+--- tirc.ui = My.new()
 --- ```
 ---
 --- ...or compose via constructor options without subclassing:
 --- ```lua
 --- tirc.ui = Default.new {
 ---   palette = { blue = theme.style { fg = 'cyan' } },
----   format = { user = function(user) ... end },
+---   buffer_title = function(server, nickname, buffer_name) ... end,
 --- }
 --- ```
 --- Options accepted by `TircTheme.new`/`setup`.
 ---@class TircThemeOptions
 ---@field palette? table<string, TircThemeStyle> override individual colours
----@field format? TircUiFormat override formatters without subclassing
+---@field buffer_title? fun(server: string, nickname: string, buffer: string): TircSpans
+---@field message_time? fun(date_time: TircDateTime, event: TircEvent): TircSpans
+---@field message_text? fun(event: TircEvent, nickname: string): TircSpans?
+---@field user? fun(user: TircUser): TircSpans
+---@field render_buffer_tab? fun(label: string, is_focused: boolean): TircSpans
 
----@class TircTheme: TircUi
+---@class TircTheme: TircUi, TircClassDef<TircTheme, TircThemeOptions>
 ---@field styles table<string, TircThemeStyle>
----@field format TircUiFormat
----@field new fun(opts?: TircThemeOptions): TircTheme construct an instance
----@field setup fun(opts?: TircThemeOptions) plugin entry point (`tirc.use`)
----@field extend fun(): TircTheme return a subclass to override methods on
-local Theme = {}
+---@field formatters string[] formatter method names wired directly on instances
+---@field setup fun(opts?: TircThemeOptions) plugin entry point for `tirc.use`
+local Theme = Class.new()
 
---- Builds an instance of `class`, wiring the `TircUi.format` table to dispatch to
---- the instance methods so subclass overrides take effect.
----@param class TircTheme
----@param opts? { palette?: table<string, TircThemeStyle>, format?: TircUiFormat }
-local function build(class, opts)
-  local self = setmetatable({}, class)
+--- The formatter methods Rust calls directly on tirc.ui.
+Theme.formatters = {
+  'buffer_title',
+  'message_time',
+  'message_text',
+  'user',
+  'render_buffer_tab',
+}
 
-  self.styles = self:make_styles(opts and opts.palette)
-
-  self.format = {
-    buffer_title = function(...)
-      return self:buffer_title(...)
-    end,
-    message_time = function(...)
-      return self:message_time(...)
-    end,
-    message_text = function(...)
-      return self:message_text(...)
-    end,
-    user = function(...)
-      return self:user(...)
-    end,
-  }
-
-  if opts and opts.format then
-    for name, formatter in pairs(opts.format) do
-      self.format[name] = formatter
-    end
-  end
-
-  return self
+--- Plugin entry point used by `tirc.use(theme)`.
+function Theme.setup(opts)
+  require('tirc').ui = Theme.new(opts)
 end
-
---- Attaches class-aware `new`/`setup`/`extend` to `class`, inheriting from
---- `parent` when given. `new`/`setup`/`extend` capture `class`, so subclasses
---- construct themselves correctly even though they are dot-called.
-local function define(class, parent)
-  if parent then
-    setmetatable(class, { __index = parent })
-  end
-  class.__index = class
-
-  function class.new(opts)
-    return build(class, opts)
-  end
-
-  --- Plugin entry point used by `tirc.use(theme)`.
-  function class.setup(opts)
-    tirc.ui = class.new(opts)
-  end
-
-  --- Returns a subclass; override methods on it, then `tirc.use(subclass)`.
-  function class.extend()
-    return define({}, class)
-  end
-
-  return class
-end
-
-define(Theme)
 
 --- The colour palette. Override this method (or pass `opts.palette`) to re-theme.
 ---@param overrides? table<string, TircThemeStyle>
@@ -424,6 +379,17 @@ function Theme:user(user)
     self:role_styles()[user.role] or {},
     { user.name, self.styles.blue },
   }
+end
+
+--- Renders one tab in the buffer bar. Focused tabs are styled brighter.
+---@param buffer TircBufferTab
+function Theme:render_buffer_tab(buffer)
+  local s = self.styles
+  local name = tirc.multi_backend
+      and (buffer.backend_name .. '/' .. buffer.name)
+    or buffer.name
+
+  return { { name, tirc.is_focused_buffer(buffer) and s.white or s.gray }, ' ' }
 end
 
 return Theme

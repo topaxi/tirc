@@ -1,5 +1,12 @@
 ---@alias EventName 'event'
----@alias FormatterName 'buffer_title' | 'message_time' | 'message_text' | 'user'
+---@alias FormatterName 'buffer_title' | 'message_time' | 'message_text' | 'user' | 'render_buffer_tab'
+
+--- A buffer entry passed to the `render_buffer_tab` formatter.
+---@class TircBufferTab
+---@field id string opaque buffer identifier (pass to tirc.is_focused_buffer)
+---@field name string display name (may differ from target for Matrix rooms)
+---@field target string raw target identifier (IRC channel/nick or Matrix room id)
+---@field backend_name string human-readable backend name
 
 --- Styled span tree consumed by the renderer: a string, a `{ content, style }`
 --- pair, or a (possibly nested) list of either. Returning `nil` skips the line.
@@ -63,18 +70,20 @@
 ---@field minute integer
 ---@field second integer
 
----@class TircUiFormat
+---@class TircUi
 ---@field buffer_title? fun(server: string, nickname: string, buffer: string): TircSpans
 ---@field message_time? fun(date_time: TircDateTime, event: TircEvent): TircSpans
 ---@field message_text? fun(event: TircEvent, nickname: string): TircSpans?
 ---@field user? fun(user: TircUser): TircSpans
-
----@class TircUi
----@field format? TircUiFormat
+---@field render_buffer_tab? fun(buffer: TircBufferTab): TircSpans
 
 ---@class TircModule
 ---@field version string
 ---@field ui TircUi
+---@field focused_buffer? string opaque id of the currently focused buffer, or nil
+---@field mode 'normal' | 'command' | 'insert' current editor mode
+---@field multi_backend boolean whether more than one backend is connected
+---@field is_focused_buffer fun(buffer: TircBufferTab): boolean
 ---@field on fun(event_name: EventName, callback: fun(event: TircEvent, sender: TircSender))
 local M = {}
 
@@ -92,6 +101,12 @@ end
 ---@param ... Args
 function M.use(plugin, ...)
   plugin.setup(...)
+end
+
+---@param buffer TircBufferTab
+---@return boolean
+function M.is_focused_buffer(buffer)
+  return _tirc.focused_buffer == buffer.id
 end
 
 setmetatable(M, {

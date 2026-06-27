@@ -2,7 +2,7 @@
 use mlua::LuaSerdeExt;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListDirection, ListItem, Paragraph},
 };
@@ -23,6 +23,38 @@ pub struct Renderer {}
 pub struct RenderedMessage<'a> {
     pub time: Box<[Span<'a>]>,
     pub message: Box<Line<'a>>,
+}
+
+fn update_render_context(
+    lua: &mlua::Lua,
+    view: &ViewState,
+    state: &State,
+) -> anyhow::Result<()> {
+    let tirc_mod: mlua::Table = lua
+        .globals()
+        .get::<mlua::Table>("package")?
+        .get::<mlua::Table>("loaded")?
+        .get::<mlua::Table>("_tirc")?;
+
+    tirc_mod.set(
+        "mode",
+        match view.mode {
+            Mode::Normal => "normal",
+            Mode::Command => "command",
+            Mode::Insert => "insert",
+        },
+    )?;
+    tirc_mod.set("multi_backend", state.backends.len() > 1)?;
+
+    match &view.focused {
+        Some(id) => {
+            let id_str = format!("{}:{}", id.backend.0, id.target.as_str());
+            tirc_mod.set("focused_buffer", id_str)?;
+        }
+        None => tirc_mod.set("focused_buffer", mlua::Value::Nil)?,
+    }
+
+    Ok(())
 }
 
 impl Default for Renderer {
@@ -274,32 +306,31 @@ impl Renderer {
         &self,
         f: &mut ratatui::Frame,
         state: &State,
-        view: &ViewState,
+        lua: &mlua::Lua,
         rect: Rect,
     ) {
-        let multi_backend = state.backends.len() > 1;
-
         let buffers: Vec<Span> = state
             .buffers
             .iter()
             .flat_map(|(id, buffer)| {
-                let mut style = Style::default();
-                if view.focused.as_ref() == Some(id) {
-                    style = style.add_modifier(Modifier::BOLD);
+                let backend_name = state
+                    .backends
+                    .get(&id.backend)
+                    .map(|b| b.info.name.as_str())
+                    .unwrap_or("?");
+
+                let tab_info = lua.create_table().and_then(|t| {
+                    t.set("id", format!("{}:{}", id.backend.0, id.target.as_str()))?;
+                    t.set("name", buffer.label(&id.target))?;
+                    t.set("target", id.target.as_str())?;
+                    t.set("backend_name", backend_name)?;
+                    Ok(t)
+                });
+
+                match tab_info {
+                    Ok(t) => self.format_spans(lua, "render_buffer_tab", t).unwrap_or_default(),
+                    Err(_) => vec![],
                 }
-
-                let label = if multi_backend {
-                    let name = state
-                        .backends
-                        .get(&id.backend)
-                        .map(|b| b.info.name.as_str())
-                        .unwrap_or("?");
-                    format!("{name}/{}", buffer.label(&id.target))
-                } else {
-                    buffer.label(&id.target).to_string()
-                };
-
-                [Span::styled(label, style), Span::raw(" ")]
             })
             .collect();
 
@@ -423,9 +454,12 @@ impl Renderer {
         };
 
         view.viewport_height = msg_rect.height;
+
+        let _ = update_render_context(lua, view, state);
+
         self.render_messages(f, state, view, lua, msg_rect);
 
-        self.render_buffer_bar(f, state, view, chunks[2]);
+        self.render_buffer_bar(f, state, lua, chunks[2]);
         self.render_input(f, view, input, chunks[1]);
     }
 }

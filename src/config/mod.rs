@@ -183,9 +183,9 @@ fn get_ui(lua: &Lua, _: ()) -> mlua::Result<Table> {
 
 /// Backs the `tirc.ui` property setter; exposed to Lua as `_tirc.__set_ui`.
 ///
-/// Merges `value` into the stored `tirc-ui` table two levels deep: top-level
-/// categories (e.g. `format`) merge, and within each category individual entries
-/// merge. This lets a theme or plugin override just a subset of formatters.
+/// Merges `value` into the stored `tirc-ui` table: top-level table values are
+/// merged entry-by-entry; non-table values are set directly. This lets a theme
+/// or plugin supply only the fields it needs without replacing the whole object.
 fn set_ui(lua: &Lua, value: Table) -> mlua::Result<()> {
     let target = ui_registry_table(lua)?;
 
@@ -215,7 +215,7 @@ fn set_ui(lua: &Lua, value: Table) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Invokes the UI formatter named `name` (registered under `tirc.ui.format`).
+/// Invokes the UI formatter named `name` (registered directly on `tirc.ui`).
 ///
 /// Returns `None` when no formatter is registered for `name`, otherwise the
 /// formatter's `mlua::Result` (an `Err` if the Lua callback raised). The caller
@@ -225,11 +225,7 @@ where
     Args: IntoLuaMulti,
 {
     let ui = ui_registry_table(lua).ok()?;
-    let format: Table = match ui.get("format") {
-        Ok(Value::Table(tbl)) => tbl,
-        _ => return None,
-    };
-    let func: mlua::Function = match format.get(name) {
+    let func: mlua::Function = match ui.get(name) {
         Ok(Some(func)) => func,
         _ => return None,
     };
@@ -280,6 +276,7 @@ fn get_version_lua_value(lua: &Lua) -> mlua::Table {
 const TIRC_INIT_LUA: &str = include_str!("../../lua/tirc/init.lua");
 const TIRC_CONFIG_LUA: &str = include_str!("../../lua/tirc/config.lua");
 const TIRC_UTILS_LUA: &str = include_str!("../../lua/tirc/utils.lua");
+const TIRC_CLASS_LUA: &str = include_str!("../../lua/tirc/class.lua");
 const TIRC_THEME_LUA: &str = include_str!("../../lua/tirc/tui/theme.lua");
 const TIRC_DEFAULT_THEME_LUA: &str = include_str!("../../lua/tirc/tui/themes/default.lua");
 
@@ -291,6 +288,7 @@ const TYPE_DEFINITIONS: &[(&str, &str)] = &[
     ("tirc/init.lua", TIRC_INIT_LUA),
     ("tirc/config.lua", TIRC_CONFIG_LUA),
     ("tirc/utils.lua", TIRC_UTILS_LUA),
+    ("tirc/class.lua", TIRC_CLASS_LUA),
     ("tirc/tui/theme.lua", TIRC_THEME_LUA),
     ("tirc/tui/themes/default.lua", TIRC_DEFAULT_THEME_LUA),
 ];
@@ -372,6 +370,13 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
         .call(())?;
 
     set_loaded_modules(lua, "tirc.utils", utils_module)?;
+
+    let class_module: Table = lua
+        .load(TIRC_CLASS_LUA)
+        .set_name("{builtin}/lua/tirc/class.lua")
+        .call(())?;
+
+    set_loaded_modules(lua, "tirc.class", class_module)?;
 
     let default_theme_module: Table = lua
         .load(TIRC_DEFAULT_THEME_LUA)
@@ -700,13 +705,16 @@ mod tests {
 
         // A subclass overriding `format_message` must take effect even though
         // `message_text` (which dispatches to it) lives on the base class.
+        // Subclasses use tirc.ui = Sub.new() directly; Sub.setup() is not
+        // auto-generated and inherited Theme.setup() would instantiate Theme.
         lua.load(indoc! {"
+            local tirc = require('tirc')
             local Default = require('tirc.tui.themes.default')
             local Sub = Default.extend()
             function Sub:format_message(_event)
               return { 'OVERRIDDEN' }
             end
-            Sub.setup({})
+            tirc.ui = Sub.new()
         "})
             .exec()
             .expect("subclass setup");
