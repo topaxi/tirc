@@ -74,7 +74,11 @@ fn build_backend(id: BackendId, server: &ServerConfig) -> anyhow::Result<Box<dyn
     }
 }
 
-async fn root_task(lua: &mlua::Lua, config: &TircConfig) -> Result<(), anyhow::Error> {
+async fn root_task(
+    lua: &mlua::Lua,
+    config: &TircConfig,
+    config_path: &std::path::Path,
+) -> Result<(), anyhow::Error> {
     if config.servers.is_empty() {
         anyhow::bail!("No server configured in init.lua (servers is empty)");
     }
@@ -98,7 +102,7 @@ async fn root_task(lua: &mlua::Lua, config: &TircConfig) -> Result<(), anyhow::E
     let mut tui = Tui::new()?;
     tui.initialize_terminal()?;
 
-    let mut input_handler = InputHandler::new(lua, tui, handles, txn);
+    let mut input_handler = InputHandler::new(lua, tui, handles, txn, config_path.to_owned());
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(TICK_RATE);
@@ -176,7 +180,7 @@ async fn terminate_signal() {
 
 fn main() -> Result<(), anyhow::Error> {
     let lua = mlua::Lua::new();
-    let config = load_config(&lua)?;
+    let (config, config_path) = load_config(&lua)?;
 
     Tui::install_panic_hook();
 
@@ -193,7 +197,7 @@ fn main() -> Result<(), anyhow::Error> {
         .build()?;
 
     let local = tokio::task::LocalSet::new();
-    let result = local.block_on(&runtime, root_task(&lua, &config));
+    let result = local.block_on(&runtime, root_task(&lua, &config, &config_path));
 
     // Let the terminal restore (Tui::drop) before surfacing any error.
     drop(local);

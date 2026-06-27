@@ -1,11 +1,12 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use mlua::Lua;
 
 use crate::backends::BackendHandle;
-use crate::config::{emit_event, EventName};
+use crate::config::{emit_event, reload_lua_theme, EventName};
 use crate::core::{
     BackendEvent, BackendId, BackendMessage, ChatEvent, Command, MsgKind, TargetId, TxnAllocator,
 };
@@ -33,6 +34,7 @@ pub struct InputHandler<'lua> {
     /// Lazily-built per-backend Lua sender tables passed to `event` handlers,
     /// cached so we do not rebuild closures on every event.
     senders: HashMap<BackendId, mlua::RegistryKey>,
+    config_path: PathBuf,
 }
 
 impl<'lua> InputHandler<'lua> {
@@ -41,6 +43,7 @@ impl<'lua> InputHandler<'lua> {
         ui: Tui,
         backends: Vec<BackendHandle>,
         txn: Arc<TxnAllocator>,
+        config_path: PathBuf,
     ) -> Self {
         Self {
             lua,
@@ -48,6 +51,7 @@ impl<'lua> InputHandler<'lua> {
             backends,
             txn,
             senders: HashMap::new(),
+            config_path,
         }
     }
 
@@ -200,6 +204,24 @@ impl<'lua> InputHandler<'lua> {
                 },
             ),
             ["list"] => self.send_to(backend, Command::ListChannels),
+            ["reload"] => {
+                let notice_text = match reload_lua_theme(self.lua, &self.config_path) {
+                    Ok(()) => "Theme reloaded successfully".to_owned(),
+                    Err(err) => format!("Reload error: {err}").replace(['\r', '\n'], " "),
+                };
+                if let Some(backend) = backend {
+                    state.apply(
+                        backend,
+                        ChatEvent::ServerInfo {
+                            target: None,
+                            from: None,
+                            code: None,
+                            text: notice_text,
+                            raw: None,
+                        },
+                    );
+                }
+            }
             _ => {}
         }
 
