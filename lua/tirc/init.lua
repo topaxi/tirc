@@ -80,6 +80,7 @@ local M = {}
 
 local _tirc = require('_tirc')
 
+---@return TircConfig
 function M.create_config()
   return require('tirc.config').create_config()
 end
