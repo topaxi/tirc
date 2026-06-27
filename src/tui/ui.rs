@@ -1,10 +1,11 @@
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
 };
-use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, Clear, ClearType,
+    EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use crossterm::{execute, queue};
 use mlua::Lua;
 use ratatui::backend::CrosstermBackend;
 use std::io::{self, Stdout};
@@ -96,10 +97,7 @@ impl Tui {
     /// redundant since [`Self::render`] repaints fully every frame, but kept as an
     /// explicit escape hatch.
     pub fn redraw(&mut self) -> Result<(), anyhow::Error> {
-        crossterm::queue!(
-            self.terminal.backend_mut(),
-            crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
-        )?;
+        queue!(self.terminal.backend_mut(), Clear(ClearType::All))?;
         self.terminal.swap_buffers();
         Ok(())
     }
@@ -114,14 +112,20 @@ impl Tui {
         // incremental buffer diff mis-renders lines containing wide graphemes
         // (notably emoji-presentation sequences with U+FE0F), leaving stale cells
         // and spurious spacing. Forcing a full repaint every frame sidesteps the
-        // buggy incremental path entirely. The queued erase + back-buffer reset are
-        // flushed together with the `draw` below, so this neither flickers nor
-        // queries the cursor. Remove once the upstream bug is fixed.
+        // buggy incremental path entirely, but a full erase+repaint flickers, so
+        // wrap the frame in a synchronized update (terminal mode 2026): the
+        // terminal buffers the erase and the repaint and swaps to them atomically.
+        // Terminals without support ignore these escapes and just fall back to the
+        // (flickering) erase+repaint. Remove once the upstream bug is fixed.
+        queue!(self.terminal.backend_mut(), BeginSynchronizedUpdate)?;
+
         self.redraw()?;
 
         self.terminal.draw(|f| {
             self.renderer.render(f, state, view, lua, &self.input);
         })?;
+
+        execute!(self.terminal.backend_mut(), EndSynchronizedUpdate)?;
 
         Ok(())
     }
