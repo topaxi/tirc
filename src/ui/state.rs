@@ -109,6 +109,22 @@ impl ChatBuffer {
         self.scroll_position = 0;
     }
 
+    /// Inserts a message keeping `messages` sorted by `time`. The scan runs from
+    /// the end so the common append case (a live message newer than everything)
+    /// is O(1), and equal-time messages keep arrival order (the new one lands
+    /// *after* existing ones of the same timestamp). Every path that adds a line
+    /// must go through here so the sorted invariant the renderer relies on is
+    /// never broken by a direct `push`.
+    fn insert_message(&mut self, message: StoredMessage) {
+        let pos = self
+            .messages
+            .iter()
+            .rposition(|m| m.time <= message.time)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        self.messages.insert(pos, message);
+    }
+
     fn upsert_member(&mut self, user: UserRef, role: MemberRole) {
         match self.members.iter_mut().find(|m| m.user.id == user.id) {
             Some(member) => {
@@ -234,7 +250,7 @@ impl State {
                 let topic = topic.clone();
                 let buffer = self.buffer_mut(backend, target);
                 buffer.topic = Some(topic);
-                buffer.messages.push(StoredMessage::new(event, false));
+                buffer.insert_message(StoredMessage::new(event, false));
             }
             ChatEvent::BufferName {
                 ref target,
@@ -248,8 +264,7 @@ impl State {
             ChatEvent::ServerInfo { ref target, .. } => {
                 let target = target.clone().unwrap_or_else(TargetId::status);
                 self.buffer_mut(backend, target)
-                    .messages
-                    .push(StoredMessage::new(event, false));
+                    .insert_message(StoredMessage::new(event, false));
             }
         }
     }
@@ -269,15 +284,21 @@ impl State {
         let has_id = id.is_some();
         let buffer = self.buffer_mut(backend, target);
 
-        // Replace the optimistic local echo in place when the server confirms it,
-        // adopting the server timestamp in place of the local send time.
+        // Replace the optimistic local echo when the server confirms it, adopting
+        // the server timestamp in place of the local send time. The echo was
+        // appended at `Local::now()`; the confirmed server time may be earlier
+        // (clock skew, or a historical send), so re-insert it at the correct
+        // chronological position rather than retiming it in place - leaving it
+        // put would break the sorted invariant for every later insert.
         if let Some(txn) = echo_of {
-            if let Some(slot) = buffer.messages.iter_mut().find(|m| m.txn() == Some(txn)) {
+            if let Some(pos) = buffer.messages.iter().position(|m| m.txn() == Some(txn)) {
+                let mut slot = buffer.messages.remove(pos);
                 slot.event = event;
                 slot.pending = false;
                 if let Some(time) = time {
                     slot.time = time.with_timezone(&Local);
                 }
+                buffer.insert_message(slot);
                 return;
             }
         }
@@ -303,15 +324,10 @@ impl State {
             stored.time = time.with_timezone(&Local);
         }
 
-        if !pending && time.is_some() {
-            // Insert at the correct chronological position so that backfilled
-            // messages arriving out of delivery order sort correctly relative
-            // to live messages.
-            let pos = buffer.messages.partition_point(|m| m.time <= stored.time);
-            buffer.messages.insert(pos, stored);
-        } else {
-            buffer.messages.push(stored);
-        }
+        // Insert at the correct chronological position so backfilled messages
+        // arriving out of delivery order sort correctly relative to live ones.
+        // A pending echo carries `Local::now()`, so this still appends it.
+        buffer.insert_message(stored);
     }
 
     fn apply_edit(&mut self, backend: BackendId, target: TargetId, id: EventId, body: MessageBody) {
@@ -379,7 +395,7 @@ impl State {
         }
 
         // Join/Part/Kick/Invite also render an announcement line.
-        buffer.messages.push(StoredMessage::new(event, false));
+        buffer.insert_message(StoredMessage::new(event, false));
     }
 
     fn apply_rename(&mut self, backend: BackendId, event: ChatEvent) {
@@ -396,9 +412,7 @@ impl State {
 
         self.for_backend_buffers(backend, |buffer| {
             if buffer.rename_member(&who.id, &renamed) {
-                buffer
-                    .messages
-                    .push(StoredMessage::new(event.clone(), false));
+                buffer.insert_message(StoredMessage::new(event.clone(), false));
             }
         });
     }
@@ -411,9 +425,7 @@ impl State {
 
         self.for_backend_buffers(backend, |buffer| {
             if buffer.remove_member(&who.id) {
-                buffer
-                    .messages
-                    .push(StoredMessage::new(event.clone(), false));
+                buffer.insert_message(StoredMessage::new(event.clone(), false));
             }
         });
     }
@@ -810,5 +822,75 @@ mod tests {
         let buf = buffer(&state, "#tirc");
         assert_eq!(buf.messages.len(), 2);
         assert!(buf.messages[1].pending, "pending echo must be at the end");
+    }
+
+    #[test]
+    fn confirmed_echo_is_repositioned_by_server_time() {
+        let mut state = test_state();
+        let txn = TxnId(5);
+
+        // A backfilled history message sits in the buffer.
+        state.apply(backend(), timed_message("#tirc", "alice", "$hist", 2000));
+
+        // We send a message: the optimistic echo appends at `Local::now()`, far
+        // ahead of the history timestamp.
+        state.apply(backend(), message("#tirc", "me", Some(txn)));
+        assert!(buffer(&state, "#tirc").messages[1].pending);
+
+        // The server confirms it with an *earlier* timestamp (1000 < 2000), so it
+        // belongs before the history message. An in-place retime would leave it
+        // stranded at the tail and break sortedness for later inserts.
+        let server_time = chrono::DateTime::from_timestamp(1000, 0).unwrap();
+        state.apply(
+            backend(),
+            ChatEvent::Message {
+                target: TargetId::from("#tirc"),
+                id: Some(crate::core::EventId("$echo".to_string())),
+                sender: UserRef::new("me"),
+                body: MessageBody::plain("hi"),
+                kind: MsgKind::Text,
+                echo_of: Some(txn),
+                time: Some(server_time),
+            },
+        );
+
+        let buf = buffer(&state, "#tirc");
+        assert_eq!(buf.messages.len(), 2);
+        assert_eq!(
+            buf.messages[0].time.timestamp(),
+            1000,
+            "confirmed echo must move to its chronological position"
+        );
+        assert_eq!(buf.messages[1].time.timestamp(), 2000);
+    }
+
+    #[test]
+    fn membership_line_sorts_by_time_among_messages() {
+        let mut state = test_state();
+
+        // A message timestamped in the far future (year ~2065) is already in the
+        // buffer.
+        state.apply(backend(), timed_message("#tirc", "alice", "$future", 3_000_000_000));
+
+        // A live "has joined" line is rendered with `Local::now()`, which is
+        // *earlier* than the future message. It must sort before that message
+        // rather than being appended at the tail (a direct `push` would leave the
+        // buffer unsorted: [future, join]).
+        state.apply(
+            backend(),
+            ChatEvent::Membership {
+                target: TargetId::from("#tirc"),
+                who: UserRef::new("bob"),
+                change: MembershipChange::Join { realname: None },
+            },
+        );
+
+        let buf = buffer(&state, "#tirc");
+        assert_eq!(buf.messages.len(), 2);
+        assert!(
+            matches!(buf.messages[0].event, ChatEvent::Membership { .. }),
+            "join line (now) sorts before the future-dated message"
+        );
+        assert!(matches!(buf.messages[1].event, ChatEvent::Message { .. }));
     }
 }
