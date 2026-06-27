@@ -393,8 +393,14 @@ mod tests {
             time: None,
         });
 
-        let table =
-            to_lua_event(&lua, &message, &backend(), &TargetId::from("#tirc"), "#tirc").unwrap();
+        let table = to_lua_event(
+            &lua,
+            &message,
+            &backend(),
+            &TargetId::from("#tirc"),
+            "#tirc",
+        )
+        .unwrap();
         let backend_table: mlua::Table = table.get("backend").unwrap();
         let metadata: mlua::Table = backend_table.get("metadata").unwrap();
         assert_eq!(metadata.get::<String>("label").unwrap(), "topaxi");

@@ -82,12 +82,43 @@ impl Tui {
         Ok(())
     }
 
+    /// Queues a full repaint that takes effect on the next [`Self::render`]:
+    /// resets the back buffer so the whole frame is re-emitted, and queues a
+    /// screen erase so cells vacated since the last frame are cleared.
+    ///
+    /// The erase is *queued*, not flushed, so it goes out together with the next
+    /// `draw` (one flush, no flicker). It deliberately avoids `Terminal::clear`,
+    /// which issues a cursor-position query (DSR) and reads the reply from stdin -
+    /// that races the async input reader and fails with "cursor position could not
+    /// be read".
+    ///
+    /// Exposed as the manual `:redraw` command and Ctrl-L. These are now largely
+    /// redundant since [`Self::render`] repaints fully every frame, but kept as an
+    /// explicit escape hatch.
+    pub fn redraw(&mut self) -> Result<(), anyhow::Error> {
+        crossterm::queue!(
+            self.terminal.backend_mut(),
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+        )?;
+        self.terminal.swap_buffers();
+        Ok(())
+    }
+
     pub fn render(
         &mut self,
         lua: &Lua,
         state: &State,
         view: &mut ViewState,
     ) -> Result<(), anyhow::Error> {
+        // Workaround for https://github.com/ratatui/ratatui/issues/2357: ratatui's
+        // incremental buffer diff mis-renders lines containing wide graphemes
+        // (notably emoji-presentation sequences with U+FE0F), leaving stale cells
+        // and spurious spacing. Forcing a full repaint every frame sidesteps the
+        // buggy incremental path entirely. The queued erase + back-buffer reset are
+        // flushed together with the `draw` below, so this neither flickers nor
+        // queries the cursor. Remove once the upstream bug is fixed.
+        self.redraw()?;
+
         self.terminal.draw(|f| {
             self.renderer.render(f, state, view, lua, &self.input);
         })?;

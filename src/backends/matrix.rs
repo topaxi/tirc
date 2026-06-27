@@ -165,6 +165,21 @@ impl ChatBackend for MatrixBackend {
     }
 }
 
+fn trim_display_name(s: &str) -> &str {
+    s.trim_matches(|c: char| c.is_whitespace() || c == '\u{00A0}')
+}
+
+/// Converts a Matrix `origin_server_ts` into a UTC instant for chronological
+/// ordering of the line it belongs to.
+fn server_ts(
+    ts: matrix_sdk::ruma::MilliSecondsSinceUnixEpoch,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let millis: u64 = ts.0.into();
+    i64::try_from(millis)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+}
+
 /// Registers sync handlers translating Matrix events into [`ChatEvent`]s.
 fn register_handlers(client: &Client, id: BackendId, events: EventSender) {
     let message_events = events.clone();
@@ -206,7 +221,12 @@ fn register_handlers(client: &Client, id: BackendId, events: EventSender) {
 
                 let who = UserRef {
                     id: event.state_key.to_string(),
-                    display: event.content.displayname.clone(),
+                    display: event
+                        .content
+                        .displayname
+                        .as_deref()
+                        .map(trim_display_name)
+                        .map(str::to_string),
                 };
 
                 emit(
@@ -216,6 +236,7 @@ fn register_handlers(client: &Client, id: BackendId, events: EventSender) {
                         target: room_target(&room),
                         who,
                         change,
+                        time: server_ts(event.origin_server_ts),
                     },
                 );
             }
@@ -234,6 +255,7 @@ fn register_handlers(client: &Client, id: BackendId, events: EventSender) {
                         target: room_target(&room),
                         who: Some(UserRef::new(event.sender.to_string())),
                         topic: event.content.topic,
+                        time: server_ts(event.origin_server_ts),
                     },
                 );
             }
@@ -376,6 +398,7 @@ async fn populate_room(room: &Room, id: BackendId, events: &EventSender) {
                 target: target.clone(),
                 who: None,
                 topic,
+                time: None,
             },
         );
     }
@@ -389,11 +412,15 @@ async fn populate_room(room: &Room, id: BackendId, events: &EventSender) {
                     target: target.clone(),
                     who: UserRef {
                         id: member.user_id().to_string(),
-                        display: member.display_name().map(str::to_string),
+                        display: member
+                            .display_name()
+                            .map(trim_display_name)
+                            .map(str::to_string),
                     },
                     change: MembershipChange::Present {
                         role: role_from_power(member.power_level()),
                     },
+                    time: None,
                 },
             );
         }
@@ -494,10 +521,7 @@ async fn message_event_to_chat(
         .and_then(|txn| txn.as_str().parse::<u64>().ok())
         .map(TxnId);
 
-    let millis: u64 = event.origin_server_ts.0.into();
-    let time = i64::try_from(millis)
-        .ok()
-        .and_then(chrono::DateTime::from_timestamp_millis);
+    let time = server_ts(event.origin_server_ts);
 
     Some(ChatEvent::Message {
         target: room_target(room),
@@ -546,7 +570,12 @@ async fn sender_ref(room: &Room, user: &UserId) -> UserRef {
         .await
         .ok()
         .flatten()
-        .and_then(|member| member.display_name().map(str::to_string));
+        .and_then(|member| {
+            member
+                .display_name()
+                .map(trim_display_name)
+                .map(str::to_string)
+        });
 
     UserRef {
         id: user.to_string(),

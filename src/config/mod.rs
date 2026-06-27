@@ -261,7 +261,11 @@ pub fn set_backend_metadata(lua: &Lua, id: BackendId, value: Value) -> mlua::Res
 /// Returns the stored metadata table for `id`, or `None` when the backend has no
 /// metadata. Used by the render helpers to attach `backend.metadata`.
 pub fn get_backend_metadata(lua: &Lua, id: BackendId) -> Option<Value> {
-    match backend_metadata_registry(lua).ok()?.get::<Value>(id.0).ok()? {
+    match backend_metadata_registry(lua)
+        .ok()?
+        .get::<Value>(id.0)
+        .ok()?
+    {
         Value::Nil => None,
         value => Some(value),
     }
@@ -712,11 +716,13 @@ mod tests {
                 target: TargetId::from("#tirc"),
                 who: UserRef::new("alice"),
                 change: MembershipChange::Join { realname: None },
+                time: None,
             },
             ChatEvent::Membership {
                 target: TargetId::from("#tirc"),
                 who: UserRef::new("alice"),
                 change: MembershipChange::Part { reason: None },
+                time: None,
             },
             ChatEvent::ServerInfo {
                 target: None,
@@ -755,6 +761,7 @@ mod tests {
                 change: MembershipChange::Present {
                     role: crate::core::MemberRole::Member,
                 },
+                time: None,
             },
         );
         assert!(matches!(value, mlua::Value::Nil));

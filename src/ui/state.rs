@@ -48,6 +48,17 @@ impl StoredMessage {
         }
     }
 
+    /// A non-pending stored message stamped with a server time when known,
+    /// falling back to `Local::now()` otherwise. Used for events that carry their
+    /// own timestamp (messages, membership, topic) so they sort chronologically.
+    fn new_at(event: ChatEvent, time: Option<DateTime<chrono::Utc>>) -> Self {
+        let mut message = StoredMessage::new(event, false);
+        if let Some(time) = time {
+            message.time = time.with_timezone(&Local);
+        }
+        message
+    }
+
     /// A non-pending stored message, used to build a Lua view of an event that is
     /// not (yet) in a buffer, e.g. when firing the `event` callback.
     pub fn from_event(event: ChatEvent) -> Self {
@@ -125,15 +136,24 @@ impl ChatBuffer {
         self.messages.insert(pos, message);
     }
 
-    fn upsert_member(&mut self, user: UserRef, role: MemberRole) {
-        match self.members.iter_mut().find(|m| m.user.id == user.id) {
+    /// Inserts or updates a member, returning `true` only when the member was not
+    /// already in the roster. Callers use this to suppress a redundant "has
+    /// joined" line for a member that is already present (e.g. a re-delivered or
+    /// self membership event).
+    fn upsert_member(&mut self, user: UserRef, role: MemberRole) -> bool {
+        let is_new = match self.members.iter_mut().find(|m| m.user.id == user.id) {
             Some(member) => {
                 member.user = user;
                 member.role = role;
+                false
             }
-            None => self.members.push(Member { user, role }),
-        }
+            None => {
+                self.members.push(Member { user, role });
+                true
+            }
+        };
         self.sort_members();
+        is_new
     }
 
     fn set_member_role(&mut self, id: &str, role: MemberRole) {
@@ -244,13 +264,14 @@ impl State {
             ChatEvent::Topic {
                 ref target,
                 ref topic,
+                time,
                 ..
             } => {
                 let target = target.clone();
                 let topic = topic.clone();
                 let buffer = self.buffer_mut(backend, target);
                 buffer.topic = Some(topic);
-                buffer.insert_message(StoredMessage::new(event, false));
+                buffer.insert_message(StoredMessage::new_at(event, time));
             }
             ChatEvent::BufferName {
                 ref target,
@@ -366,12 +387,13 @@ impl State {
     }
 
     fn apply_membership(&mut self, backend: BackendId, event: ChatEvent) {
-        let (target, who, change) = match &event {
+        let (target, who, change, time) = match &event {
             ChatEvent::Membership {
                 target,
                 who,
                 change,
-            } => (target.clone(), who.clone(), change.clone()),
+                time,
+            } => (target.clone(), who.clone(), change.clone(), *time),
             _ => return,
         };
 
@@ -387,15 +409,24 @@ impl State {
                 buffer.set_member_role(&who.id, *role);
                 return;
             }
-            MembershipChange::Join { .. } => buffer.upsert_member(who, MemberRole::Member),
+            MembershipChange::Join { .. } => {
+                // Suppress the line when the member is already present: a
+                // re-delivered membership (notably our own, where Matrix may omit
+                // `prev_content`) must not produce a phantom "has joined".
+                if !buffer.upsert_member(who, MemberRole::Member) {
+                    return;
+                }
+            }
             MembershipChange::Part { .. } | MembershipChange::Kick { .. } => {
-                buffer.remove_member(&who.id);
+                if !buffer.remove_member(&who.id) {
+                    return;
+                }
             }
             MembershipChange::Invite { .. } => {}
         }
 
         // Join/Part/Kick/Invite also render an announcement line.
-        buffer.insert_message(StoredMessage::new(event, false));
+        buffer.insert_message(StoredMessage::new_at(event, time));
     }
 
     fn apply_rename(&mut self, backend: BackendId, event: ChatEvent) {
@@ -637,6 +668,7 @@ mod tests {
                 target: TargetId::from("#tirc"),
                 who: UserRef::new("alice"),
                 change: MembershipChange::Join { realname: None },
+                time: None,
             },
         );
         let buffer = buffer(&state, "#tirc");
@@ -654,6 +686,7 @@ mod tests {
                     target: TargetId::from("#tirc"),
                     who: UserRef::new(nick),
                     change: MembershipChange::Present { role },
+                    time: None,
                 },
             );
         }
@@ -672,6 +705,7 @@ mod tests {
                 target: TargetId::from("#tirc"),
                 who: UserRef::new("alice"),
                 change: MembershipChange::Join { realname: None },
+                time: None,
             },
         );
         state.apply(
@@ -865,12 +899,78 @@ mod tests {
     }
 
     #[test]
+    fn join_for_already_present_member_renders_no_line() {
+        let mut state = test_state();
+
+        // Roster is seeded (e.g. on startup) with alice already present.
+        state.apply(
+            backend(),
+            ChatEvent::Membership {
+                target: TargetId::from("#tirc"),
+                who: UserRef::new("alice"),
+                change: MembershipChange::Present {
+                    role: MemberRole::Member,
+                },
+                time: None,
+            },
+        );
+
+        // A re-delivered membership for alice (e.g. our own event with no
+        // `prev_content`) must not produce a phantom "has joined" line.
+        state.apply(
+            backend(),
+            ChatEvent::Membership {
+                target: TargetId::from("#tirc"),
+                who: UserRef::new("alice"),
+                change: MembershipChange::Join { realname: None },
+                time: None,
+            },
+        );
+
+        let buffer = buffer(&state, "#tirc");
+        assert_eq!(buffer.members.len(), 1);
+        assert_eq!(buffer.messages.len(), 0, "redundant join renders no line");
+    }
+
+    #[test]
+    fn membership_uses_server_time_for_ordering() {
+        let mut state = test_state();
+
+        // A later message is already in the buffer.
+        state.apply(backend(), timed_message("#tirc", "alice", "$later", 2000));
+
+        // A join carrying an *earlier* server time must sort before it rather than
+        // being stamped with `Local::now()` and appended at the tail.
+        state.apply(
+            backend(),
+            ChatEvent::Membership {
+                target: TargetId::from("#tirc"),
+                who: UserRef::new("bob"),
+                change: MembershipChange::Join { realname: None },
+                time: chrono::DateTime::from_timestamp(1000, 0),
+            },
+        );
+
+        let buf = buffer(&state, "#tirc");
+        assert_eq!(buf.messages.len(), 2);
+        assert!(
+            matches!(buf.messages[0].event, ChatEvent::Membership { .. }),
+            "earlier-dated join sorts before the later message"
+        );
+        assert_eq!(buf.messages[0].time.timestamp(), 1000);
+        assert_eq!(buf.messages[1].time.timestamp(), 2000);
+    }
+
+    #[test]
     fn membership_line_sorts_by_time_among_messages() {
         let mut state = test_state();
 
         // A message timestamped in the far future (year ~2065) is already in the
         // buffer.
-        state.apply(backend(), timed_message("#tirc", "alice", "$future", 3_000_000_000));
+        state.apply(
+            backend(),
+            timed_message("#tirc", "alice", "$future", 3_000_000_000),
+        );
 
         // A live "has joined" line is rendered with `Local::now()`, which is
         // *earlier* than the future message. It must sort before that message
@@ -882,6 +982,7 @@ mod tests {
                 target: TargetId::from("#tirc"),
                 who: UserRef::new("bob"),
                 change: MembershipChange::Join { realname: None },
+                time: None,
             },
         );
 

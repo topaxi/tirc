@@ -292,6 +292,9 @@ impl<'lua> InputHandler<'lua> {
                 },
             ),
             ["list"] => self.send_to(backend, Command::ListChannels),
+            ["redraw"] => {
+                self.ui.redraw()?;
+            }
             ["reload"] => {
                 self.do_reload(state, backend);
             }
@@ -383,6 +386,12 @@ impl<'lua> InputHandler<'lua> {
         let page = (view.viewport_height as usize).max(1);
 
         match (view.mode, event.code) {
+            // Ctrl-L: force a full screen repaint, in any mode. Clears ghosting
+            // left by terminals that render a glyph narrower than its Unicode
+            // width (e.g. emoji-presentation characters).
+            (_, KeyCode::Char('l')) if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.ui.redraw()?;
+            }
             (Mode::Normal, KeyCode::Tab) => view.next_buffer(state),
             (Mode::Normal, KeyCode::BackTab) => view.previous_buffer(state),
             (Mode::Normal, code) if Self::key_code_is_digit(code) => {

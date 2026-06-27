@@ -447,6 +447,7 @@ fn translate(message: &Message, nickname: &str) -> Vec<ChatEvent> {
                     target: channel.clone(),
                     who: UserRef::new(nick.to_string()),
                     change: MembershipChange::Present { role },
+                    time: None,
                 }
             })
             .collect();
@@ -525,6 +526,7 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
             change: MembershipChange::Join {
                 realname: realname.clone(),
             },
+            time: server_time(message),
         }),
         IrcCommand::PART(channel, reason) => Some(ChatEvent::Membership {
             target: TargetId(channel.clone()),
@@ -532,6 +534,7 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
             change: MembershipChange::Part {
                 reason: reason.clone(),
             },
+            time: server_time(message),
         }),
         IrcCommand::QUIT(reason) => Some(ChatEvent::Quit {
             who: UserRef::new(message.source_nickname()?.to_string()),
@@ -547,6 +550,7 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
                 .source_nickname()
                 .map(|n| UserRef::new(n.to_string())),
             topic: topic.clone().unwrap_or_default(),
+            time: server_time(message),
         }),
         IrcCommand::ChannelMODE(channel, _) => Some(ChatEvent::ServerInfo {
             target: Some(TargetId(channel.clone())),

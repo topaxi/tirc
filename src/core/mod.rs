@@ -268,11 +268,17 @@ pub enum ChatEvent {
         target: TargetId,
         who: UserRef,
         change: MembershipChange,
+        /// Server-assigned timestamp, so a join/part line sorts at the time it
+        /// actually happened rather than the moment it was received. `None` for
+        /// roster seeding and protocols without a timestamp.
+        time: Option<DateTime<Utc>>,
     },
     Topic {
         target: TargetId,
         who: Option<UserRef>,
         topic: String,
+        /// Server-assigned timestamp; see [`Membership`](ChatEvent::Membership).
+        time: Option<DateTime<Utc>>,
     },
     /// A user changed their display name / nick across all their buffers.
     Rename { who: UserRef, new_display: String },
