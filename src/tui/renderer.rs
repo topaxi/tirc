@@ -1,4 +1,3 @@
-
 use mlua::LuaSerdeExt;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -25,11 +24,7 @@ pub struct RenderedMessage<'a> {
     pub message: Box<Line<'a>>,
 }
 
-fn update_render_context(
-    lua: &mlua::Lua,
-    view: &ViewState,
-    state: &State,
-) -> anyhow::Result<()> {
+fn update_render_context(lua: &mlua::Lua, view: &ViewState, state: &State) -> anyhow::Result<()> {
     let tirc_mod: mlua::Table = lua
         .globals()
         .get::<mlua::Table>("package")?
@@ -324,11 +319,16 @@ impl Renderer {
                     t.set("name", buffer.label(&id.target))?;
                     t.set("target", id.target.as_str())?;
                     t.set("backend_name", backend_name)?;
+                    if let Some(metadata) = crate::config::get_backend_metadata(lua, id.backend) {
+                        t.set("backend_metadata", metadata)?;
+                    }
                     Ok(t)
                 });
 
                 match tab_info {
-                    Ok(t) => self.format_spans(lua, "render_buffer_tab", t).unwrap_or_default(),
+                    Ok(t) => self
+                        .format_spans(lua, "render_buffer_tab", t)
+                        .unwrap_or_default(),
                     Err(_) => vec![],
                 }
             })

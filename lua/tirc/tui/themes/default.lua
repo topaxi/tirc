@@ -385,8 +385,9 @@ end
 ---@param buffer TircBufferTab
 function Theme:render_buffer_tab(buffer)
   local s = self.styles
-  local name = tirc.multi_backend
-      and (buffer.backend_name .. '/' .. buffer.name)
+  local meta = buffer.backend_metadata
+  local backend_label = (meta and meta.label) or buffer.backend_name
+  local name = tirc.multi_backend and (backend_label .. '/' .. buffer.name)
     or buffer.name
 
   return { { name, tirc.is_focused_buffer(buffer) and s.white or s.gray }, ' ' }

@@ -6,7 +6,7 @@ use mlua::{IntoLuaMulti, Lua, LuaSerdeExt, Table, Value};
 use serde::Deserialize;
 
 use crate::{
-    core::Protocol,
+    core::{BackendId, Protocol},
     lua::{date_time::create_date_time_module, get_or_create_module, set_loaded_modules},
     tui::lua::create_tirc_theme_lua_module,
 };
@@ -81,6 +81,9 @@ fn get_default_config() -> &'static str {
             port = 6697,
             use_tls = true,
             autojoin = { '#tirc' },
+            -- Free-form metadata passed back to Lua for rendering. The default
+            -- theme uses `label` to shorten the buffer bar in multi-server mode.
+            metadata = { label = 'topaxi' },
           },
         }
 
@@ -231,6 +234,58 @@ where
     };
 
     Some(func.call(args))
+}
+
+/// Registry key holding the per-backend metadata table (`id -> metadata`).
+const BACKEND_METADATA_KEY: &str = "tirc-backend-metadata";
+
+/// Returns the `tirc-backend-metadata` registry table, creating it on first
+/// access. Maps `BackendId.0` (integer) to the server's `metadata` Lua table.
+fn backend_metadata_registry(lua: &Lua) -> mlua::Result<Table> {
+    match lua.named_registry_value::<Value>(BACKEND_METADATA_KEY)? {
+        Value::Table(tbl) => Ok(tbl),
+        _ => {
+            let tbl = lua.create_table()?;
+            lua.set_named_registry_value(BACKEND_METADATA_KEY, &tbl)?;
+            Ok(tbl)
+        }
+    }
+}
+
+/// Stores the `metadata` value for `id` so themes can read it back while
+/// rendering. The value is kept as-is (an arbitrary Lua table), never copied.
+pub fn set_backend_metadata(lua: &Lua, id: BackendId, value: Value) -> mlua::Result<()> {
+    backend_metadata_registry(lua)?.set(id.0, value)
+}
+
+/// Returns the stored metadata table for `id`, or `None` when the backend has no
+/// metadata. Used by the render helpers to attach `backend.metadata`.
+pub fn get_backend_metadata(lua: &Lua, id: BackendId) -> Option<Value> {
+    match backend_metadata_registry(lua).ok()?.get::<Value>(id.0).ok()? {
+        Value::Nil => None,
+        value => Some(value),
+    }
+}
+
+/// Copies the `metadata` table of `config.servers[id + 1]` (Lua is 1-based) from
+/// the evaluated `config` global into the per-backend store. A no-op when the
+/// server entry carries no `metadata`. Relies on the existing identity that
+/// `BackendId(index)` corresponds to the `index`-th configured server.
+pub fn register_backend_metadata(lua: &Lua, id: BackendId) -> mlua::Result<()> {
+    let Value::Table(config) = lua.globals().get::<Value>("config")? else {
+        return Ok(());
+    };
+    let Value::Table(servers) = config.get::<Value>("servers")? else {
+        return Ok(());
+    };
+    let Value::Table(server) = servers.get::<Value>(id.0 + 1)? else {
+        return Ok(());
+    };
+
+    match server.get::<Value>("metadata")? {
+        Value::Nil => Ok(()),
+        metadata => set_backend_metadata(lua, id, metadata),
+    }
 }
 
 fn get_version() -> semver::Version {
@@ -598,6 +653,36 @@ mod tests {
             .expect("theme setup");
 
         lua
+    }
+
+    #[test]
+    fn register_backend_metadata_reads_from_config_global() {
+        let lua = Lua::new();
+
+        lua.load(indoc! {"
+            config = {
+              servers = {
+                { protocol = 'irc', host = 'irc.topaxi.ch', metadata = { label = 'topaxi' } },
+                { protocol = 'irc', host = 'irc.libera.chat' },
+              },
+            }
+        "})
+            .exec()
+            .expect("set config global");
+
+        register_backend_metadata(&lua, BackendId(0)).expect("register backend 0");
+        register_backend_metadata(&lua, BackendId(1)).expect("register backend 1");
+
+        let metadata = get_backend_metadata(&lua, BackendId(0)).expect("backend 0 has metadata");
+        let Value::Table(metadata) = metadata else {
+            panic!("expected a metadata table");
+        };
+        assert_eq!(metadata.get::<String>("label").unwrap(), "topaxi");
+
+        // A server without `metadata` stores nothing.
+        assert!(get_backend_metadata(&lua, BackendId(1)).is_none());
+        // An unconfigured backend id has no metadata either.
+        assert!(get_backend_metadata(&lua, BackendId(2)).is_none());
     }
 
     #[test]

@@ -7,6 +7,7 @@
 ---@field name string display name (may differ from target for Matrix rooms)
 ---@field target string raw target identifier (IRC channel/nick or Matrix room id)
 ---@field backend_name string human-readable backend name
+---@field backend_metadata? table<string, any> per-server metadata from the config (e.g. `{ label = 'topaxi' }`)
 
 --- Styled span tree consumed by the renderer: a string, a `{ content, style }`
 --- pair, or a (possibly nested) list of either. Returning `nil` skips the line.
@@ -33,7 +34,7 @@
 --- `event` callback. `type` selects which fields are present.
 ---@class TircEvent
 ---@field type 'message' | 'edit' | 'redaction' | 'reaction' | 'membership' | 'topic' | 'rename' | 'quit' | 'server_info'
----@field backend { id: integer, protocol: 'irc' | 'matrix', name: string }
+---@field backend { id: integer, protocol: 'irc' | 'matrix', name: string, metadata?: table<string, any> }
 ---@field target string buffer target (channel/room/nick)
 ---@field target_name string friendly buffer name (Matrix room name); equals `target` for IRC
 ---@field pending boolean optimistic local echo not yet confirmed

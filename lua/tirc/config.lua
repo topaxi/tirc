@@ -16,6 +16,7 @@
 ---@field accept_invalid_cert? boolean defaults to false
 ---@field realname? string
 ---@field autojoin? string[]
+---@field metadata? table<string, any> free-form data passed back to Lua for rendering (e.g. `{ label = 'topaxi' }`)
 
 --- A Matrix homeserver.
 ---@class TircMatrixServer
@@ -25,6 +26,7 @@
 ---@field password string
 ---@field device_id? string
 ---@field autojoin? string[] room ids/aliases to join on connect
+---@field metadata? table<string, any> free-form data passed back to Lua for rendering (e.g. `{ label = 'matrix' }`)
 
 local M = {}
 

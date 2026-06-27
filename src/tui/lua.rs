@@ -134,6 +134,9 @@ pub fn to_lua_event(
     backend_table.set("id", backend.id.0)?;
     backend_table.set("protocol", protocol_str(backend.protocol))?;
     backend_table.set("name", backend.name.as_str())?;
+    if let Some(metadata) = crate::config::get_backend_metadata(lua, backend.id) {
+        backend_table.set("metadata", metadata)?;
+    }
     table.set("backend", backend_table)?;
 
     table.set("target", target.as_str())?;
@@ -369,6 +372,32 @@ mod tests {
 
         let backend_table: mlua::Table = table.get("backend").unwrap();
         assert_eq!(backend_table.get::<String>("protocol").unwrap(), "irc");
+    }
+
+    #[test]
+    fn backend_metadata_is_exposed_on_the_event() {
+        let lua = mlua::Lua::new();
+
+        let metadata = lua.create_table().unwrap();
+        metadata.set("label", "topaxi").unwrap();
+        crate::config::set_backend_metadata(&lua, BackendId(0), mlua::Value::Table(metadata))
+            .unwrap();
+
+        let message = stored(ChatEvent::Message {
+            target: TargetId::from("#tirc"),
+            id: None,
+            sender: UserRef::new("alice"),
+            body: MessageBody::plain("hello"),
+            kind: MsgKind::Text,
+            echo_of: None,
+            time: None,
+        });
+
+        let table =
+            to_lua_event(&lua, &message, &backend(), &TargetId::from("#tirc"), "#tirc").unwrap();
+        let backend_table: mlua::Table = table.get("backend").unwrap();
+        let metadata: mlua::Table = backend_table.get("metadata").unwrap();
+        assert_eq!(metadata.get::<String>("label").unwrap(), "topaxi");
     }
 
     #[test]

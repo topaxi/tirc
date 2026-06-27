@@ -92,6 +92,7 @@ async fn root_task(
 
     for (index, server) in config.servers.iter().enumerate() {
         let id = BackendId(index);
+        tirc::config::register_backend_metadata(lua, id)?;
         let backend = build_backend(id, server)?;
         state.register_backend(backend.info());
         view.focus_if_unset(BufferId::status(id));
