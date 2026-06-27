@@ -58,6 +58,12 @@ pub struct ServerConfig {
 #[derive(Deserialize, Debug)]
 pub struct TircConfig {
     pub servers: Box<[ServerConfig]>,
+
+    #[serde(default)]
+    pub auto_reload_config: bool,
+
+    #[serde(default)]
+    pub watch_files: Vec<String>,
 }
 
 fn get_default_config() -> &'static str {
@@ -442,6 +448,60 @@ pub fn reload_lua_theme(lua: &Lua, config_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Collects all Lua source files that should be watched for auto-reload.
+///
+/// Always includes `config_path` (the init.lua). Also scans `package.loaded`
+/// for module names whose resolved file exists under `config_dir` - this
+/// auto-discovers any files `require`d by the config without extra config.
+/// Built-in modules (loaded from memory) have no file in the config dir and
+/// are silently filtered out. Finally appends any paths from `extra_paths`
+/// (resolved relative to `config_dir` if not absolute).
+pub fn collect_user_watched_paths(
+    lua: &Lua,
+    config_dir: &Path,
+    config_path: &Path,
+    extra_paths: &[String],
+) -> Vec<PathBuf> {
+    let mut paths = vec![config_path.to_owned()];
+
+    let module_names: Vec<String> = lua
+        .globals()
+        .get::<mlua::Table>("package")
+        .ok()
+        .and_then(|pkg| pkg.get::<mlua::Table>("loaded").ok())
+        .map(|loaded| {
+            loaded
+                .pairs::<String, mlua::Value>()
+                .filter_map(|r| r.ok().map(|(k, _)| k))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for name in module_names {
+        let stem = name.replace('.', "/");
+        for suffix in [".lua", "/init.lua"] {
+            let candidate = config_dir.join(format!("{stem}{suffix}"));
+            if candidate.exists() && !paths.contains(&candidate) {
+                paths.push(candidate);
+                break;
+            }
+        }
+    }
+
+    for extra in extra_paths {
+        let path = if std::path::Path::new(extra).is_absolute() {
+            PathBuf::from(extra)
+        } else {
+            config_dir.join(extra)
+        };
+        if path.exists() && !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+
+    paths
+}
+
 pub fn load_config(lua: &Lua) -> Result<(TircConfig, PathBuf), anyhow::Error> {
     let config_filename =
         xdg::BaseDirectories::with_prefix("tirc").place_config_file("init.lua")?;
@@ -670,5 +730,69 @@ mod tests {
             }
             other => panic!("expected overridden spans, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn collect_user_watched_paths_includes_config_and_user_modules() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("tirc-watch-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let config_path = dir.join("init.lua");
+        std::fs::write(&config_path, "").unwrap();
+
+        // A user module file that lives in the config dir.
+        let module_file = dir.join("my_theme.lua");
+        std::fs::write(&module_file, "return {}").unwrap();
+
+        let lua = Lua::new();
+        register_builtin_modules(&lua).expect("builtin modules");
+
+        // Simulate the user module being required (put it into package.loaded).
+        lua.load("package.loaded['my_theme'] = true")
+            .exec()
+            .unwrap();
+
+        let paths = collect_user_watched_paths(&lua, &dir, &config_path, &[]);
+
+        assert!(paths.contains(&config_path), "init.lua must be watched");
+        assert!(
+            paths.contains(&module_file),
+            "user module file must be watched"
+        );
+        // Builtin modules (tirc, tirc.config, etc.) have no file under dir so
+        // they must NOT appear in the list.
+        assert_eq!(paths.len(), 2, "only init.lua and my_theme.lua expected");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collect_user_watched_paths_includes_extra_paths() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("tirc-watch-extra-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let config_path = dir.join("init.lua");
+        std::fs::write(&config_path, "").unwrap();
+        let extra = dir.join("colors.lua");
+        std::fs::write(&extra, "return {}").unwrap();
+
+        let lua = Lua::new();
+        register_builtin_modules(&lua).expect("builtin modules");
+
+        let paths =
+            collect_user_watched_paths(&lua, &dir, &config_path, &["colors.lua".to_string()]);
+
+        assert!(paths.contains(&config_path));
+        assert!(paths.contains(&extra));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

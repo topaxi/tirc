@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use mlua::Lua;
 
 use crate::backends::BackendHandle;
-use crate::config::{emit_event, reload_lua_theme, EventName};
+use crate::config::{collect_user_watched_paths, emit_event, reload_lua_theme, EventName};
 use crate::core::{
     BackendEvent, BackendId, BackendMessage, ChatEvent, Command, MsgKind, TargetId, TxnAllocator,
 };
@@ -35,6 +36,11 @@ pub struct InputHandler<'lua> {
     /// cached so we do not rebuild closures on every event.
     senders: HashMap<BackendId, mlua::RegistryKey>,
     config_path: PathBuf,
+    auto_reload: bool,
+    /// Extra watch paths from `config.watch_files`, relative to the config dir.
+    extra_watch_files: Vec<String>,
+    /// Files being polled for mtime changes; rebuilt after each reload.
+    watched_files: Vec<(PathBuf, SystemTime)>,
 }
 
 impl<'lua> InputHandler<'lua> {
@@ -44,7 +50,15 @@ impl<'lua> InputHandler<'lua> {
         backends: Vec<BackendHandle>,
         txn: Arc<TxnAllocator>,
         config_path: PathBuf,
+        auto_reload: bool,
+        extra_watch_files: Vec<String>,
     ) -> Self {
+        let watched_files = if auto_reload {
+            Self::build_watch_list_for(lua, &config_path, &extra_watch_files)
+        } else {
+            vec![]
+        };
+
         Self {
             lua,
             ui,
@@ -52,6 +66,80 @@ impl<'lua> InputHandler<'lua> {
             txn,
             senders: HashMap::new(),
             config_path,
+            auto_reload,
+            extra_watch_files,
+            watched_files,
+        }
+    }
+
+    fn build_watch_list_for(
+        lua: &Lua,
+        config_path: &PathBuf,
+        extra_watch_files: &[String],
+    ) -> Vec<(PathBuf, SystemTime)> {
+        let config_dir = config_path.parent().unwrap_or(config_path);
+        collect_user_watched_paths(lua, config_dir, config_path, extra_watch_files)
+            .into_iter()
+            .filter_map(|p| {
+                let mtime = std::fs::metadata(&p).ok()?.modified().ok()?;
+                Some((p, mtime))
+            })
+            .collect()
+    }
+
+    fn refresh_watched_files(&mut self) {
+        if self.auto_reload {
+            self.watched_files =
+                Self::build_watch_list_for(self.lua, &self.config_path, &self.extra_watch_files);
+        }
+    }
+
+    /// Reloads the Lua theme/config, reports the result to the status buffer of
+    /// `backend`, and refreshes the file watch list on success.
+    fn do_reload(&mut self, state: &mut State, backend: Option<BackendId>) {
+        let notice_text = match reload_lua_theme(self.lua, &self.config_path) {
+            Ok(()) => {
+                self.refresh_watched_files();
+                "Theme reloaded successfully".to_owned()
+            }
+            Err(err) => format!("Reload error: {err}").replace(['\r', '\n'], " "),
+        };
+
+        if let Some(backend) = backend {
+            state.apply(
+                backend,
+                ChatEvent::ServerInfo {
+                    target: None,
+                    from: None,
+                    code: None,
+                    text: notice_text,
+                    raw: None,
+                },
+            );
+        }
+    }
+
+    fn handle_tick(&mut self, state: &mut State, view: &ViewState) {
+        if !self.auto_reload || self.watched_files.is_empty() {
+            return;
+        }
+
+        let mut changed = false;
+        for (path, mtime) in &mut self.watched_files {
+            if let Some(new_mtime) = std::fs::metadata(&*path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+            {
+                if new_mtime != *mtime {
+                    *mtime = new_mtime;
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            let backend = view.focused.as_ref().map(|b| b.backend);
+            self.do_reload(state, backend);
         }
     }
 
@@ -205,22 +293,7 @@ impl<'lua> InputHandler<'lua> {
             ),
             ["list"] => self.send_to(backend, Command::ListChannels),
             ["reload"] => {
-                let notice_text = match reload_lua_theme(self.lua, &self.config_path) {
-                    Ok(()) => "Theme reloaded successfully".to_owned(),
-                    Err(err) => format!("Reload error: {err}").replace(['\r', '\n'], " "),
-                };
-                if let Some(backend) = backend {
-                    state.apply(
-                        backend,
-                        ChatEvent::ServerInfo {
-                            target: None,
-                            from: None,
-                            code: None,
-                            text: notice_text,
-                            raw: None,
-                        },
-                    );
-                }
+                self.do_reload(state, backend);
             }
             _ => {}
         }
@@ -282,7 +355,10 @@ impl<'lua> InputHandler<'lua> {
                 self.handle_backend(state, view, message);
                 Ok(true)
             }
-            Event::Tick => Ok(true),
+            Event::Tick => {
+                self.handle_tick(state, view);
+                Ok(true)
+            }
         }
     }
 

@@ -102,7 +102,15 @@ async fn root_task(
     let mut tui = Tui::new()?;
     tui.initialize_terminal()?;
 
-    let mut input_handler = InputHandler::new(lua, tui, handles, txn, config_path.to_owned());
+    let mut input_handler = InputHandler::new(
+        lua,
+        tui,
+        handles,
+        txn,
+        config_path.to_owned(),
+        config.auto_reload_config,
+        config.watch_files.clone(),
+    );
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(TICK_RATE);

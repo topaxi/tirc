@@ -1,5 +1,7 @@
 ---@class TircConfig
 ---@field servers TircConfigServer[]
+---@field auto_reload_config? boolean reload config automatically when files change (default false)
+---@field watch_files? string[] extra config-dir-relative paths to watch for auto-reload
 
 --- A configured backend. `protocol` is required and selects the variant.
 ---@alias TircConfigServer TircIrcServer | TircMatrixServer
@@ -30,6 +32,8 @@ local M = {}
 function M.create_config()
   return {
     servers = {},
+    auto_reload_config = false,
+    watch_files = {},
   }
 end
 
