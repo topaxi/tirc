@@ -347,6 +347,7 @@ mod tests {
             body: MessageBody::plain("hello"),
             kind: MsgKind::Text,
             echo_of: None,
+            time: None,
         });
 
         let table = to_lua_event(

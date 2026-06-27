@@ -418,6 +418,7 @@ mod tests {
                 body: MessageBody::plain("hello #other world"),
                 kind: MsgKind::Text,
                 echo_of: None,
+                time: None,
             },
             ChatEvent::Message {
                 target: TargetId::from("#tirc"),
@@ -426,6 +427,7 @@ mod tests {
                 body: MessageBody::plain("waves"),
                 kind: MsgKind::Action,
                 echo_of: None,
+                time: None,
             },
             ChatEvent::Membership {
                 target: TargetId::from("#tirc"),

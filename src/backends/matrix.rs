@@ -273,6 +273,7 @@ async fn apply_command(client: &Client, id: BackendId, events: &EventSender, com
                     body: MessageBody::plain(body.clone()),
                     kind,
                     echo_of: Some(txn),
+                    time: None,
                 },
             );
 
@@ -493,6 +494,11 @@ async fn message_event_to_chat(
         .and_then(|txn| txn.as_str().parse::<u64>().ok())
         .map(TxnId);
 
+    let millis: u64 = event.origin_server_ts.0.into();
+    let time = i64::try_from(millis)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis);
+
     Some(ChatEvent::Message {
         target: room_target(room),
         id: Some(EventId(event.event_id.to_string())),
@@ -500,6 +506,7 @@ async fn message_event_to_chat(
         body,
         kind,
         echo_of,
+        time,
     })
 }
 

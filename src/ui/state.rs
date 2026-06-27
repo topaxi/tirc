@@ -227,27 +227,38 @@ impl State {
     }
 
     fn apply_message(&mut self, backend: BackendId, event: ChatEvent) {
-        let (target, echo_of) = match &event {
+        let (target, echo_of, time) = match &event {
             ChatEvent::Message {
-                target, echo_of, ..
-            } => (target.clone(), *echo_of),
+                target,
+                echo_of,
+                time,
+                ..
+            } => (target.clone(), *echo_of, *time),
             _ => return,
         };
 
         let buffer = self.buffer_mut(backend, target);
 
-        // Replace the optimistic local echo in place when the server confirms it.
+        // Replace the optimistic local echo in place when the server confirms it,
+        // adopting the server timestamp in place of the local send time.
         if let Some(txn) = echo_of {
             if let Some(slot) = buffer.messages.iter_mut().find(|m| m.txn() == Some(txn)) {
                 slot.event = event;
                 slot.pending = false;
+                if let Some(time) = time {
+                    slot.time = time.with_timezone(&Local);
+                }
                 return;
             }
         }
 
-        buffer
-            .messages
-            .push(StoredMessage::new(event, echo_of.is_some()));
+        // Server time when known (incoming/backfilled); local now otherwise (an
+        // optimistic send shows the send time until its echo arrives).
+        let mut stored = StoredMessage::new(event, echo_of.is_some());
+        if let Some(time) = time {
+            stored.time = time.with_timezone(&Local);
+        }
+        buffer.messages.push(stored);
     }
 
     fn apply_edit(&mut self, backend: BackendId, target: TargetId, id: EventId, body: MessageBody) {
@@ -452,6 +463,7 @@ mod tests {
             body: MessageBody::plain("hi"),
             kind: MsgKind::Text,
             echo_of,
+            time: None,
         }
     }
 
@@ -490,6 +502,37 @@ mod tests {
         state.apply(backend(), message("#tirc", "me", Some(txn)));
         assert_eq!(buffer(&state, "#tirc").messages.len(), 1);
         assert!(!buffer(&state, "#tirc").messages[0].pending);
+    }
+
+    #[test]
+    fn optimistic_send_uses_send_time_then_adopts_server_time() {
+        let mut state = test_state();
+        let txn = TxnId(11);
+
+        // Optimistic copy carries no server time, so it shows the local send time.
+        let before = Local::now();
+        state.apply(backend(), message("#tirc", "me", Some(txn)));
+        let optimistic_time = buffer(&state, "#tirc").messages[0].time;
+        assert!(optimistic_time >= before);
+
+        // The confirmed echo carries the server timestamp, which replaces it.
+        let server_time = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        state.apply(
+            backend(),
+            ChatEvent::Message {
+                target: TargetId::from("#tirc"),
+                id: None,
+                sender: UserRef::new("me"),
+                body: MessageBody::plain("hi"),
+                kind: MsgKind::Text,
+                echo_of: Some(txn),
+                time: Some(server_time),
+            },
+        );
+
+        let buffer = buffer(&state, "#tirc");
+        assert_eq!(buffer.messages.len(), 1);
+        assert_eq!(buffer.messages[0].time, server_time.with_timezone(&Local));
     }
 
     #[test]

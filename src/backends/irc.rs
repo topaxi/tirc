@@ -183,6 +183,7 @@ fn apply_command(
                 body: MessageBody::plain(body),
                 kind,
                 echo_of: Some(txn),
+                time: None,
             });
         }
         Command::Join { target } => client.send_join(&target.0)?,
@@ -214,6 +215,20 @@ fn label_txn(message: &Message) -> Option<TxnId> {
             None
         }
     })
+}
+
+/// Extracts the IRCv3 `server-time` tag (`@time=...`, RFC3339) as a UTC instant.
+fn server_time(message: &Message) -> Option<chrono::DateTime<chrono::Utc>> {
+    let value = message
+        .tags
+        .as_ref()?
+        .iter()
+        .find(|tag| tag.0 == "time")?
+        .1
+        .as_ref()?;
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
 /// Decodes a CTCP ACTION payload, returning the inner text when present.
@@ -369,6 +384,7 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
                 body: MessageBody::plain(body),
                 kind,
                 echo_of: label_txn(message),
+                time: server_time(message),
             })
         }
         IrcCommand::NOTICE(target, text) => {
@@ -384,6 +400,7 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
                     body: MessageBody::plain(text.clone()),
                     kind: MsgKind::Notice,
                     echo_of: label_txn(message),
+                    time: server_time(message),
                 }),
                 None => Some(ChatEvent::ServerInfo {
                     target: Some(target_id),

@@ -11,6 +11,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// The protocol a backend speaks. Exposed to themes as `event.backend.protocol`.
@@ -240,6 +241,10 @@ pub enum ChatEvent {
         kind: MsgKind,
         /// Set on a server echo of our own outgoing message.
         echo_of: Option<TxnId>,
+        /// Server-assigned timestamp (Matrix `origin_server_ts`, IRC `server-time`
+        /// tag). `None` for an optimistic local echo, which is stamped with the
+        /// local send time until the server's copy replaces it.
+        time: Option<DateTime<Utc>>,
     },
     Edit {
         target: TargetId,
