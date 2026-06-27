@@ -65,6 +65,7 @@ fn build_backend(id: BackendId, server: &ServerConfig) -> anyhow::Result<Box<dyn
                     password,
                     device_id: server.device_id.clone(),
                     autojoin: server.autojoin.clone(),
+                    store_dir: None,
                 },
             )))
         }

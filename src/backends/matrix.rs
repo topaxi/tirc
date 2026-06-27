@@ -30,6 +30,9 @@ pub struct MatrixBackendConfig {
     pub password: String,
     pub device_id: Option<String>,
     pub autojoin: Vec<String>,
+    /// Override for the SQLite store directory. Defaults to an XDG data path
+    /// derived from the user id when `None`.
+    pub store_dir: Option<std::path::PathBuf>,
 }
 
 pub struct MatrixBackend {
@@ -45,6 +48,11 @@ impl MatrixBackend {
     /// Per-account SQLite store directory, so sync tokens and (later) crypto
     /// state persist across runs.
     fn store_path(&self) -> anyhow::Result<std::path::PathBuf> {
+        if let Some(dir) = &self.config.store_dir {
+            std::fs::create_dir_all(dir)?;
+            return Ok(dir.clone());
+        }
+
         let sanitized: String = self
             .config
             .user_id
@@ -90,14 +98,23 @@ impl ChatBackend for MatrixBackend {
         }
         login.await?;
 
+        let user_id = client
+            .user_id()
+            .map(|user| user.as_str().to_string())
+            .unwrap_or_else(|| self.config.user_id.clone());
         let nickname = client
             .user_id()
             .map(|user| user.localpart().to_string())
             .unwrap_or_else(|| self.config.user_id.clone());
         let _ = events.send(BackendMessage {
             backend: id,
-            event: BackendEvent::Ready { nickname },
+            event: BackendEvent::Ready {
+                nickname: nickname.clone(),
+            },
         });
+        // Unlike IRC there are no server numerics, so emit explicit connection
+        // feedback into the status buffer.
+        emit(&events, id, status_line(format!("Logged in as {user_id}")));
 
         // Initial sync loads current room state into the store and advances the
         // store's sync token. Handlers are registered *after* it, so pre-existing
@@ -105,7 +122,13 @@ impl ChatBackend for MatrixBackend {
         // rooms explicitly instead.
         let _ = client.sync_once(SyncSettings::default()).await;
 
-        for room in client.joined_rooms() {
+        let joined = client.joined_rooms();
+        emit(
+            &events,
+            id,
+            status_line(format!("Synced; {} joined room(s)", joined.len())),
+        );
+        for room in joined {
             populate_room(&room, id, &events).await;
         }
 
@@ -308,11 +331,12 @@ async fn list_public_rooms(client: &Client, id: BackendId, events: &EventSender)
     }
 }
 
+/// A line for the backend's status buffer (connection feedback, `:list`, ...).
 fn status_line(text: String) -> ChatEvent {
     ChatEvent::ServerInfo {
         target: None,
         from: None,
-        code: Some("LIST".to_string()),
+        code: None,
         text,
         raw: None,
     }
@@ -483,6 +507,7 @@ mod tests {
             password: std::env::var("TIRC_TEST_PASSWORD").unwrap(),
             device_id: None,
             autojoin: vec![std::env::var("TIRC_TEST_ROOM").unwrap()],
+            store_dir: Some(unique_store_dir()),
         };
         let room = config.autojoin[0].clone();
 
@@ -520,6 +545,47 @@ mod tests {
 
         drop(command_tx);
         let _ = handle.await;
+    }
+
+    /// Diagnoses startup behaviour: logs in and asserts that an already-joined
+    /// room is surfaced as a named buffer (BufferName) within a few seconds.
+    #[tokio::test]
+    #[ignore = "requires the local matrix homeserver from dev/matrix"]
+    async fn startup_surfaces_joined_rooms() {
+        let config = MatrixBackendConfig {
+            homeserver: std::env::var("TIRC_TEST_HOMESERVER").unwrap(),
+            user_id: std::env::var("TIRC_TEST_USER").unwrap(),
+            password: std::env::var("TIRC_TEST_PASSWORD").unwrap(),
+            device_id: None,
+            autojoin: vec![],
+            store_dir: Some(unique_store_dir()),
+        };
+
+        let backend = Box::new(MatrixBackend::new(BackendId(0), config));
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (_command_tx, command_rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(backend.run(event_tx, command_rx));
+
+        let got_buffer_name = wait_for(&mut event_rx, |m| {
+            matches!(&m.event, BackendEvent::Event(ChatEvent::BufferName { .. }))
+        })
+        .await;
+
+        handle.abort();
+        assert!(
+            got_buffer_name,
+            "expected a BufferName event surfacing a joined room on startup"
+        );
+    }
+
+    /// A unique, throwaway store directory so concurrent/sequential test runs do
+    /// not share sqlite state.
+    fn unique_store_dir() -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("tirc-test-matrix-{nanos}"))
     }
 
     async fn wait_for(
