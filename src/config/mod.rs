@@ -166,72 +166,53 @@ where
     Ok(())
 }
 
-/// Returns the `tirc-ui` registry table, creating it on first access so reads
-/// and merges always have a backing store.
-fn ui_registry_table(lua: &Lua) -> mlua::Result<Table> {
-    match lua.named_registry_value::<Value>("tirc-ui")? {
-        Value::Table(tbl) => Ok(tbl),
-        _ => {
-            let tbl = lua.create_table()?;
-            lua.set_named_registry_value("tirc-ui", &tbl)?;
-            Ok(tbl)
-        }
+/// Returns the theme object stored as `tirc.ui`, or `None` when none is set.
+fn ui_object(lua: &Lua) -> Option<Table> {
+    match lua.named_registry_value::<Value>("tirc-ui").ok()? {
+        Value::Table(tbl) => Some(tbl),
+        _ => None,
     }
 }
 
 /// Backs the `tirc.ui` property getter; exposed to Lua as `_tirc.__get_ui`.
-fn get_ui(lua: &Lua, _: ()) -> mlua::Result<Table> {
-    ui_registry_table(lua)
+fn get_ui(lua: &Lua, _: ()) -> mlua::Result<Value> {
+    lua.named_registry_value::<Value>("tirc-ui")
 }
 
 /// Backs the `tirc.ui` property setter; exposed to Lua as `_tirc.__set_ui`.
 ///
-/// Merges `value` into the stored `tirc-ui` table: top-level table values are
-/// merged entry-by-entry; non-table values are set directly. This lets a theme
-/// or plugin supply only the fields it needs without replacing the whole object.
-fn set_ui(lua: &Lua, value: Table) -> mlua::Result<()> {
-    let target = ui_registry_table(lua)?;
-
-    for pair in value.pairs::<String, Value>() {
-        let (key, value) = pair?;
-
-        match value {
-            Value::Table(category) => {
-                let dst = match target.get::<Value>(key.as_str())? {
-                    Value::Table(tbl) => tbl,
-                    _ => {
-                        let tbl = lua.create_table()?;
-                        target.set(key.as_str(), &tbl)?;
-                        tbl
-                    }
-                };
-
-                for entry in category.pairs::<Value, Value>() {
-                    let (entry_key, entry_value) = entry?;
-                    dst.set(entry_key, entry_value)?;
-                }
-            }
-            other => target.set(key, other)?,
-        }
-    }
-
-    Ok(())
+/// Stores `value` as the theme object verbatim, preserving its metatable so Rust
+/// can call its formatters method-style. Assigning `tirc.ui` replaces the whole
+/// object; to combine themes, extend or patch the existing object in Lua rather
+/// than relying on a merge here.
+fn set_ui(lua: &Lua, value: Value) -> mlua::Result<()> {
+    lua.set_named_registry_value("tirc-ui", value)
 }
 
-/// Invokes the UI formatter named `name` (registered directly on `tirc.ui`).
+/// Invokes the UI formatter named `name` on the `tirc.ui` theme object.
 ///
-/// Returns `None` when no formatter is registered for `name`, otherwise the
+/// Returns `None` when no theme or no such formatter is set, otherwise the
 /// formatter's `mlua::Result` (an `Err` if the Lua callback raised). The caller
 /// is responsible for rendering errors.
+///
+/// Formatters are called method-style: the `tirc.ui` object is passed as the
+/// receiver (the implicit `self` of a `:` method) ahead of `args`, so a formatter
+/// can use `self` to reach sibling methods and styles.
 pub fn call_formatter<Args>(lua: &Lua, name: &str, args: Args) -> Option<mlua::Result<mlua::Value>>
 where
     Args: IntoLuaMulti,
 {
-    let ui = ui_registry_table(lua).ok()?;
+    let ui = ui_object(lua)?;
     let func: mlua::Function = match ui.get(name) {
         Ok(Some(func)) => func,
         _ => return None,
     };
+
+    let mut args = match args.into_lua_multi(lua) {
+        Ok(args) => args,
+        Err(err) => return Some(Err(err)),
+    };
+    args.push_front(mlua::Value::Table(ui));
 
     Some(func.call(args))
 }

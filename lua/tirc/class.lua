@@ -1,7 +1,9 @@
---- Tirc theme class system: build/define helpers used by TircTheme and subclasses.
+--- Minimal class system: metatable-based classes with single inheritance.
 ---
---- A class declares a `formatters` list naming the methods that are wired as
---- direct closures on each instance. Subclasses inherit it via `__index`.
+--- `Class.new()` creates a class; `Class.new(parent)` (or `Class.extend()`)
+--- derives one. Instances are created with `Class.new`'s generated `new(...)`,
+--- which sets the metatable and, if the class defines `init`, calls
+--- `self:init(...)`. The class system knows nothing about themes or formatters.
 
 --- The shape every class object gets from `Class.new()`.
 --- `T` is the instance/subclass type so that `new` and `extend` carry the
@@ -11,39 +13,6 @@
 ---@field extend fun(): T
 
 local M = {}
-
---- Builds an instance of class.
----
---- For each name in `class.formatters`, creates a closure on the instance that
---- dispatches to the class method. This lets Rust call `tirc.ui.buffer_title(...)`
---- directly without a `format` sub-table, while still honouring subclass overrides.
----
---- Constructor options:
----   `palette` - passed to `make_styles`
----   any formatter name - overrides the generated closure with a plain function
----@param class table
----@param opts? table
-function M.build(class, opts)
-  local self = setmetatable({}, class)
-
-  self.styles = self:make_styles(opts and opts.palette)
-
-  for _, name in ipairs(class.formatters or {}) do
-    self[name] = function(...)
-      return class[name](self, ...)
-    end
-  end
-
-  if opts then
-    for _, name in ipairs(class.formatters or {}) do
-      if type(opts[name]) == 'function' then
-        self[name] = opts[name]
-      end
-    end
-  end
-
-  return self
-end
 
 --- Creates a new class, optionally inheriting from `parent`.
 --- Attaches `new` and `extend` to the class; both capture it so subclasses
@@ -59,8 +28,14 @@ function M.new(parent)
   end
   class.__index = class
 
-  function class.new(opts)
-    return M.build(class, opts)
+  function class.new(...)
+    local self = setmetatable({}, class)
+
+    if self.init then
+      self:init(...)
+    end
+
+    return self
   end
 
   function class.extend()

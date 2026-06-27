@@ -21,32 +21,63 @@ local Class = require('tirc.class')
 --- ```lua
 --- tirc.ui = Default.new {
 ---   palette = { blue = theme.style { fg = 'cyan' } },
----   buffer_title = function(server, nickname, buffer_name) ... end,
+---   buffer_title = function(self, server, nickname, buffer_name) ... end,
 --- }
 --- ```
+---
+--- `render_buffer_bar` owns the whole bar layout and returns `{ rows = { ... } }`
+--- (one row per line). Override it to group tabs onto separate rows per backend:
+--- ```lua
+--- function My:render_buffer_bar(buffers)
+---   local groups, order = {}, {}
+---   for _, b in ipairs(buffers) do
+---     if not groups[b.backend_id] then
+---       groups[b.backend_id] = {}
+---       order[#order + 1] = b.backend_id
+---     end
+---     local g = groups[b.backend_id]
+---     g[#g + 1] = self:render_buffer_tab(b)
+---   end
+---   local rows = {}
+---   for _, id in ipairs(order) do
+---     rows[#rows + 1] = groups[id]
+---   end
+---   return { rows = rows }
+--- end
+--- ```
 --- Options accepted by `TircTheme.new`/`setup`.
+--- Formatter overrides are stored on the instance and called method-style, so
+--- each receives `self` as its first parameter, exactly like the class methods
+--- they replace.
 ---@class TircThemeOptions
 ---@field palette? table<string, TircThemeStyle> override individual colours
----@field buffer_title? fun(server: string, nickname: string, buffer: string): TircSpans
----@field message_time? fun(date_time: TircDateTime, event: TircEvent): TircSpans
----@field message_text? fun(event: TircEvent, nickname: string): TircSpans?
----@field user? fun(user: TircUser): TircSpans
----@field render_buffer_tab? fun(label: string, is_focused: boolean): TircSpans
+---@field buffer_title? fun(self: TircTheme, server: string, nickname: string, buffer: string): TircSpans
+---@field message_time? fun(self: TircTheme, date_time: TircDateTime, event: TircEvent): TircSpans
+---@field message_text? fun(self: TircTheme, event: TircEvent, nickname: string): TircSpans?
+---@field user? fun(self: TircTheme, user: TircUser): TircSpans
+---@field render_buffer_tab? fun(self: TircTheme, buffer: TircBufferTab): TircSpans
+---@field render_buffer_bar? fun(self: TircTheme, buffers: TircBufferTab[]): TircBufferBar | TircSpans
 
 ---@class TircTheme: TircUi, TircClassDef<TircTheme, TircThemeOptions>
 ---@field styles table<string, TircThemeStyle>
----@field formatters string[] formatter method names wired directly on instances
 ---@field setup fun(opts?: TircThemeOptions) plugin entry point for `tirc.use`
 local Theme = Class.new()
 
---- The formatter methods Rust calls directly on tirc.ui.
-Theme.formatters = {
-  'buffer_title',
-  'message_time',
-  'message_text',
-  'user',
-  'render_buffer_tab',
-}
+--- Initialises an instance: builds the palette and applies any formatter
+--- overrides passed as options. Overrides are stored as plain instance fields and
+--- called method-style, so they receive `self` like a regular method.
+---@param opts? TircThemeOptions
+function Theme:init(opts)
+  opts = opts or {}
+
+  self.styles = self:make_styles(opts.palette)
+
+  for key, value in pairs(opts) do
+    if key ~= 'palette' then
+      self[key] = value
+    end
+  end
+end
 
 --- Plugin entry point used by `tirc.use(theme)`.
 function Theme.setup(opts)
@@ -391,6 +422,21 @@ function Theme:render_buffer_tab(buffer)
     or buffer.name
 
   return { { name, tirc.is_focused_buffer(buffer) and s.white or s.gray }, ' ' }
+end
+
+--- Lays out the whole buffer bar. Returns `{ rows = { <TircSpans>, ... } }`, one
+--- entry per rendered line. The default is a single row of tabs; override this to
+--- group by `buffer.backend_id`, render multiple rows, or filter the buffers.
+---@param buffers TircBufferTab[]
+---@return TircBufferBar
+function Theme:render_buffer_bar(buffers)
+  local row = {}
+
+  for _, buffer in ipairs(buffers) do
+    row[#row + 1] = self:render_buffer_tab(buffer)
+  end
+
+  return { rows = { row } }
 end
 
 return Theme

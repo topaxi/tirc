@@ -2,7 +2,7 @@ use mlua::LuaSerdeExt;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, List, ListDirection, ListItem, Paragraph},
 };
 use tui_input::Input;
@@ -73,14 +73,14 @@ impl Renderer {
         Self {}
     }
 
-    fn get_layout(&self) -> Layout {
+    fn get_layout(&self, bar_height: u16) -> Layout {
         Layout::default()
             .direction(Direction::Vertical)
             .constraints(
                 [
                     Constraint::Min(0),
                     Constraint::Length(2),
-                    Constraint::Length(1),
+                    Constraint::Length(bar_height),
                 ]
                 .as_ref(),
             )
@@ -297,44 +297,90 @@ impl Renderer {
         })
     }
 
-    fn render_buffer_bar(
+    /// Builds the `TircBufferTab` table for one buffer, the shape passed to the
+    /// theme's `render_buffer_tab`/`render_buffer_bar` formatters.
+    fn buffer_tab_table(
         &self,
-        f: &mut ratatui::Frame,
         state: &State,
         lua: &mlua::Lua,
-        rect: Rect,
-    ) {
-        let buffers: Vec<Span> = state
-            .buffers
-            .iter()
-            .flat_map(|(id, buffer)| {
-                let backend_name = state
-                    .backends
-                    .get(&id.backend)
-                    .map(|b| b.info.name.as_str())
-                    .unwrap_or("?");
+        id: &BufferId,
+        buffer: &ChatBuffer,
+    ) -> mlua::Result<mlua::Table> {
+        let backend_name = state
+            .backends
+            .get(&id.backend)
+            .map(|b| b.info.name.as_str())
+            .unwrap_or("?");
 
-                let tab_info = lua.create_table().and_then(|t| {
-                    t.set("id", format!("{}:{}", id.backend.0, id.target.as_str()))?;
-                    t.set("name", buffer.label(&id.target))?;
-                    t.set("target", id.target.as_str())?;
-                    t.set("backend_name", backend_name)?;
-                    if let Some(metadata) = crate::config::get_backend_metadata(lua, id.backend) {
-                        t.set("backend_metadata", metadata)?;
-                    }
-                    Ok(t)
-                });
+        let t = lua.create_table()?;
+        t.set("id", format!("{}:{}", id.backend.0, id.target.as_str()))?;
+        t.set("name", buffer.label(&id.target))?;
+        t.set("target", id.target.as_str())?;
+        t.set("backend_id", id.backend.0)?;
+        t.set("backend_name", backend_name)?;
+        if let Some(metadata) = crate::config::get_backend_metadata(lua, id.backend) {
+            t.set("backend_metadata", metadata)?;
+        }
+        Ok(t)
+    }
 
-                match tab_info {
-                    Ok(t) => self
-                        .format_spans(lua, "render_buffer_tab", t)
-                        .unwrap_or_default(),
-                    Err(_) => vec![],
-                }
-            })
-            .collect();
+    /// Builds the Lua array of all buffer tabs, in buffer order.
+    fn buffer_tabs(&self, state: &State, lua: &mlua::Lua) -> mlua::Result<mlua::Table> {
+        let tabs = lua.create_table()?;
+        for (id, buffer) in state.buffers.iter() {
+            tabs.push(self.buffer_tab_table(state, lua, id, buffer)?)?;
+        }
+        Ok(tabs)
+    }
 
-        f.render_widget(Paragraph::new(Line::from(buffers)), rect);
+    /// Converts a `render_buffer_bar` result into rendered lines. A table with a
+    /// `rows` sequence yields one line per row; any other value is treated as a
+    /// single row (the shorthand documented for `render_buffer_bar`).
+    fn lua_value_to_rows(
+        &self,
+        lua: &mlua::Lua,
+        value: mlua::Value,
+    ) -> Result<Vec<Line<'_>>, anyhow::Error> {
+        if let mlua::Value::Table(table) = &value {
+            if let mlua::Value::Table(rows) = table.get::<mlua::Value>("rows")? {
+                return rows
+                    .sequence_values::<mlua::Value>()
+                    .map(|row| Ok(Line::from(self.lua_value_to_spans(lua, row?)?)))
+                    .collect();
+            }
+        }
+
+        Ok(vec![Line::from(self.lua_value_to_spans(lua, value)?)])
+    }
+
+    /// Produces the buffer bar as a list of lines. Delegates the whole layout to
+    /// the theme's `render_buffer_bar`; when that formatter is absent, falls back
+    /// to a single line built from per-tab `render_buffer_tab` results so raw
+    /// `TircUi` themes keep working.
+    fn build_buffer_bar(&self, state: &State, lua: &mlua::Lua) -> Vec<Line<'_>> {
+        let tabs = match self.buffer_tabs(state, lua) {
+            Ok(tabs) => tabs,
+            Err(_) => return vec![Line::default()],
+        };
+
+        match crate::config::call_formatter(lua, "render_buffer_bar", &tabs) {
+            Some(Ok(value)) => self.lua_value_to_rows(lua, value).unwrap_or_default(),
+            Some(Err(err)) => vec![Line::from(Self::string_to_span(
+                format!("ERR: {err}"),
+                Some(Style::default().fg(Color::Red)),
+            ))],
+            None => {
+                let spans = tabs
+                    .sequence_values::<mlua::Table>()
+                    .filter_map(Result::ok)
+                    .flat_map(|tab| {
+                        self.format_spans(lua, "render_buffer_tab", tab)
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>();
+                vec![Line::from(spans)]
+            }
+        }
     }
 
     fn render_input(
@@ -433,7 +479,17 @@ impl Renderer {
         lua: &mlua::Lua,
         input: &Input,
     ) {
-        let layout = self.get_layout();
+        // Populate the render context (multi_backend, focused_buffer, ...) before
+        // building the bar, as the theme's render_buffer_bar reads those globals.
+        let _ = update_render_context(lua, view, state);
+
+        // Build the bar first so the layout can size its region to fit the rows
+        // the theme returned, capped so the message area never collapses.
+        let bar_lines = self.build_buffer_bar(state, lua);
+        let max_bar_height = f.area().height.saturating_sub(3);
+        let bar_height = (bar_lines.len() as u16).clamp(1, max_bar_height.max(1));
+
+        let layout = self.get_layout(bar_height);
         let chunks = layout.split(f.area());
 
         let members = self
@@ -455,11 +511,9 @@ impl Renderer {
 
         view.viewport_height = msg_rect.height;
 
-        let _ = update_render_context(lua, view, state);
-
         self.render_messages(f, state, view, lua, msg_rect);
 
-        self.render_buffer_bar(f, state, lua, chunks[2]);
+        f.render_widget(Paragraph::new(Text::from(bar_lines)), chunks[2]);
         self.render_input(f, view, input, chunks[1]);
     }
 }
@@ -589,6 +643,54 @@ mod tests {
         assert_eq!(spans[3].style.bg, Some(Color::White));
         assert_eq!(spans[5].content, "f");
         assert_eq!(spans[5].style.fg, None);
+        Ok(())
+    }
+
+    #[test]
+    fn lua_value_to_rows_yields_one_line_per_row() -> anyhow::Result<(), anyhow::Error> {
+        let renderer = Renderer::new();
+        let lua = mlua::Lua::new();
+        let value = run_lua_code(&lua, "{ rows = { { 'a' }, { 'b', 'c' } } }")?;
+        let rows = renderer.lua_value_to_rows(&lua, value)?;
+        assert_eq!(rows.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn lua_value_to_rows_treats_bare_value_as_single_row() -> anyhow::Result<(), anyhow::Error> {
+        let renderer = Renderer::new();
+        let lua = mlua::Lua::new();
+        let value = run_lua_code(&lua, "{ 'x', 'y' }")?;
+        let rows = renderer.lua_value_to_rows(&lua, value)?;
+        assert_eq!(rows.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn default_theme_render_buffer_bar_returns_single_row() -> anyhow::Result<(), anyhow::Error> {
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default').setup({})")
+            .exec()?;
+
+        let buffers = lua.create_table()?;
+        let tab = lua.create_table()?;
+        tab.set("id", "0:#tirc")?;
+        tab.set("name", "#tirc")?;
+        tab.set("target", "#tirc")?;
+        tab.set("backend_id", 0)?;
+        tab.set("backend_name", "irc.example.com")?;
+        buffers.push(tab)?;
+
+        let renderer = Renderer::new();
+        let value = crate::config::call_formatter(&lua, "render_buffer_bar", &buffers)
+            .expect("render_buffer_bar registered")
+            .expect("render_buffer_bar callback");
+        let rows = renderer.lua_value_to_rows(&lua, value)?;
+
+        assert_eq!(rows.len(), 1);
+        let text: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("#tirc"), "row text was {text:?}");
         Ok(())
     }
 }

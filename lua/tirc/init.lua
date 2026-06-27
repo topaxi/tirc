@@ -6,8 +6,13 @@
 ---@field id string opaque buffer identifier (pass to tirc.is_focused_buffer)
 ---@field name string display name (may differ from target for Matrix rooms)
 ---@field target string raw target identifier (IRC channel/nick or Matrix room id)
+---@field backend_id integer id of the backend this buffer belongs to (for grouping)
 ---@field backend_name string human-readable backend name
 ---@field backend_metadata? table<string, any> per-server metadata from the config (e.g. `{ label = 'topaxi' }`)
+
+--- The buffer bar layout returned by `render_buffer_bar`: one `TircSpans` per row.
+---@class TircBufferBar
+---@field rows TircSpans[]
 
 --- Styled span tree consumed by the renderer: a string, a `{ content, style }`
 --- pair, or a (possibly nested) list of either. Returning `nil` skips the line.
@@ -77,6 +82,7 @@
 ---@field message_text? fun(event: TircEvent, nickname: string): TircSpans?
 ---@field user? fun(user: TircUser): TircSpans
 ---@field render_buffer_tab? fun(buffer: TircBufferTab): TircSpans
+---@field render_buffer_bar? fun(buffers: TircBufferTab[]): TircBufferBar | TircSpans
 
 ---@class TircModule
 ---@field version string
