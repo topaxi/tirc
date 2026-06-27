@@ -13,12 +13,17 @@
 
 services:
   homeserver:
-    image: matrixconduit/matrix-conduit:latest
+    # Fully-qualified so it also resolves under podman (no unqualified search).
+    image: docker.io/matrixconduit/matrix-conduit:latest
     restart: unless-stopped
     ports:
       - "6167:6167"
     environment:
+      # Empty path = configure purely from CONDUIT_* env vars (no toml file).
+      CONDUIT_CONFIG: ""
       CONDUIT_SERVER_NAME: localhost
+      # Bind to all interfaces so the mapped port is reachable from the host.
+      CONDUIT_ADDRESS: 0.0.0.0
       CONDUIT_DATABASE_BACKEND: rocksdb
       CONDUIT_DATABASE_PATH: /var/lib/matrix-conduit/
       CONDUIT_PORT: 6167

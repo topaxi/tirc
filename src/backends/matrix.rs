@@ -16,8 +16,8 @@ use matrix_sdk::ruma::{OwnedRoomId, RoomId, UserId};
 use matrix_sdk::{Client, Room};
 
 use crate::core::{
-    BackendEvent, BackendId, BackendMessage, ChatEvent, Command, EventId, Formatted, MembershipChange,
-    MessageBody, MsgKind, Protocol, TargetId, UserRef,
+    BackendEvent, BackendId, BackendMessage, ChatEvent, Command, EventId, Formatted,
+    MembershipChange, MessageBody, MsgKind, Protocol, TargetId, UserRef,
 };
 
 use super::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
@@ -130,9 +130,17 @@ fn register_handlers(client: &Client, id: BackendId, events: EventSender) {
         async move {
             if let SyncRoomMessageEvent::Original(event) = event {
                 let (kind, body) = match event.content.msgtype {
-                    MessageType::Text(content) => (MsgKind::Text, message_body(content.body, content.formatted)),
-                    MessageType::Emote(content) => (MsgKind::Action, message_body(content.body, content.formatted)),
-                    MessageType::Notice(content) => (MsgKind::Notice, message_body(content.body, content.formatted)),
+                    MessageType::Text(content) => {
+                        (MsgKind::Text, message_body(content.body, content.formatted))
+                    }
+                    MessageType::Emote(content) => (
+                        MsgKind::Action,
+                        message_body(content.body, content.formatted),
+                    ),
+                    MessageType::Notice(content) => (
+                        MsgKind::Notice,
+                        message_body(content.body, content.formatted),
+                    ),
                     _ => return,
                 };
 
@@ -299,4 +307,83 @@ fn emit(events: &EventSender, backend: BackendId, event: ChatEvent) {
         backend,
         event: BackendEvent::Event(event),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::TxnId;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    /// End-to-end check against a live homeserver (see `dev/matrix`). Logs in,
+    /// joins a room, sends a message, and asserts it comes back through sync as a
+    /// normalized event. Ignored by default since it needs the homeserver:
+    ///
+    /// ```sh
+    /// TIRC_TEST_HOMESERVER=http://localhost:6167 \
+    /// TIRC_TEST_USER=@alice:localhost TIRC_TEST_PASSWORD=alicepassword \
+    /// TIRC_TEST_ROOM='!...:localhost' \
+    ///   cargo test --lib matrix::tests -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore = "requires the local matrix homeserver from dev/matrix"]
+    async fn login_join_send_roundtrip() {
+        let config = MatrixBackendConfig {
+            homeserver: std::env::var("TIRC_TEST_HOMESERVER").unwrap(),
+            user_id: std::env::var("TIRC_TEST_USER").unwrap(),
+            password: std::env::var("TIRC_TEST_PASSWORD").unwrap(),
+            device_id: None,
+            autojoin: vec![std::env::var("TIRC_TEST_ROOM").unwrap()],
+        };
+        let room = config.autojoin[0].clone();
+
+        let backend = Box::new(MatrixBackend::new(BackendId(0), config));
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(backend.run(event_tx, command_rx));
+
+        assert!(
+            wait_for(&mut event_rx, |m| matches!(
+                m.event,
+                BackendEvent::Ready { .. }
+            ))
+            .await,
+            "expected a Ready event after login"
+        );
+
+        command_tx
+            .send(Command::SendMessage {
+                target: TargetId(room),
+                body: "hello from tirc".to_string(),
+                kind: MsgKind::Text,
+                txn: TxnId(1),
+            })
+            .unwrap();
+
+        assert!(
+            wait_for(&mut event_rx, |m| matches!(
+                &m.event,
+                BackendEvent::Event(ChatEvent::Message { body, .. }) if body.text == "hello from tirc"
+            ))
+            .await,
+            "expected the sent message echoed back through sync"
+        );
+
+        drop(command_tx);
+        let _ = handle.await;
+    }
+
+    async fn wait_for(
+        rx: &mut mpsc::UnboundedReceiver<BackendMessage>,
+        pred: impl Fn(&BackendMessage) -> bool,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while let Ok(Some(message)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+            if pred(&message) {
+                return true;
+            }
+        }
+        false
+    }
 }
