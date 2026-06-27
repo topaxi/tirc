@@ -255,17 +255,18 @@ impl State {
     }
 
     fn apply_message(&mut self, backend: BackendId, event: ChatEvent) {
-        let (target, echo_of, time, has_id) = match &event {
+        let (target, echo_of, time, id) = match &event {
             ChatEvent::Message {
                 target,
                 echo_of,
                 time,
                 id,
                 ..
-            } => (target.clone(), *echo_of, *time, id.is_some()),
+            } => (target.clone(), *echo_of, *time, id.clone()),
             _ => return,
         };
 
+        let has_id = id.is_some();
         let buffer = self.buffer_mut(backend, target);
 
         // Replace the optimistic local echo in place when the server confirms it,
@@ -277,6 +278,14 @@ impl State {
                 if let Some(time) = time {
                     slot.time = time.with_timezone(&Local);
                 }
+                return;
+            }
+        }
+
+        // Skip duplicate events (same message re-delivered from both backfill and
+        // live sync, or from SDK re-delivery on re-join).
+        if let Some(ref event_id) = id {
+            if buffer.messages.iter().any(|m| m.has_event_id(event_id)) {
                 return;
             }
         }
@@ -293,7 +302,16 @@ impl State {
         if let Some(time) = time {
             stored.time = time.with_timezone(&Local);
         }
-        buffer.messages.push(stored);
+
+        if !pending && time.is_some() {
+            // Insert at the correct chronological position so that backfilled
+            // messages arriving out of delivery order sort correctly relative
+            // to live messages.
+            let pos = buffer.messages.partition_point(|m| m.time <= stored.time);
+            buffer.messages.insert(pos, stored);
+        } else {
+            buffer.messages.push(stored);
+        }
     }
 
     fn apply_edit(&mut self, backend: BackendId, target: TargetId, id: EventId, body: MessageBody) {
@@ -736,5 +754,61 @@ mod tests {
         assert_eq!(buf.scroll_position, 0);
         buf.scroll_to_top(10);
         assert_eq!(buf.scroll_position, 0);
+    }
+
+    fn timed_message(target: &str, sender: &str, event_id: &str, ts: i64) -> ChatEvent {
+        ChatEvent::Message {
+            target: TargetId::from(target),
+            id: Some(crate::core::EventId(event_id.to_string())),
+            sender: UserRef::new(sender),
+            body: MessageBody::plain("hi"),
+            kind: MsgKind::Text,
+            echo_of: None,
+            time: chrono::DateTime::from_timestamp(ts, 0),
+        }
+    }
+
+    #[test]
+    fn backfill_messages_are_sorted_chronologically() {
+        let mut state = test_state();
+
+        // Deliver oldest message last (as backfill often does).
+        state.apply(backend(), timed_message("#tirc", "alice", "$b", 2000));
+        state.apply(backend(), timed_message("#tirc", "bob", "$a", 1000));
+
+        let buf = buffer(&state, "#tirc");
+        assert_eq!(buf.messages.len(), 2);
+        assert_eq!(
+            buf.messages[0].time.timestamp(),
+            1000,
+            "older message must be first"
+        );
+        assert_eq!(buf.messages[1].time.timestamp(), 2000);
+    }
+
+    #[test]
+    fn duplicate_event_id_is_skipped() {
+        let mut state = test_state();
+
+        state.apply(backend(), timed_message("#tirc", "alice", "$x", 1000));
+        // Same event ID arrives again (e.g., from live sync after backfill).
+        state.apply(backend(), timed_message("#tirc", "alice", "$x", 1000));
+
+        let buf = buffer(&state, "#tirc");
+        assert_eq!(buf.messages.len(), 1, "duplicate must not be inserted");
+    }
+
+    #[test]
+    fn pending_echo_still_appends_to_end() {
+        let mut state = test_state();
+        let txn = TxnId(42);
+
+        state.apply(backend(), timed_message("#tirc", "alice", "$old", 1000));
+        // Optimistic echo has no event ID and no server time.
+        state.apply(backend(), message("#tirc", "me", Some(txn)));
+
+        let buf = buffer(&state, "#tirc");
+        assert_eq!(buf.messages.len(), 2);
+        assert!(buf.messages[1].pending, "pending echo must be at the end");
     }
 }
