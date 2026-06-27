@@ -172,14 +172,20 @@ impl<'lua> InputHandler<'lua> {
                 self.irc.send(Command::LIST(None, None))?;
             }
             ["reload"] => {
-                let result = reload_lua_theme(self.lua, &self.config_path);
-                let notice_text = match &result {
+                let reload_result = reload_lua_theme(self.lua, &self.config_path);
+                let notice_text = match &reload_result {
                     Ok(()) => "Theme reloaded successfully".to_owned(),
-                    Err(err) => format!("Reload error: {}", err),
+                    Err(err) => format!("Reload error: {}", err).replace(['\r', '\n'], " "),
                 };
-                let notice: Message =
-                    format!(":tirc!tirc@localhost NOTICE * :{}\r\n", notice_text).parse()?;
-                state.push_message(TircMessage::from_message(Box::new(notice), self.lua)?);
+                // A dotted prefix is parsed as a server name by the irc crate,
+                // making source_nickname() return None and routing the notice to
+                // the status buffer rather than creating a nick-named buffer.
+                let raw = format!(":tirc.local NOTICE * :{}\r\n", notice_text);
+                if let Ok(notice) = raw.parse::<Message>() {
+                    if let Ok(tirc_msg) = TircMessage::from_message(Box::new(notice), self.lua) {
+                        state.push_message(tirc_msg);
+                    }
+                }
             }
             _ => {}
         }

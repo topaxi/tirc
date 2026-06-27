@@ -239,6 +239,18 @@ mod tests {
     }
 
     #[test]
+    fn test_target_buffer_reload_notice_goes_to_status() {
+        // The irc crate treats a prefix containing '.' as a server name
+        // (source_nickname() returns None), routing the notice to the status buffer.
+        // A dotless prefix like ':tirc' would be treated as a nick and create
+        // a "tirc" buffer instead. tirc.local avoids that.
+        assert_eq!(
+            target_buffer("me", ":tirc.local NOTICE * :Theme reloaded\r\n"),
+            "(status)"
+        );
+    }
+
+    #[test]
     fn test_get_buffer_name_by_index() {
         let state = super::State::default();
         assert_eq!(state.get_buffer_name_by_index(0), "(status)");
