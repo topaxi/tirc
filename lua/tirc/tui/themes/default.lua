@@ -1,5 +1,4 @@
 local tirc = require('tirc')
-local date_time = require('tirc.date_time')
 local utils = require('tirc.utils')
 local theme = require('tirc.tui.theme')
 
@@ -18,54 +17,14 @@ local server_notice_icon = {
   ' ',
 }
 
----@param msg TircMessage
-local function format_join(msg)
-  local realname = msg.params[3]
-
-  return {
-    { msg.nick, blue },
-    realname and realname ~= 'Unknown' and {
-      { ' (', gray },
-      { realname, blue },
-      { ')', gray },
-    } or '',
-    { ' has joined ', twhite },
-    { msg.params[1], green },
-  }
-end
-
----@param msg TircMessage
-local function format_part(msg)
-  return {
-    { msg.nick, blue },
-    { ' has parted ', twhite },
-    { msg.params[1], green },
-  }
-end
-
----@param nickname string
----@param style TircThemeStyle
-local function format_privmsg_nickname(nickname, style)
-  return {
-    { '<', gray },
-    { nickname, style },
-    { '>', gray },
-  }
-end
-
----@param nickname string
----@param style TircThemeStyle
-local function format_privmsg_action_nickname(nickname, style)
-  return { { '* ', nickname }, style }
-end
-
 ---@param word string
 local function is_channel(word)
   return word:match('#%w+$')
 end
 
+--- Splits a message body into spans, highlighting channel-like words.
 ---@param message string
-local function format_privmsg_message(message)
+local function format_body(message)
   local spans = utils.list_flat_map(utils.split(message, '%s'), function(word)
     if is_channel(word) then
       return { { word, green }, ' ' }
@@ -79,137 +38,131 @@ local function format_privmsg_message(message)
   return spans
 end
 
-local function message_is_draft(msg)
-  return utils.list_find(msg.tags, function(tag)
-    return tag[1] == 'time'
-  end) == nil
+---@param name string
+---@param style TircThemeStyle
+local function format_nickname(name, style)
+  return {
+    { '<', gray },
+    { name, style },
+    { '>', gray },
+  }
 end
 
----@param msg TircMessage
----@param nickname string
-local function format_privmsg(msg, nickname)
-  local is_draft = message_is_draft(msg)
+---@param name string
+---@param style TircThemeStyle
+local function format_action_nickname(name, style)
+  return { { '* ', name }, style }
+end
 
-  ---@type string
-  local message_str = msg.params[2]
-  local is_action = message_str:sub(1, 8) == '\001ACTION '
+--- A normal or action message. Pending (optimistic, unconfirmed) messages dim.
+---@param event TircEvent
+local function format_message(event)
+  local name = event.sender.name
+  local text = event.body.text
+  local is_action = event.kind == 'action'
 
-  if is_action then
-    message_str = message_str:sub(9, -2)
+  if event.pending then
+    return {
+      is_action and format_action_nickname(name, darkgray)
+        or format_nickname(name, darkgray),
+      ' ',
+      { format_body(text), darkgray },
+    }
   end
 
-  if is_draft then
+  if event.kind == 'notice' then
     return {
-      is_action and format_privmsg_action_nickname(nickname, darkgray)
-        or format_privmsg_nickname(nickname, darkgray),
-      ' ',
-      { format_privmsg_message(message_str), darkgray },
+      { '-', gray },
+      { name, blue },
+      { '- ', gray },
+      format_body(text),
     }
   end
 
   return {
-    is_action and format_privmsg_action_nickname(msg.nick, white)
-      or format_privmsg_nickname(msg.nick, blue),
+    is_action and format_action_nickname(name, white)
+      or format_nickname(name, blue),
     ' ',
-    format_privmsg_message(message_str),
+    format_body(text),
   }
 end
 
----@param msg TircMessage
-local function format_notice(msg)
-  if msg.server then
-    return {
-      { '!' .. msg.server, green },
-      ' ',
-      msg.params[2],
-    }
-  elseif msg.nick then
-    return {
-      '-',
-      msg.nick,
-      '(',
-      msg.host,
-      ')- ',
-      msg.params[2],
-    }
-  end
-end
+---@param event TircEvent
+local function format_membership(event)
+  local change = event.change
 
----@param modestring string
-local function format_modestring(modestring)
-  local spans = {}
-
-  for ch in modestring:gmatch('.') do
-    if ch == '+' then
-      spans[#spans + 1] = { ch, green }
-    elseif ch == '-' then
-      spans[#spans + 1] = { ch, red }
-    else
-      spans[#spans + 1] = ch
-    end
+  -- Roster seeding and role changes do not render a line.
+  if change == 'present' or change == 'set_role' then
+    return nil
   end
 
-  return spans
-end
+  local verb = ({
+    join = ' has joined ',
+    part = ' has left ',
+    kick = ' was kicked from ',
+    invite = ' was invited to ',
+  })[change] or ' '
 
----@param msg TircMessage
-local function format_mode(msg)
-  local target = msg.params[1]
-  local is_channel_mode = target:match('^[#&]')
-  local prefix = is_channel_mode and 'cmode' or 'umode'
-  local modestring = msg.params[2] or ''
-
-  local args = {}
-  for i = 3, #msg.params do
-    args[#args + 1] = msg.params[i]
-  end
-
-  local result = {
-    { prefix .. '/', twhite },
-    { target, is_channel_mode and green or blue },
-    ' ',
-    format_modestring(modestring),
+  local line = {
+    { event.who.name, blue },
+    { verb, twhite },
+    { event.target, green },
   }
 
-  if #args > 0 then
-    result[#result + 1] = ' '
-    result[#result + 1] = table.concat(args, ' ')
+  if event.reason and event.reason ~= '' then
+    line[#line + 1] = { ' (' .. event.reason .. ')', gray }
   end
 
-  return result
+  return line
 end
 
----@param command string
-local function is_numeric_reply(command)
-  return command:match('^RPL_') ~= nil or command:match('^ERR_') ~= nil
+---@param event TircEvent
+local function format_topic(event)
+  local who = event.who and event.who.name or nil
+
+  return {
+    who and { { who, blue }, { ' changed the topic to ', twhite } }
+      or { 'Topic: ', twhite },
+    { event.topic, green },
+  }
 end
 
----@param tags TircMessageTag[]
----@return string|nil
-local function get_time_from_tags(tags)
-  if not tags then
-    return
+---@param event TircEvent
+local function format_rename(event)
+  return {
+    { event.who.name, blue },
+    { ' is now known as ', twhite },
+    { event.new, blue },
+  }
+end
+
+---@param event TircEvent
+local function format_quit(event)
+  local line = {
+    { event.who.name, blue },
+    { ' has quit', twhite },
+  }
+
+  if event.reason and event.reason ~= '' then
+    line[#line + 1] = { ' (' .. event.reason .. ')', gray }
   end
 
-  for _, tag in ipairs(tags) do
-    if tag[1] == 'time' then
-      return tag[2]
-    end
-  end
+  return line
 end
 
-local access_level_styles = {
-  Owner = { '~', red },
-  Admin = { '&', red },
-  Oper = { '@', red },
-  HalfOp = { '%', red },
-  Voice = { '+', green },
-  Member = {},
+---@param event TircEvent
+local function format_server_info(event)
+  return utils.list_concat(server_notice_icon, { event.text })
+end
+
+local role_prefix = {
+  owner = { '~', red },
+  admin = { '&', red },
+  op = { '@', red },
+  halfop = { '%', red },
+  voice = { '+', green },
+  member = {},
 }
-
-local function format_access_level(level)
-  return access_level_styles[level]
-end
 
 ---@type TircUi
 M.ui = {
@@ -224,13 +177,7 @@ M.ui = {
       }
     end,
 
-    message_time = function(dt, msg)
-      local time_tag = get_time_from_tags(msg.tags)
-
-      if time_tag then
-        dt = date_time.parse_from_rfc3339(time_tag)
-      end
-
+    message_time = function(dt, _event)
       local is_1337 = dt.hour == 13 and dt.minute == 37
 
       return {
@@ -242,42 +189,38 @@ M.ui = {
       }
     end,
 
-    message_text = function(msg, nickname)
-      local command = msg.command
+    ---@param event TircEvent
+    message_text = function(event, _nickname)
+      local kind = event.type
 
-      if command == 'JOIN' then
-        return format_join(msg)
-      elseif command == 'PART' then
-        return format_part(msg)
-      elseif command == 'PRIVMSG' then
-        return format_privmsg(msg, nickname)
-      elseif command == 'NOTICE' then
-        return format_notice(msg)
-      elseif command == 'MODE' then
-        return format_mode(msg)
-      elseif is_numeric_reply(command) then
-        if command == 'RPL_NAMREPLY' or command == 'RPL_ENDOFNAMES' then
-          return nil
-        end
-
-        return utils.list_concat(server_notice_icon, {
-          table.concat(msg.params, ' ', 2),
-        })
-      elseif command == 'PING' or command == 'PONG' then
-        return nil
-      elseif command == 'CAP' then
-        return utils.list_concat(server_notice_icon, {
-          'Capabilities ' .. table.concat(msg.params, ' '),
-        })
+      if event.redacted then
+        return { { '[message deleted]', darkgray } }
       end
 
-      return tostring(msg)
+      if kind == 'message' then
+        return format_message(event)
+      elseif kind == 'membership' then
+        return format_membership(event)
+      elseif kind == 'topic' then
+        return format_topic(event)
+      elseif kind == 'rename' then
+        return format_rename(event)
+      elseif kind == 'quit' then
+        return format_quit(event)
+      elseif kind == 'server_info' then
+        return format_server_info(event)
+      elseif kind == 'edit' then
+        return { format_body(event.body.text), { ' (edited)', darkgray } }
+      end
+
+      return nil
     end,
 
+    ---@param user TircUser
     user = function(user)
       return {
-        utils.list_map(user.access_levels, format_access_level),
-        { user.nickname, blue },
+        role_prefix[user.role] or {},
+        { user.name, blue },
       }
     end,
   },

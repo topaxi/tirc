@@ -3,14 +3,13 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use irc::client::Client;
 use mlua::Lua;
-use std::io::{self, Stdout};
 use ratatui::backend::CrosstermBackend;
+use std::io::{self, Stdout};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
-use crate::ui::State;
+use crate::ui::{State, ViewState};
 
 use super::renderer::Renderer;
 
@@ -75,9 +74,14 @@ impl Tui {
         Ok(())
     }
 
-    pub fn render(&mut self, _irc: &Client, lua: &Lua, state: &State) -> Result<(), anyhow::Error> {
+    pub fn render(
+        &mut self,
+        lua: &Lua,
+        state: &State,
+        view: &ViewState,
+    ) -> Result<(), anyhow::Error> {
         self.terminal.draw(|f| {
-            self.renderer.render(f, state, lua, &self.input);
+            self.renderer.render(f, state, view, lua, &self.input);
         })?;
 
         Ok(())

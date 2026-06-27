@@ -71,6 +71,12 @@ impl BackendHandle {
             .send(command)
             .map_err(|_| anyhow::anyhow!("backend {:?} is no longer running", self.info.id))
     }
+
+    /// A clone of the command sender, for building Lua closures that enqueue
+    /// commands directly (the `event` callback's sender bridge).
+    pub fn sender(&self) -> mpsc::UnboundedSender<Command> {
+        self.commands.clone()
+    }
 }
 
 /// Spawn a backend onto the current runtime, wiring its command queue and the

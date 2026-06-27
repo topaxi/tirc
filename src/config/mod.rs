@@ -68,39 +68,59 @@ fn get_default_config() -> &'static str {
     "}
 }
 
-fn register_event(lua: &Lua, (name, func): (String, mlua::Function)) -> mlua::Result<()> {
-    let decorated_name = format!("tirc-event-{}", name);
-    let tbl: mlua::Value = lua.named_registry_value(&decorated_name)?;
+/// The closed set of side-effect events themes/plugins can subscribe to via
+/// `tirc.on(name, fn)`. Keeping this an enum (rather than formatting a registry
+/// key from an arbitrary string on every emit) is the single source of truth for
+/// valid event names and avoids a per-emit allocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventName {
+    /// A normalized [`ChatEvent`](crate::core::ChatEvent) arrived from a backend.
+    Event,
+}
 
-    match tbl {
-        mlua::Value::Nil => {
-            let tbl = lua.create_table()?;
-            tbl.set(1, func)?;
-            lua.set_named_registry_value(&decorated_name, tbl)?;
-            Ok(())
+impl EventName {
+    /// The (static) registry key under which this event's handlers are stored.
+    fn registry_key(self) -> &'static str {
+        match self {
+            EventName::Event => "tirc-event-event",
         }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "event" => Some(EventName::Event),
+            _ => None,
+        }
+    }
+}
+
+fn register_event(lua: &Lua, (name, func): (String, mlua::Function)) -> mlua::Result<()> {
+    let event = EventName::parse(&name)
+        .ok_or_else(|| mlua::Error::external(anyhow!("unknown event name: {name}")))?;
+    let key = event.registry_key();
+
+    match lua.named_registry_value::<mlua::Value>(key)? {
         mlua::Value::Table(tbl) => {
             let len = tbl.raw_len();
             tbl.set(len + 1, func)?;
             Ok(())
         }
-        _ => Err(mlua::Error::external(anyhow!(
-            "registry key for {} has invalid type",
-            decorated_name
-        ))),
+        _ => {
+            let tbl = lua.create_table()?;
+            tbl.set(1, func)?;
+            lua.set_named_registry_value(key, tbl)?;
+            Ok(())
+        }
     }
 }
 
 /// Dispatches a fire-and-forget event to every handler registered via
 /// `tirc.on(name, ...)`. Handler return values are ignored.
-pub fn emit_event<Args>(lua: &Lua, name: &str, args: Args) -> mlua::Result<()>
+pub fn emit_event<Args>(lua: &Lua, event: EventName, args: Args) -> mlua::Result<()>
 where
     Args: IntoLuaMulti + Clone,
 {
-    let decorated_name = format!("tirc-event-{}", name);
-    let tbl: mlua::Value = lua.named_registry_value(&decorated_name)?;
-
-    if let mlua::Value::Table(tbl) = tbl {
+    if let mlua::Value::Table(tbl) = lua.named_registry_value(event.registry_key())? {
         for func in tbl.sequence_values::<mlua::Function>() {
             func?.call::<()>(args.clone())?;
         }
@@ -166,11 +186,7 @@ fn set_ui(lua: &Lua, value: Table) -> mlua::Result<()> {
 /// Returns `None` when no formatter is registered for `name`, otherwise the
 /// formatter's `mlua::Result` (an `Err` if the Lua callback raised). The caller
 /// is responsible for rendering errors.
-pub fn call_formatter<Args>(
-    lua: &Lua,
-    name: &str,
-    args: Args,
-) -> Option<mlua::Result<mlua::Value>>
+pub fn call_formatter<Args>(lua: &Lua, name: &str, args: Args) -> Option<mlua::Result<mlua::Value>>
 where
     Args: IntoLuaMulti,
 {
@@ -325,13 +341,37 @@ pub fn load_config(lua: &Lua) -> Result<TircConfig, anyhow::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::lua::to_lua_message;
+    use crate::backends::BackendInfo;
+    use crate::core::{
+        BackendId, ChatEvent, MembershipChange, MessageBody, MsgKind, Protocol, TargetId, UserRef,
+    };
+    use crate::tui::lua::to_lua_event;
+    use crate::ui::StoredMessage;
 
-    /// Loads the builtin modules and activates the default theme, returning a
-    /// closure that renders a raw IRC line through the `message_text` formatter.
-    fn render_message_text(lua: &Lua, raw: &str) -> mlua::Value {
-        let message: irc::proto::Message = raw.parse().expect("valid irc message");
-        let table = to_lua_message(lua, &message).expect("message table");
+    fn backend() -> BackendInfo {
+        BackendInfo {
+            id: BackendId(0),
+            protocol: Protocol::Irc,
+            name: "test".to_string(),
+        }
+    }
+
+    fn stored(event: ChatEvent) -> StoredMessage {
+        StoredMessage {
+            time: chrono::Local::now(),
+            event,
+            pending: false,
+            redacted: false,
+            reactions: Default::default(),
+        }
+    }
+
+    /// Renders a normalized event through the active theme's `message_text`
+    /// formatter and returns the raw Lua result.
+    fn render_message_text(lua: &Lua, event: ChatEvent) -> mlua::Value {
+        let message = stored(event);
+        let table =
+            to_lua_event(lua, &message, &backend(), &TargetId::from("#tirc")).expect("event table");
 
         call_formatter(lua, "message_text", (table, "me".to_string()))
             .expect("message_text formatter registered")
@@ -350,33 +390,67 @@ mod tests {
     }
 
     #[test]
-    fn theme_renders_common_messages_without_error() {
+    fn theme_renders_common_events_without_error() {
         let lua = setup_theme();
 
-        let lines = [
-            ":alice!~alice@example.com PRIVMSG #tirc :hello #other world\r\n",
-            ":alice!~alice@example.com PRIVMSG #tirc :\u{1}ACTION waves\u{1}\r\n",
-            ":alice!~alice@example.com JOIN #tirc\r\n",
-            ":alice!~alice@example.com PART #tirc\r\n",
-            ":irc.example.com NOTICE * :server notice\r\n",
-            ":op!~op@example.com MODE #tirc +o-v alice bob\r\n",
-            ":irc.example.com 001 me :Welcome to the network\r\n",
+        let events = [
+            ChatEvent::Message {
+                target: TargetId::from("#tirc"),
+                id: None,
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain("hello #other world"),
+                kind: MsgKind::Text,
+                echo_of: None,
+            },
+            ChatEvent::Message {
+                target: TargetId::from("#tirc"),
+                id: None,
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain("waves"),
+                kind: MsgKind::Action,
+                echo_of: None,
+            },
+            ChatEvent::Membership {
+                target: TargetId::from("#tirc"),
+                who: UserRef::new("alice"),
+                change: MembershipChange::Join,
+            },
+            ChatEvent::Membership {
+                target: TargetId::from("#tirc"),
+                who: UserRef::new("alice"),
+                change: MembershipChange::Part { reason: None },
+            },
+            ChatEvent::ServerInfo {
+                target: None,
+                code: Some("RPL_WELCOME".to_string()),
+                text: "Welcome to the network".to_string(),
+                raw: None,
+            },
         ];
 
-        for line in lines {
-            let value = render_message_text(&lua, line);
+        for event in events {
+            let value = render_message_text(&lua, event.clone());
             assert!(
                 matches!(value, mlua::Value::Table(_)),
-                "expected a table of spans for {line:?}, got {value:?}"
+                "expected a table of spans for {event:?}, got {value:?}"
             );
         }
     }
 
     #[test]
-    fn theme_suppresses_names_replies() {
+    fn theme_suppresses_roster_seeding() {
         let lua = setup_theme();
 
-        let value = render_message_text(&lua, ":irc.example.com 366 me #tirc :End of /NAMES\r\n");
+        let value = render_message_text(
+            &lua,
+            ChatEvent::Membership {
+                target: TargetId::from("#tirc"),
+                who: UserRef::new("alice"),
+                change: MembershipChange::Present {
+                    role: crate::core::MemberRole::Member,
+                },
+            },
+        );
         assert!(matches!(value, mlua::Value::Nil));
     }
 }

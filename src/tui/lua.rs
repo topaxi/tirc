@@ -1,14 +1,42 @@
 use std::str::FromStr;
+use std::sync::Arc;
 
-use irc::client::data::User;
-use irc::proto::{Command, Message, Prefix};
 use mlua::LuaSerdeExt;
 use ratatui::style::Color;
+use tokio::sync::mpsc;
 
+use crate::backends::BackendInfo;
+use crate::core::{
+    ChatEvent, Command, MemberRole, MembershipChange, MessageBody, MsgKind, Protocol, TargetId,
+    TxnAllocator, UserRef,
+};
 use crate::lua::get_or_create_module;
+use crate::ui::{Member, StoredMessage};
+
+/// Marker field set on a style table's metatable so the renderer can recognize a
+/// styled span `{ value, style }` by identity instead of guessing from shape.
+pub const STYLE_MARKER: &str = "__tirc_style";
 
 fn get_tirc_theme_module(lua: &mlua::Lua) -> mlua::Table {
     get_or_create_module(lua, "tirc.tui.theme").expect("Unable to create tirc.tui.theme module")
+}
+
+fn parse_color(name: &str) -> mlua::Result<Color> {
+    Color::from_str(name).map_err(|_| mlua::Error::external(format!("invalid color: {name}")))
+}
+
+/// Tags a serialized style table with the [`STYLE_MARKER`] metatable so the
+/// renderer can distinguish a real style from any two-element table.
+fn tag_style(lua: &mlua::Lua, style: ratatui::style::Style) -> mlua::Result<mlua::Value> {
+    let value = lua.to_value(&style)?;
+
+    if let mlua::Value::Table(table) = &value {
+        let metatable = lua.create_table()?;
+        metatable.set(STYLE_MARKER, true)?;
+        table.set_metatable(Some(metatable))?;
+    }
+
+    Ok(value)
 }
 
 pub fn create_tirc_theme_lua_module(lua: &mlua::Lua) -> mlua::Result<mlua::Table> {
@@ -21,7 +49,7 @@ pub fn create_tirc_theme_lua_module(lua: &mlua::Lua) -> mlua::Result<mlua::Table
 
     module.set(
         "color_from_str",
-        lua.create_function(|lua, str: String| lua.to_value(&Color::from_str(&str).unwrap()))?,
+        lua.create_function(|lua, str: String| lua.to_value(&parse_color(&str)?))?,
     )?;
 
     module.set(
@@ -30,220 +58,337 @@ pub fn create_tirc_theme_lua_module(lua: &mlua::Lua) -> mlua::Result<mlua::Table
             let mut style = ratatui::style::Style::default();
 
             if let Ok(Some(color)) = tbl.get::<Option<String>>("fg") {
-                style = style.fg(Color::from_str(&color).unwrap());
+                style = style.fg(parse_color(&color)?);
             }
 
             if let Ok(Some(color)) = tbl.get::<Option<String>>("bg") {
-                style = style.bg(Color::from_str(&color).unwrap());
+                style = style.bg(parse_color(&color)?);
             }
 
-            lua.to_value(&style)
+            tag_style(lua, style)
         })?,
     )?;
 
     Ok(module)
 }
 
-/// Splits the raw parameter portion of an IRC command into individual
-/// parameters, treating a leading `:` as the start of a single trailing
-/// parameter that runs to the end of the line.
-fn split_params(rest: &str) -> Vec<String> {
-    let mut params = Vec::new();
-    let mut remaining = rest;
-
-    loop {
-        remaining = remaining.trim_start_matches(' ');
-
-        if remaining.is_empty() {
-            break;
-        }
-
-        if let Some(trailing) = remaining.strip_prefix(':') {
-            params.push(trailing.to_string());
-            break;
-        }
-
-        match remaining.find(' ') {
-            Some(idx) => {
-                params.push(remaining[..idx].to_string());
-                remaining = &remaining[idx + 1..];
-            }
-            None => {
-                params.push(remaining.to_string());
-                break;
-            }
-        }
+fn protocol_str(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::Irc => "irc",
+        Protocol::Matrix => "matrix",
     }
-
-    params
 }
 
-/// Builds a Lua representation of an IRC message.
+fn role_str(role: MemberRole) -> &'static str {
+    match role {
+        MemberRole::Owner => "owner",
+        MemberRole::Admin => "admin",
+        MemberRole::Op => "op",
+        MemberRole::HalfOp => "halfop",
+        MemberRole::Voice => "voice",
+        MemberRole::Member => "member",
+    }
+}
+
+fn kind_str(kind: MsgKind) -> &'static str {
+    match kind {
+        MsgKind::Text => "text",
+        MsgKind::Action => "action",
+        MsgKind::Notice => "notice",
+    }
+}
+
+fn user_table(lua: &mlua::Lua, user: &UserRef) -> mlua::Result<mlua::Table> {
+    let table = lua.create_table()?;
+    table.set("id", user.id.as_str())?;
+    table.set("display", user.display.clone())?;
+    table.set("name", user.name())?;
+    Ok(table)
+}
+
+fn body_table(lua: &mlua::Lua, body: &MessageBody) -> mlua::Result<mlua::Table> {
+    let table = lua.create_table()?;
+    table.set("text", body.text.as_str())?;
+    if let Some(crate::core::Formatted::Html(html)) = &body.formatted {
+        table.set("html", html.as_str())?;
+    }
+    Ok(table)
+}
+
+/// Builds the Lua representation of a stored message that themes format.
 ///
-/// The resulting table has a flat, plugin-friendly shape:
-///
-/// ```lua
-/// {
-///   command = 'PRIVMSG',          -- verb, or symbolic name for numeric replies
-///   params = { '#channel', 'hi' },
-///   nick = 'alice',               -- nil unless the prefix carries a nickname
-///   user = '~alice',
-///   host = 'example.com',
-///   server = 'irc.example.com',   -- set instead of nick/user/host for server prefixes
-///   tags = { { 'time', '...' } },
-/// }
-/// ```
-///
-/// `tostring(message)` yields the raw IRC line.
-pub fn to_lua_message(lua: &mlua::Lua, message: &Message) -> mlua::Result<mlua::Table> {
+/// The table is tagged with `type` (`message`, `membership`, `topic`, `rename`,
+/// `quit`, `server_info`, ...) and carries `backend`, `target`, `pending`, and
+/// `redacted` plus the per-variant payload. See `lua/tirc/init.lua` for the full
+/// shape documented as `@class TircEvent`.
+pub fn to_lua_event(
+    lua: &mlua::Lua,
+    message: &StoredMessage,
+    backend: &BackendInfo,
+    target: &TargetId,
+) -> mlua::Result<mlua::Table> {
     let table = lua.create_table()?;
 
-    let raw_command = String::from(&message.command);
-    let (verb, rest) = match raw_command.split_once(' ') {
-        Some((verb, rest)) => (verb.to_string(), rest),
-        None => (raw_command.clone(), ""),
-    };
+    let backend_table = lua.create_table()?;
+    backend_table.set("id", backend.id.0)?;
+    backend_table.set("protocol", protocol_str(backend.protocol))?;
+    backend_table.set("name", backend.name.as_str())?;
+    table.set("backend", backend_table)?;
 
-    // Numeric replies expose their symbolic name (e.g. `RPL_WELCOME`) instead of
-    // the bare numeric code, which makes themes far easier to read.
-    let command = match &message.command {
-        Command::Response(response, _) => format!("{:?}", response),
-        _ => verb,
-    };
+    table.set("target", target.as_str())?;
+    table.set("pending", message.pending)?;
+    table.set("redacted", message.redacted)?;
 
-    table.set("command", command)?;
-
-    let params = lua.create_table()?;
-    for (index, param) in split_params(rest).into_iter().enumerate() {
-        params.set(index + 1, param)?;
-    }
-    table.set("params", params)?;
-
-    match &message.prefix {
-        Some(Prefix::Nickname(nick, user, host)) => {
-            table.set("nick", nick.as_str())?;
-            table.set("user", user.as_str())?;
-            table.set("host", host.as_str())?;
+    if !message.reactions.is_empty() {
+        let reactions = lua.create_table()?;
+        for (key, count) in &message.reactions {
+            reactions.set(key.as_str(), *count)?;
         }
-        Some(Prefix::ServerName(server)) => {
-            table.set("server", server.as_str())?;
-        }
-        None => {}
+        table.set("reactions", reactions)?;
     }
 
-    let tags = lua.create_table()?;
-    if let Some(message_tags) = &message.tags {
-        for (index, tag) in message_tags.iter().enumerate() {
-            let lua_tag = lua.create_table()?;
-            lua_tag.set(1, tag.0.as_str())?;
-            lua_tag.set(2, tag.1.clone())?;
-            tags.set(index + 1, lua_tag)?;
+    match &message.event {
+        ChatEvent::Message {
+            sender, body, kind, ..
+        } => {
+            table.set("type", "message")?;
+            table.set("sender", user_table(lua, sender)?)?;
+            table.set("body", body_table(lua, body)?)?;
+            table.set("kind", kind_str(*kind))?;
+        }
+        ChatEvent::Edit { body, .. } => {
+            table.set("type", "edit")?;
+            table.set("body", body_table(lua, body)?)?;
+        }
+        ChatEvent::Redaction { by, .. } => {
+            table.set("type", "redaction")?;
+            if let Some(by) = by {
+                table.set("by", user_table(lua, by)?)?;
+            }
+        }
+        ChatEvent::Reaction {
+            sender, key, add, ..
+        } => {
+            table.set("type", "reaction")?;
+            table.set("sender", user_table(lua, sender)?)?;
+            table.set("key", key.as_str())?;
+            table.set("add", *add)?;
+        }
+        ChatEvent::Membership { who, change, .. } => {
+            table.set("type", "membership")?;
+            table.set("who", user_table(lua, who)?)?;
+            set_membership_change(lua, &table, change)?;
+        }
+        ChatEvent::Topic { who, topic, .. } => {
+            table.set("type", "topic")?;
+            table.set("topic", topic.as_str())?;
+            if let Some(who) = who {
+                table.set("who", user_table(lua, who)?)?;
+            }
+        }
+        ChatEvent::Rename { who, new_display } => {
+            table.set("type", "rename")?;
+            table.set("who", user_table(lua, who)?)?;
+            table.set("new", new_display.as_str())?;
+        }
+        ChatEvent::Quit { who, reason } => {
+            table.set("type", "quit")?;
+            table.set("who", user_table(lua, who)?)?;
+            table.set("reason", reason.clone())?;
+        }
+        ChatEvent::ServerInfo {
+            code, text, raw, ..
+        } => {
+            table.set("type", "server_info")?;
+            table.set("code", code.clone())?;
+            table.set("text", text.as_str())?;
+            table.set("raw", raw.clone())?;
         }
     }
-    table.set("tags", tags)?;
-
-    table.set("raw", message.to_string().trim_end().to_string())?;
-
-    let metatable = lua.create_table()?;
-    metatable.set(
-        "__tostring",
-        lua.create_function(|_, table: mlua::Table| table.get::<String>("raw"))?,
-    )?;
-    table.set_metatable(Some(metatable))?;
 
     Ok(table)
 }
 
-/// Builds a Lua representation of a channel user.
-///
-/// ```lua
-/// {
-///   nickname = 'alice',
-///   access_levels = { 'Voice' },
-///   highest_access_level = 'Voice',
-/// }
-/// ```
-pub fn to_lua_user(lua: &mlua::Lua, user: &User) -> mlua::Result<mlua::Table> {
+fn set_membership_change(
+    lua: &mlua::Lua,
+    table: &mlua::Table,
+    change: &MembershipChange,
+) -> mlua::Result<()> {
+    match change {
+        MembershipChange::Present { role } => {
+            table.set("change", "present")?;
+            table.set("role", role_str(*role))?;
+        }
+        MembershipChange::Join => table.set("change", "join")?,
+        MembershipChange::Part { reason } => {
+            table.set("change", "part")?;
+            table.set("reason", reason.clone())?;
+        }
+        MembershipChange::Kick { by, reason } => {
+            table.set("change", "kick")?;
+            table.set("by", user_table(lua, by)?)?;
+            table.set("reason", reason.clone())?;
+        }
+        MembershipChange::Invite { by } => {
+            table.set("change", "invite")?;
+            table.set("by", user_table(lua, by)?)?;
+        }
+        MembershipChange::SetRole { role } => {
+            table.set("change", "set_role")?;
+            table.set("role", role_str(*role))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Builds a backend-bound sender table exposing `send_message`/`send_notice` to
+/// Lua `event` handlers. Sends enqueue protocol-agnostic [`Command`]s on the
+/// backend's command channel; the enqueue is synchronous and non-blocking, so it
+/// is safe from a Lua callback.
+pub fn create_lua_sender(
+    lua: &mlua::Lua,
+    sender: mpsc::UnboundedSender<Command>,
+    txn: Arc<TxnAllocator>,
+) -> mlua::Result<mlua::Table> {
     let table = lua.create_table()?;
 
-    table.set("nickname", user.get_nickname())?;
+    let send = {
+        let sender = sender.clone();
+        let txn = Arc::clone(&txn);
+        move |kind: MsgKind, target: String, message: String| {
+            let _ = sender.send(Command::SendMessage {
+                target: TargetId::from(target),
+                body: message,
+                kind,
+                txn: txn.next(),
+            });
+        }
+    };
 
-    let access_levels = lua.create_table()?;
-    for (index, access_level) in user.access_levels().into_iter().enumerate() {
-        access_levels.set(index + 1, format!("{:?}", access_level))?;
-    }
-    table.set("access_levels", access_levels)?;
-
+    let message_send = send.clone();
     table.set(
-        "highest_access_level",
-        format!("{:?}", user.highest_access_level()),
+        "send_message",
+        lua.create_function(move |_, (target, message): (String, String)| {
+            message_send(MsgKind::Text, target, message);
+            Ok(())
+        })?,
     )?;
 
+    table.set(
+        "send_notice",
+        lua.create_function(move |_, (target, message): (String, String)| {
+            send(MsgKind::Notice, target, message);
+            Ok(())
+        })?,
+    )?;
+
+    Ok(table)
+}
+
+/// Builds the Lua representation of a buffer member for the `user` formatter.
+///
+/// ```lua
+/// { id = 'alice', display = nil, name = 'alice', role = 'op' }
+/// ```
+pub fn to_lua_user(lua: &mlua::Lua, member: &Member) -> mlua::Result<mlua::Table> {
+    let table = user_table(lua, &member.user)?;
+    table.set("role", role_str(member.role))?;
+    // Back-compat alias used by older themes.
+    table.set("nickname", member.user.name())?;
     Ok(table)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{BackendId, EventId};
 
-    fn lua_message(raw: &str) -> (mlua::Lua, mlua::Table) {
+    fn backend() -> BackendInfo {
+        BackendInfo {
+            id: BackendId(0),
+            protocol: Protocol::Irc,
+            name: "test".to_string(),
+        }
+    }
+
+    fn stored(event: ChatEvent) -> StoredMessage {
+        StoredMessage {
+            time: chrono::Local::now(),
+            event,
+            pending: false,
+            redacted: false,
+            reactions: Default::default(),
+        }
+    }
+
+    #[test]
+    fn message_event_has_flat_shape() {
         let lua = mlua::Lua::new();
-        let message: Message = raw.parse().expect("valid irc message");
-        let table = to_lua_message(&lua, &message).expect("message table");
-        (lua, table)
+        let message = stored(ChatEvent::Message {
+            target: TargetId::from("#tirc"),
+            id: None,
+            sender: UserRef::new("alice"),
+            body: MessageBody::plain("hello"),
+            kind: MsgKind::Text,
+            echo_of: None,
+        });
+
+        let table = to_lua_event(&lua, &message, &backend(), &TargetId::from("#tirc")).unwrap();
+        assert_eq!(table.get::<String>("type").unwrap(), "message");
+        assert_eq!(table.get::<String>("kind").unwrap(), "text");
+
+        let sender: mlua::Table = table.get("sender").unwrap();
+        assert_eq!(sender.get::<String>("name").unwrap(), "alice");
+
+        let body: mlua::Table = table.get("body").unwrap();
+        assert_eq!(body.get::<String>("text").unwrap(), "hello");
+
+        let backend_table: mlua::Table = table.get("backend").unwrap();
+        assert_eq!(backend_table.get::<String>("protocol").unwrap(), "irc");
     }
 
     #[test]
-    fn privmsg_has_flat_shape() {
-        let (_lua, table) = lua_message(":alice!~alice@example.com PRIVMSG #tirc :hello world\r\n");
+    fn server_info_keeps_code() {
+        let lua = mlua::Lua::new();
+        let message = stored(ChatEvent::ServerInfo {
+            target: None,
+            code: Some("RPL_WELCOME".to_string()),
+            text: "Welcome".to_string(),
+            raw: None,
+        });
 
-        assert_eq!(table.get::<String>("command").unwrap(), "PRIVMSG");
-        assert_eq!(table.get::<String>("nick").unwrap(), "alice");
-        assert_eq!(table.get::<String>("user").unwrap(), "~alice");
-        assert_eq!(table.get::<String>("host").unwrap(), "example.com");
-
-        let params: mlua::Table = table.get("params").unwrap();
-        assert_eq!(params.get::<String>(1).unwrap(), "#tirc");
-        assert_eq!(params.get::<String>(2).unwrap(), "hello world");
+        let table = to_lua_event(&lua, &message, &backend(), &TargetId::status()).unwrap();
+        assert_eq!(table.get::<String>("type").unwrap(), "server_info");
+        assert_eq!(table.get::<String>("code").unwrap(), "RPL_WELCOME");
     }
 
     #[test]
-    fn server_prefix_sets_server() {
-        let (_lua, table) = lua_message(":irc.example.com NOTICE * :hi there\r\n");
+    fn edit_targets_event_by_id() {
+        let lua = mlua::Lua::new();
+        let message = stored(ChatEvent::Edit {
+            target: TargetId::from("!room:m"),
+            id: EventId("$1".to_string()),
+            body: MessageBody::plain("edited"),
+        });
 
-        assert_eq!(table.get::<String>("command").unwrap(), "NOTICE");
-        assert_eq!(table.get::<String>("server").unwrap(), "irc.example.com");
-        assert!(table.get::<Option<String>>("nick").unwrap().is_none());
+        let table = to_lua_event(&lua, &message, &backend(), &TargetId::from("!room:m")).unwrap();
+        assert_eq!(table.get::<String>("type").unwrap(), "edit");
+        let body: mlua::Table = table.get("body").unwrap();
+        assert_eq!(body.get::<String>("text").unwrap(), "edited");
     }
 
     #[test]
-    fn numeric_reply_uses_symbolic_name() {
-        let (_lua, table) = lua_message(":irc.example.com 001 alice :Welcome\r\n");
+    fn style_is_tagged_with_marker() {
+        let lua = mlua::Lua::new();
+        create_tirc_theme_lua_module(&lua).unwrap();
 
-        assert_eq!(table.get::<String>("command").unwrap(), "RPL_WELCOME");
+        let style: mlua::Table = lua
+            .load("require('tirc.tui.theme').style { fg = 'blue' }")
+            .eval()
+            .unwrap();
 
-        let params: mlua::Table = table.get("params").unwrap();
-        assert_eq!(params.get::<String>(1).unwrap(), "alice");
-        assert_eq!(params.get::<String>(2).unwrap(), "Welcome");
-    }
-
-    #[test]
-    fn tags_are_name_value_pairs() {
-        let (_lua, table) =
-            lua_message("@time=2026-06-26T00:00:00Z :alice PRIVMSG #tirc :hi\r\n");
-
-        let tags: mlua::Table = table.get("tags").unwrap();
-        let first: mlua::Table = tags.get(1).unwrap();
-        assert_eq!(first.get::<String>(1).unwrap(), "time");
-        assert_eq!(first.get::<String>(2).unwrap(), "2026-06-26T00:00:00Z");
-    }
-
-    #[test]
-    fn tostring_yields_raw_line() {
-        let (lua, table) = lua_message(":alice PRIVMSG #tirc :hello world\r\n");
-
-        let tostring: mlua::Function = lua.globals().get("tostring").unwrap();
-        let rendered: String = tostring.call(table).unwrap();
-        assert_eq!(rendered, ":alice PRIVMSG #tirc :hello world");
+        let metatable = style.metatable().expect("style has metatable");
+        assert!(metatable.get::<bool>(STYLE_MARKER).unwrap());
     }
 }

@@ -1,258 +1,329 @@
-use std::{
-    fmt,
-    rc::Rc,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use std::collections::HashMap;
+use std::sync::Arc;
 
-use crossterm::event::{Event as CrosstermEvent, KeyCode};
-use irc::{
-    client::prelude::Client,
-    proto::{message::Tag, Command, Message},
-};
+use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent};
 use mlua::Lua;
 
-use crate::{config::emit_event, tui::Tui};
+use crate::backends::BackendHandle;
+use crate::config::{emit_event, EventName};
+use crate::core::{
+    BackendEvent, BackendId, BackendMessage, ChatEvent, Command, MsgKind, TargetId, TxnAllocator,
+};
+use crate::tui::lua::{create_lua_sender, to_lua_event};
+use crate::tui::Tui;
 
-use super::{state::ChatBuffer, Mode, State, TircMessage};
+use super::state::StoredMessage;
+use super::{Mode, State, ViewState};
 
-static COUNTER: AtomicUsize = AtomicUsize::new(1);
-fn get_id() -> usize {
-    COUNTER.fetch_add(1, Ordering::Relaxed)
-}
-
+/// Events the main loop feeds to the input handler.
 #[derive(Debug)]
-pub enum Event<I> {
-    Input(I),
-    Message(Box<Message>),
+pub enum Event {
+    Input(KeyEvent),
+    Backend(BackendMessage),
     Tick,
 }
 
 pub struct InputHandler<'lua> {
     lua: &'lua Lua,
-    irc: Client,
     ui: Tui,
+    backends: Vec<BackendHandle>,
+    txn: Arc<TxnAllocator>,
+    /// Lazily-built per-backend Lua sender tables passed to `event` handlers,
+    /// cached so we do not rebuild closures on every event.
+    senders: HashMap<BackendId, mlua::RegistryKey>,
 }
 
 impl<'lua> InputHandler<'lua> {
-    pub fn new(lua: &'lua Lua, irc: Client, ui: Tui) -> Self {
-        Self { lua, irc, ui }
+    pub fn new(
+        lua: &'lua Lua,
+        ui: Tui,
+        backends: Vec<BackendHandle>,
+        txn: Arc<TxnAllocator>,
+    ) -> Self {
+        Self {
+            lua,
+            ui,
+            backends,
+            txn,
+            senders: HashMap::new(),
+        }
     }
 
     pub fn ui(&self) -> &Tui {
         &self.ui
     }
 
-    pub fn sync_state(&mut self, state: &mut State) -> Result<(), anyhow::Error> {
-        state.nickname = self.irc.current_nickname().to_string();
+    pub fn render_ui(&mut self, state: &State, view: &ViewState) -> Result<(), anyhow::Error> {
+        self.ui.render(self.lua, state, view)
+    }
 
-        let channels = self.irc.list_channels().unwrap_or_default();
+    fn backend(&self, id: BackendId) -> Option<&BackendHandle> {
+        self.backends.iter().find(|b| b.id() == id)
+    }
 
-        let buffers = &mut state.buffers;
-
-        for channel in channels {
-            if buffers.get(&channel).is_none() {
-                buffers.insert(channel, ChatBuffer::default());
-            }
+    /// Enqueues an outgoing message; the backend echoes it back as an optimistic
+    /// local copy, so we do not touch state here.
+    fn send(&self, id: BackendId, target: TargetId, body: String, kind: MsgKind) {
+        if let Some(backend) = self.backend(id) {
+            let _ = backend.send(Command::SendMessage {
+                target,
+                body,
+                kind,
+                txn: self.txn.next(),
+            });
         }
-
-        if state.current_buffer == State::get_default_buffer_name() {
-            state.users_in_current_buffer = Rc::new([]);
-        } else {
-            state.users_in_current_buffer = self
-                .irc
-                .list_users(&state.current_buffer)
-                .unwrap_or_default()
-                .into();
-        }
-
-        Ok(())
     }
 
-    pub fn render_ui(&mut self, state: &State) -> Result<(), anyhow::Error> {
-        self.ui.render(&self.irc, self.lua, state)?;
+    /// Returns `false` when the command requests application exit (`:q`).
+    fn handle_command(
+        &mut self,
+        state: &mut State,
+        view: &mut ViewState,
+    ) -> Result<bool, anyhow::Error> {
+        view.mode = Mode::Normal;
 
-        Ok(())
-    }
-
-    fn send_privmsg<S1, S2>(&self, target: S1, message: S2) -> anyhow::Result<Message>
-    where
-        S1: fmt::Display,
-        S2: fmt::Display,
-    {
-        let mut message: Message = Command::PRIVMSG(target.to_string(), message.to_string()).into();
-
-        message.tags = Some(vec![Tag("label".to_string(), Some(get_id().to_string()))]);
-
-        self.irc.send(message.clone())?;
-
-        Ok(message)
-    }
-
-    fn handle_command(&mut self, state: &mut State) -> Result<(), anyhow::Error> {
-        state.mode = Mode::Normal;
+        let focused = view.focused.clone();
+        let backend = focused.as_ref().map(|b| b.backend);
+        let target = focused.as_ref().map(|b| b.target.clone());
 
         let command: Box<[&str]> = self.ui.input().value().splitn(2, ' ').collect();
 
         match *command {
-            ["m" | "msg", target_and_message] => {
-                match *target_and_message.splitn(2, ' ').collect::<Box<[&str]>>() {
-                    [target, message] => {
-                        state.create_buffer_if_not_exists(target);
-                        state.set_current_buffer(target);
-
-                        if !message.trim().is_empty() {
-                            state.push_message(TircMessage::from_message(
-                                self.send_privmsg(target, message)?.into(),
-                                self.lua,
-                            )?)
+            ["q" | "quit"] => {
+                for handle in &self.backends {
+                    let _ = handle.send(Command::Quit { reason: None });
+                }
+                return Ok(false);
+            }
+            ["m" | "msg", rest] => {
+                if let Some(backend) = backend {
+                    match *rest.splitn(2, ' ').collect::<Box<[&str]>>() {
+                        [to, message] => {
+                            let buffer = self.focus_buffer(state, view, backend, to);
+                            if !message.trim().is_empty() {
+                                self.send(backend, buffer, message.to_string(), MsgKind::Text);
+                            }
                         }
+                        [to] => {
+                            self.focus_buffer(state, view, backend, to);
+                        }
+                        _ => {}
                     }
-                    [target] => {
-                        state.create_buffer_if_not_exists(target);
-                        state.set_current_buffer(target);
-                    }
-                    _ => {}
                 }
             }
             ["me", message] => {
-                let message = format!("\x01ACTION {}\x01", message);
-                state.push_message(TircMessage::from_message(
-                    self.send_privmsg(&state.current_buffer, message)?.into(),
-                    self.lua,
-                )?);
-            }
-            ["desc" | "describe", target_and_message] => {
-                if let [target, message] =
-                    *target_and_message.splitn(2, ' ').collect::<Box<[&str]>>()
-                {
-                    let message = format!("\x01ACTION {}\x01", message);
-                    state.create_buffer_if_not_exists(target);
-                    state.push_message(TircMessage::from_message(
-                        self.send_privmsg(target, message)?.into(),
-                        self.lua,
-                    )?);
+                if let (Some(backend), Some(target)) = (backend, target) {
+                    self.send(backend, target, message.to_string(), MsgKind::Action);
                 }
             }
-            ["notice", target_and_message] => {
-                if let [target, message] =
-                    *target_and_message.splitn(2, ' ').collect::<Box<[&str]>>()
-                {
-                    state.create_buffer_if_not_exists(target);
-                    self.irc.send_notice(target, message)?;
+            ["desc" | "describe", rest] => {
+                if let Some(backend) = backend {
+                    if let [to, message] = *rest.splitn(2, ' ').collect::<Box<[&str]>>() {
+                        let buffer = self.focus_buffer(state, view, backend, to);
+                        self.send(backend, buffer, message.to_string(), MsgKind::Action);
+                    }
                 }
             }
-            ["q" | "quit"] => {
-                self.irc.send_quit("tirc")?;
-                return Err(anyhow::Error::msg("quit"));
+            ["notice", rest] => {
+                if let Some(backend) = backend {
+                    if let [to, message] = *rest.splitn(2, ' ').collect::<Box<[&str]>>() {
+                        self.send(
+                            backend,
+                            TargetId::from(to),
+                            message.to_string(),
+                            MsgKind::Notice,
+                        );
+                    }
+                }
             }
-            ["j" | "join", channel] => {
-                self.irc.send_join(channel)?;
-            }
-            ["p" | "part", channel] => {
-                self.irc.send_part(channel)?;
-            }
-            ["n" | "nick", nickname] => {
-                // TODO: Update nickname in irc client, as it doesn't seem to update
-                self.irc.send(Command::NICK(nickname.to_owned()))?;
-            }
-            ["whois", nickname] => {
-                self.irc.send(Command::WHOIS(None, nickname.to_owned()))?;
-            }
-            ["list"] => {
-                self.irc.send(Command::LIST(None, None))?;
-            }
+            ["j" | "join", channel] => self.send_to(
+                backend,
+                Command::Join {
+                    target: TargetId::from(channel),
+                },
+            ),
+            ["p" | "part", channel] => self.send_to(
+                backend,
+                Command::Part {
+                    target: TargetId::from(channel),
+                    reason: None,
+                },
+            ),
+            ["n" | "nick", nickname] => self.send_to(
+                backend,
+                Command::SetNick {
+                    nick: nickname.to_string(),
+                },
+            ),
+            ["whois", nickname] => self.send_to(
+                backend,
+                Command::Whois {
+                    user: nickname.to_string(),
+                },
+            ),
+            ["list"] => self.send_to(backend, Command::ListChannels),
             _ => {}
         }
 
-        Ok(())
+        Ok(true)
+    }
+
+    /// Enqueues a command to a specific backend, if one is focused.
+    fn send_to(&self, backend: Option<BackendId>, command: Command) {
+        if let Some(handle) = backend.and_then(|id| self.backend(id)) {
+            let _ = handle.send(command);
+        }
+    }
+
+    /// Ensures a buffer exists for `(backend, target)` and focuses it.
+    fn focus_buffer(
+        &self,
+        state: &mut State,
+        view: &mut ViewState,
+        backend: BackendId,
+        target: &str,
+    ) -> TargetId {
+        let target = TargetId::from(target);
+        let buffer = crate::core::BufferId::new(backend, target.clone());
+        state.buffers.entry(buffer.clone()).or_default();
+        view.focus(buffer);
+        target
     }
 
     fn key_code_is_digit(key_code: KeyCode) -> bool {
-        match key_code {
-            KeyCode::Char(char) => char.is_ascii_digit(),
-            _ => false,
-        }
+        matches!(key_code, KeyCode::Char(char) if char.is_ascii_digit())
     }
 
     fn get_key_code_as_digit(key_code: KeyCode) -> u8 {
         match key_code {
-            KeyCode::Char(char) => char.to_digit(10).unwrap() as u8,
+            KeyCode::Char(char) => char.to_digit(10).unwrap_or(0) as u8,
             _ => 0,
         }
     }
 
+    /// Returns `false` to request application exit.
     pub fn handle_event(
         &mut self,
         state: &mut State,
-        event: Event<crossterm::event::KeyEvent>,
-    ) -> Result<(), anyhow::Error> {
-        match (state.mode, event) {
-            (Mode::Normal, Event::Input(event)) if event.code == KeyCode::Tab => {
-                state.next_buffer();
+        view: &mut ViewState,
+        event: Event,
+    ) -> Result<bool, anyhow::Error> {
+        match event {
+            Event::Input(key) => self.handle_key(state, view, key),
+            Event::Backend(message) => {
+                self.handle_backend(state, message);
+                Ok(true)
             }
-            (Mode::Normal, Event::Input(event)) if event.code == KeyCode::BackTab => {
-                state.previous_buffer();
+            Event::Tick => Ok(true),
+        }
+    }
+
+    fn handle_key(
+        &mut self,
+        state: &mut State,
+        view: &mut ViewState,
+        event: KeyEvent,
+    ) -> Result<bool, anyhow::Error> {
+        match (view.mode, event.code) {
+            (Mode::Normal, KeyCode::Tab) => view.next_buffer(state),
+            (Mode::Normal, KeyCode::BackTab) => view.previous_buffer(state),
+            (Mode::Normal, code) if Self::key_code_is_digit(code) => {
+                let index = Self::get_key_code_as_digit(code) as usize;
+                view.focus_buffer_index(state, index);
             }
-            (Mode::Normal, Event::Input(event)) if InputHandler::key_code_is_digit(event.code) => {
-                let index = InputHandler::get_key_code_as_digit(event.code) as usize;
-
-                if index < state.buffers.len() {
-                    state.set_current_buffer_index(index);
-                }
+            (Mode::Normal, KeyCode::Char('i')) => view.mode = Mode::Insert,
+            (Mode::Normal, KeyCode::Char(':')) => view.mode = Mode::Command,
+            (Mode::Command | Mode::Insert, KeyCode::Esc) => {
+                view.mode = Mode::Normal;
+                self.ui.reset_input();
             }
-            (Mode::Normal, Event::Input(event)) => match event.code {
-                KeyCode::Char('i') => {
-                    state.mode = Mode::Insert;
-                }
-                KeyCode::Char(':') => {
-                    state.mode = Mode::Command;
-                }
-                _ => {}
-            },
-            (Mode::Command | Mode::Insert, Event::Input(event)) => match event.code {
-                KeyCode::Esc => {
-                    state.mode = Mode::Normal;
-
-                    self.ui.reset_input();
-                }
-                KeyCode::Enter => {
-                    match state.mode {
-                        Mode::Command => {
-                            self.handle_command(state)?;
-                        }
-                        Mode::Insert => {
-                            let message = self.ui.input().value();
-
-                            if !message.trim().is_empty() {
-                                let current_buffer = &state.current_buffer;
-                                let message = self.send_privmsg(current_buffer, message)?;
-                                let tirc_message =
-                                    TircMessage::from_message(message.into(), self.lua)?;
-
-                                state.push_message(tirc_message);
-                            }
-                        }
-                        _ => {}
+            (Mode::Command, KeyCode::Enter) => {
+                let proceed = self.handle_command(state, view)?;
+                self.ui.reset_input();
+                return Ok(proceed);
+            }
+            (Mode::Insert, KeyCode::Enter) => {
+                let message = self.ui.input().value().to_string();
+                if !message.trim().is_empty() {
+                    if let Some(buffer) = view.focused.clone() {
+                        self.send(buffer.backend, buffer.target, message, MsgKind::Text);
                     }
-
-                    self.ui.reset_input();
                 }
-                _ => {
-                    self.ui.handle_event(&CrosstermEvent::Key(event));
-                }
-            },
-            (_, Event::Message(message)) => {
-                let tirc_message = TircMessage::from_message(message, self.lua)?;
-                let lua_message = tirc_message.get_lua_message().to_owned();
-                let lua_irc_sender: mlua::Table = self.lua.named_registry_value("sender")?;
-
-                emit_event(self.lua, "message", (lua_message, lua_irc_sender))?;
-
-                state.push_message(tirc_message);
+                self.ui.reset_input();
             }
-            (_, Event::Tick) => {}
+            (Mode::Command | Mode::Insert, _) => {
+                self.ui.handle_event(&CrosstermEvent::Key(event));
+            }
+            _ => {}
         }
 
-        Ok(())
+        Ok(true)
+    }
+
+    fn handle_backend(&mut self, state: &mut State, message: BackendMessage) {
+        let backend = message.backend;
+
+        match message.event {
+            BackendEvent::Ready { nickname } => state.set_nickname(backend, nickname),
+            BackendEvent::Disconnected { reason } => {
+                let text = match reason {
+                    Some(reason) => format!("Disconnected: {reason}"),
+                    None => "Disconnected".to_string(),
+                };
+                state.apply(backend, server_info(text));
+            }
+            BackendEvent::Error { message } => {
+                state.apply(backend, server_info(format!("Error: {message}")));
+            }
+            BackendEvent::Event(event) => {
+                self.emit_lua_event(state, backend, &event);
+                state.apply(backend, event);
+            }
+        }
+    }
+
+    /// Fires the Lua `event` callback for plugins, building the normalized event
+    /// table and a backend-bound sender. Best-effort: rendering does not depend
+    /// on it, so failures are ignored.
+    fn emit_lua_event(&mut self, state: &State, backend: BackendId, event: &ChatEvent) {
+        let Some(info) = state.backends.get(&backend).map(|b| b.info.clone()) else {
+            return;
+        };
+
+        let target = event.target().cloned().unwrap_or_else(TargetId::status);
+        let stored = StoredMessage::from_event(event.clone());
+
+        let Ok(table) = to_lua_event(self.lua, &stored, &info, &target) else {
+            return;
+        };
+
+        let Ok(sender) = self.sender_table(backend) else {
+            return;
+        };
+
+        let _ = emit_event(self.lua, EventName::Event, (table, sender));
+    }
+
+    fn sender_table(&mut self, backend: BackendId) -> mlua::Result<mlua::Table> {
+        if let Some(key) = self.senders.get(&backend) {
+            return self.lua.registry_value(key);
+        }
+
+        let handle = self
+            .backend(backend)
+            .ok_or_else(|| mlua::Error::external("unknown backend"))?;
+        let table = create_lua_sender(self.lua, handle.sender(), Arc::clone(&self.txn))?;
+        let key = self.lua.create_registry_value(&table)?;
+        self.senders.insert(backend, key);
+        Ok(table)
+    }
+}
+
+fn server_info(text: String) -> ChatEvent {
+    ChatEvent::ServerInfo {
+        target: None,
+        code: None,
+        text,
+        raw: None,
     }
 }

@@ -41,12 +41,12 @@ impl IrcBackend {
     }
 
     fn irc_config(&self) -> anyhow::Result<Config> {
-        let nickname = self
-            .config
-            .nickname
-            .first()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("IRC server '{}' has an empty nickname list", self.config.host))?;
+        let nickname = self.config.nickname.first().cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "IRC server '{}' has an empty nickname list",
+                self.config.host
+            )
+        })?;
 
         Ok(Config {
             nickname: Some(nickname),
@@ -229,10 +229,9 @@ fn target_for(message: &Message, nickname: &str, fallback: &str) -> TargetId {
     let buffer = match message.source_nickname() {
         // Incoming message from someone else: a channel message goes to the
         // channel, a direct message to the sender's nick.
-        Some(source) if source != nickname => message
-            .response_target()
-            .unwrap_or(source)
-            .to_owned(),
+        Some(source) if source != nickname => {
+            message.response_target().unwrap_or(source).to_owned()
+        }
         // Echo of our own message (server replied with our nick as source): file
         // it under the conversation partner.
         Some(_) => fallback.to_owned(),
@@ -388,7 +387,9 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
         }),
         IrcCommand::TOPIC(channel, topic) => Some(ChatEvent::Topic {
             target: TargetId(channel.clone()),
-            who: message.source_nickname().map(|n| UserRef::new(n.to_string())),
+            who: message
+                .source_nickname()
+                .map(|n| UserRef::new(n.to_string())),
             topic: topic.clone().unwrap_or_default(),
         }),
         IrcCommand::ChannelMODE(channel, _) => Some(ChatEvent::ServerInfo {
@@ -425,9 +426,10 @@ mod tests {
             ChatEvent::Message { target, .. }
             | ChatEvent::Membership { target, .. }
             | ChatEvent::Topic { target, .. } => target.as_str(),
-            ChatEvent::ServerInfo { target, .. } => {
-                target.as_ref().map(TargetId::as_str).unwrap_or(TargetId::STATUS)
-            }
+            ChatEvent::ServerInfo { target, .. } => target
+                .as_ref()
+                .map(TargetId::as_str)
+                .unwrap_or(TargetId::STATUS),
             _ => TargetId::STATUS,
         }
     }
@@ -436,7 +438,13 @@ mod tests {
     fn incoming_channel_message_targets_channel() {
         let event = translate_raw("me", ":alice!u@h PRIVMSG #tirc :hi").unwrap();
         assert_eq!(target_of(&event), "#tirc");
-        assert!(matches!(event, ChatEvent::Message { kind: MsgKind::Text, .. }));
+        assert!(matches!(
+            event,
+            ChatEvent::Message {
+                kind: MsgKind::Text,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -460,7 +468,8 @@ mod tests {
 
     #[test]
     fn action_is_detected() {
-        let event = translate_raw("me", ":alice!u@h PRIVMSG #tirc :\u{1}ACTION waves\u{1}").unwrap();
+        let event =
+            translate_raw("me", ":alice!u@h PRIVMSG #tirc :\u{1}ACTION waves\u{1}").unwrap();
         match event {
             ChatEvent::Message { kind, body, .. } => {
                 assert_eq!(kind, MsgKind::Action);
@@ -483,11 +492,17 @@ mod tests {
     fn join_and_part_become_membership() {
         assert!(matches!(
             translate_raw("me", ":alice!u@h JOIN #tirc").unwrap(),
-            ChatEvent::Membership { change: MembershipChange::Join, .. }
+            ChatEvent::Membership {
+                change: MembershipChange::Join,
+                ..
+            }
         ));
         assert!(matches!(
             translate_raw("me", ":alice!u@h PART #tirc :bye").unwrap(),
-            ChatEvent::Membership { change: MembershipChange::Part { .. }, .. }
+            ChatEvent::Membership {
+                change: MembershipChange::Part { .. },
+                ..
+            }
         ));
     }
 

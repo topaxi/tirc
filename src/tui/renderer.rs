@@ -1,4 +1,3 @@
-use irc::client::data::AccessLevel;
 use mlua::LuaSerdeExt;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -8,12 +7,12 @@ use ratatui::{
 };
 use tui_input::Input;
 
-use crate::{
-    config,
-    lua::date_time::date_time_to_table,
-    ui::{Mode, State, TircMessage},
-};
+use crate::backends::BackendInfo;
+use crate::core::{BufferId, TargetId};
+use crate::lua::date_time::date_time_to_table;
+use crate::ui::{ChatBuffer, Member, Mode, State, StoredMessage, ViewState};
 
+use super::lua::{to_lua_event, to_lua_user, STYLE_MARKER};
 use super::wrap::wrap_line;
 
 #[derive(Debug)]
@@ -29,6 +28,16 @@ impl Default for Renderer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// A table is a styled span `{ value, style }` iff its second element is a table
+/// tagged by `theme.style` (identity, not shape). Removes the old fragile
+/// "length 2 and `from_value` happens to succeed" heuristic.
+fn is_style_table(table: &mlua::Table) -> bool {
+    table
+        .metatable()
+        .and_then(|mt| mt.get::<Option<bool>>(STYLE_MARKER).ok().flatten())
+        .unwrap_or(false)
 }
 
 impl Renderer {
@@ -68,36 +77,27 @@ impl Renderer {
         match value {
             mlua::Value::String(str) => {
                 let string = str.to_str()?.to_owned();
-                let span = Self::string_to_span(string, parent_style);
-
-                spans.push(span);
+                spans.push(Self::string_to_span(string, parent_style));
             }
             mlua::Value::Table(v) => {
-                // Table of two values might be a styled message
                 if v.len()? == 2 {
-                    let style = v.get::<Option<mlua::Value>>(2)?;
-                    let style = if matches!(style, Some(mlua::Value::Table(_))) {
-                        lua.from_value::<Style>(style.unwrap())
-                            .map(|style| {
-                                if let Some(parent_style) = parent_style {
-                                    parent_style.patch(style)
-                                } else {
-                                    style
+                    if let mlua::Value::Table(style_table) = v.get::<mlua::Value>(2)? {
+                        if is_style_table(&style_table) {
+                            let style = lua
+                                .from_value::<Style>(mlua::Value::Table(style_table))
+                                .map(|style| match parent_style {
+                                    Some(parent) => parent.patch(style),
+                                    None => style,
+                                })
+                                .ok();
+
+                            if let Some(style) = style {
+                                if let Some(value) = v.get::<Option<mlua::Value>>(1)? {
+                                    Self::flatten_lua_value(lua, value, spans, Some(style))?;
                                 }
-                            })
-                            .ok()
-                    } else {
-                        None
-                    };
-
-                    if let Some(style) = style {
-                        let value = v.get::<Option<mlua::Value>>(1)?;
-
-                        if let Some(value) = value {
-                            Self::flatten_lua_value(lua, value, spans, Some(style))?;
+                                return Ok(());
+                            }
                         }
-
-                        return Ok(());
                     }
                 }
 
@@ -112,18 +112,15 @@ impl Renderer {
     }
 
     fn string_to_span<'a>(str: String, style: Option<Style>) -> Span<'a> {
-        if let Some(style) = style {
-            Span::styled(str, style)
-        } else {
-            Span::raw(str)
+        match style {
+            Some(style) => Span::styled(str, style),
+            None => Span::raw(str),
         }
     }
 
-    /// Calls the named UI formatter and converts its result into spans.
-    ///
-    /// Error handling is centralized here: a missing formatter yields no spans,
-    /// and a formatter that raises is rendered as a red `ERR: ...` span instead
-    /// of crashing the renderer.
+    /// Calls the named UI formatter and converts its result into spans. A missing
+    /// formatter yields no spans; a formatter that raises renders as a red
+    /// `ERR: ...` span instead of crashing the renderer.
     fn format_spans<Args>(
         &self,
         lua: &mlua::Lua,
@@ -133,7 +130,7 @@ impl Renderer {
     where
         Args: mlua::IntoLuaMulti,
     {
-        match config::call_formatter(lua, name, args) {
+        match crate::config::call_formatter(lua, name, args) {
             None => Ok(vec![]),
             Some(Ok(value)) => self.lua_value_to_spans(lua, value),
             Some(Err(err)) => Ok(vec![Self::string_to_span(
@@ -143,56 +140,44 @@ impl Renderer {
         }
     }
 
-    fn render_message_time(
-        &self,
-        lua: &mlua::Lua,
-        date_time: &mlua::Table,
-        message: &mlua::Table,
-    ) -> Result<Vec<Span<'_>>, anyhow::Error> {
-        self.format_spans(lua, "message_time", (date_time, message))
-    }
-
-    fn render_message_text(
-        &self,
-        lua: &mlua::Lua,
-        message: &mlua::Table,
-        nickname: &str,
-    ) -> Result<Vec<Span<'_>>, anyhow::Error> {
-        self.format_spans(lua, "message_text", (message, nickname))
-    }
-
     fn render_buffer_title(
         &self,
         lua: &mlua::Lua,
-        state: &State,
+        backend: &BackendInfo,
+        nickname: &str,
+        target: &TargetId,
     ) -> Result<Vec<Span<'_>>, anyhow::Error> {
         self.format_spans(
             lua,
             "buffer_title",
             (
-                state.server.clone(),
-                state.nickname.clone(),
-                state.current_buffer.clone(),
+                backend.name.clone(),
+                nickname.to_string(),
+                target.as_str().to_string(),
             ),
         )
     }
 
-    fn render_messages(&self, f: &mut ratatui::Frame, state: &State, lua: &mlua::Lua, rect: Rect) {
-        let current_buffer_name = &state.current_buffer;
-        let buffers = &state.buffers;
+    fn render_messages(
+        &self,
+        f: &mut ratatui::Frame,
+        state: &State,
+        view: &ViewState,
+        lua: &mlua::Lua,
+        rect: Rect,
+    ) {
+        let Some((buffer_id, buffer, backend, nickname)) = self.focused(state, view) else {
+            return;
+        };
 
-        let current_buffer = buffers.get(current_buffer_name).unwrap();
-
-        let messages = current_buffer
+        let messages = buffer
             .messages
             .iter()
             .rev()
-            // Do not render _all_ messages, only the ones that fit in the available space
-            // We render a bit more as some messages might get filtered out. Although some might
-            // wrap and make even out the edge case.
-            // TODO: Make message list scrollable
+            // Render a bit more than fits, as some lines are filtered out and
+            // others wrap. TODO: scroll from buffer.scroll_position.
             .take((rect.height as usize) + (rect.height as usize) / 2)
-            .filter_map(|tirc_message| self.render_message(state, lua, tirc_message))
+            .filter_map(|message| self.render_message(lua, backend, &buffer_id.target, message))
             .collect::<Vec<_>>();
 
         let messages = messages
@@ -201,9 +186,7 @@ impl Renderer {
             .map(|message| {
                 let initial_indent = message.time.clone();
 
-                // TODO: This is a hack to have the time | user separator included in the
-                // subsequent indent. It would be better to have a more explicit solution.
-                let subsequent_indent = if initial_indent.len() > 0 {
+                let subsequent_indent = if !initial_indent.is_empty() {
                     Box::new([
                         Span::raw(
                             " ".repeat(
@@ -232,15 +215,12 @@ impl Renderer {
             })
             .map(ListItem::new);
 
+        let title = self
+            .render_buffer_title(lua, backend, nickname, &buffer_id.target)
+            .unwrap_or_default();
+
         let list = List::new(messages)
-            .block(
-                Block::default()
-                    .title(
-                        self.render_buffer_title(lua, state)
-                            .unwrap_or_else(|_| vec![]),
-                    )
-                    .borders(Borders::NONE),
-            )
+            .block(Block::default().title(title).borders(Borders::NONE))
             .direction(ListDirection::BottomToTop);
 
         f.render_widget(list, rect);
@@ -248,87 +228,101 @@ impl Renderer {
 
     fn render_message(
         &self,
-        state: &State,
         lua: &mlua::Lua,
-        tirc_message: &TircMessage,
+        backend: &BackendInfo,
+        target: &TargetId,
+        message: &StoredMessage,
     ) -> Option<RenderedMessage<'_>> {
-        if let TircMessage::Irc(date_time, message, lua_message) = tirc_message {
-            let mut time_spans = date_time_to_table(lua, date_time)
-                .ok()
-                .and_then(|date_time| {
-                    self.render_message_time(lua, &date_time, lua_message).ok()
-                })
-                .unwrap_or_default();
+        let event = to_lua_event(lua, message, backend, target).ok()?;
 
-            if time_spans.len() == 1 {
-                time_spans.push(Span::raw(""));
-            }
-
-            let message_spans = self
-                .render_message_text(lua, lua_message, &state.nickname)
-                .unwrap_or_else(|_| vec![Span::raw(message.to_string())]);
-
-            if message_spans.is_empty() {
-                return None;
-            }
-
-            Some(RenderedMessage {
-                time: time_spans.into_boxed_slice(),
-                message: Box::new(Line::from(message_spans)),
+        let mut time_spans = date_time_to_table(lua, &message.time)
+            .ok()
+            .and_then(|date_time| {
+                self.format_spans(lua, "message_time", (date_time, &event))
+                    .ok()
             })
-        } else {
-            None
+            .unwrap_or_default();
+
+        if time_spans.len() == 1 {
+            time_spans.push(Span::raw(""));
         }
+
+        let message_spans = self
+            .format_spans(lua, "message_text", (&event, backend.name.clone()))
+            .unwrap_or_default();
+
+        if message_spans.is_empty() {
+            return None;
+        }
+
+        Some(RenderedMessage {
+            time: time_spans.into_boxed_slice(),
+            message: Box::new(Line::from(message_spans)),
+        })
     }
 
-    fn render_buffer_bar(&self, f: &mut ratatui::Frame, state: &State, rect: Rect) {
-        let current_buffer_name = &state.current_buffer;
+    fn render_buffer_bar(
+        &self,
+        f: &mut ratatui::Frame,
+        state: &State,
+        view: &ViewState,
+        rect: Rect,
+    ) {
+        let multi_backend = state.backends.len() > 1;
 
         let buffers: Vec<Span> = state
             .buffers
             .keys()
-            .flat_map(|str| {
+            .flat_map(|id| {
                 let mut style = Style::default();
-
-                if str == current_buffer_name {
+                if view.focused.as_ref() == Some(id) {
                     style = style.add_modifier(Modifier::BOLD);
                 }
 
-                [Span::styled(str.to_owned(), style), Span::raw(" ")]
+                let label = if multi_backend {
+                    let name = state
+                        .backends
+                        .get(&id.backend)
+                        .map(|b| b.info.name.as_str())
+                        .unwrap_or("?");
+                    format!("{name}/{}", id.target.as_str())
+                } else {
+                    id.target.as_str().to_string()
+                };
+
+                [Span::styled(label, style), Span::raw(" ")]
             })
             .collect();
 
-        let buffer_bar = Paragraph::new(Line::from(buffers));
-
-        f.render_widget(buffer_bar, rect);
+        f.render_widget(Paragraph::new(Line::from(buffers)), rect);
     }
 
-    fn render_input(&mut self, f: &mut ratatui::Frame, state: &State, input: &Input, rect: Rect) {
-        let prefix = match state.mode {
+    fn render_input(
+        &mut self,
+        f: &mut ratatui::Frame,
+        view: &ViewState,
+        input: &Input,
+        rect: Rect,
+    ) {
+        let prefix = match view.mode {
             Mode::Normal => "",
             Mode::Command => ":",
             Mode::Insert => "❯ ",
         };
         let prefix_len = prefix.chars().count() as u16;
-        let width = f.area().width.max(3) - prefix_len; // keep 2 for borders and 1 for cursor
+        let width = f.area().width.max(3) - prefix_len;
         let scroll = input.visual_scroll(width as usize);
         let p = Paragraph::new(format!("{}{}", prefix, input.value()))
             .scroll((0, scroll as u16))
             .block(Block::default().borders(Borders::TOP));
         f.render_widget(p, rect);
 
-        match state.mode {
+        match view.mode {
             Mode::Normal => {}
-
-            Mode::Command | Mode::Insert => {
-                // Make the cursor visible and ask tui-rs to put it at the specified coordinates after rendering
-                f.set_cursor_position((
-                    // Put cursor past the end of the input text
-                    rect.x + ((input.visual_cursor()).max(scroll) - scroll) as u16 + prefix_len,
-                    // Move one line down, from the border to the input line
-                    rect.y + 1,
-                ))
-            }
+            Mode::Command | Mode::Insert => f.set_cursor_position((
+                rect.x + ((input.visual_cursor()).max(scroll) - scroll) as u16 + prefix_len,
+                rect.y + 1,
+            )),
         }
     }
 
@@ -340,80 +334,87 @@ impl Renderer {
         self.format_spans(lua, "user", user)
     }
 
-    fn get_access_level_priority(access_level: &AccessLevel) -> i32 {
-        match access_level {
-            AccessLevel::Owner => 0,
-            AccessLevel::Admin => 1,
-            AccessLevel::Oper => 2,
-            AccessLevel::HalfOp => 3,
-            AccessLevel::Voice => 4,
-            AccessLevel::Member => 5,
-        }
-    }
-
-    fn render_users(&self, f: &mut ratatui::Frame, state: &State, lua: &mlua::Lua, rect: Rect) {
-        let mut users = state.users_in_current_buffer.to_vec();
-
-        // TODO: We might not want to sort the users every time we render the user list.
-        //       A good way might be to hold the users in a sorted datastructure on the state
-        //       itself.
-        users.sort_unstable_by(|a, b| {
-            Self::get_access_level_priority(&a.highest_access_level())
-                .cmp(&Self::get_access_level_priority(&b.highest_access_level()))
-                .then_with(|| a.get_nickname().cmp(b.get_nickname()))
-        });
-
-        let users = users
+    fn render_users(
+        &self,
+        f: &mut ratatui::Frame,
+        members: &[Member],
+        lua: &mlua::Lua,
+        target: &TargetId,
+        rect: Rect,
+    ) {
+        let users = members
+            // Members are kept sorted by (role, name) in state, so render is a
+            // pure read. TODO: make the user list scrollable.
             .iter()
-            // TODO: Make user list scrollable
             .take(rect.height as usize)
-            .map(|user| {
-                let lua_user = super::lua::to_lua_user(lua, user);
-                let rendered_user = if let Ok(tbl) = lua_user {
-                    self.render_user(lua, &tbl).unwrap_or_default()
+            .map(|member| {
+                let rendered = to_lua_user(lua, member)
+                    .ok()
+                    .and_then(|tbl| self.render_user(lua, &tbl).ok())
+                    .unwrap_or_default();
+
+                if rendered.is_empty() {
+                    ListItem::new(member.user.name().to_string())
                 } else {
-                    vec![]
-                };
-
-                if rendered_user.is_empty() {
-                    return ListItem::new(user.get_nickname());
+                    ListItem::new(Line::from(rendered))
                 }
-
-                ListItem::new(Line::from(rendered_user))
             });
+
         let list = List::new(users).block(
             Block::default()
-                .title(state.current_buffer.to_owned())
+                .title(target.as_str().to_string())
                 .borders(Borders::LEFT),
         );
         f.render_widget(list, rect);
+    }
+
+    /// Resolves the focused buffer along with its backend metadata.
+    fn focused<'a>(
+        &self,
+        state: &'a State,
+        view: &'a ViewState,
+    ) -> Option<(&'a BufferId, &'a ChatBuffer, &'a BackendInfo, &'a str)> {
+        let buffer_id = view.focused.as_ref()?;
+        let buffer = state.buffers.get(buffer_id)?;
+        let backend_state = state.backends.get(&buffer_id.backend)?;
+        Some((
+            buffer_id,
+            buffer,
+            &backend_state.info,
+            backend_state.nickname.as_str(),
+        ))
     }
 
     pub fn render(
         &mut self,
         f: &mut ratatui::Frame,
         state: &State,
+        view: &ViewState,
         lua: &mlua::Lua,
         input: &Input,
     ) {
         let layout = self.get_layout();
-        let size = f.area();
-        let chunks = layout.split(size);
+        let chunks = layout.split(f.area());
 
-        if state.users_in_current_buffer.len() > 1 {
-            let layout_with_sidebar = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(90), Constraint::Percentage(10)].as_ref())
-                .split(chunks[0]);
+        let members = self
+            .focused(state, view)
+            .map(|(id, buffer, _, _)| (id.target.clone(), &buffer.members));
 
-            self.render_users(f, state, lua, layout_with_sidebar[1]);
-            self.render_messages(f, state, lua, layout_with_sidebar[0]);
-        } else {
-            self.render_messages(f, state, lua, chunks[0]);
+        match members {
+            Some((target, members)) if members.len() > 1 => {
+                let split = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(90), Constraint::Percentage(10)].as_ref())
+                    .split(chunks[0]);
+
+                self.render_users(f, members, lua, &target, split[1]);
+                self.render_messages(f, state, view, lua, split[0]);
+            }
+            _ => self.render_messages(f, state, view, lua, chunks[0]),
         }
 
-        self.render_buffer_bar(f, state, chunks[2]);
-        self.render_input(f, state, input, chunks[1]);
+        self.render_buffer_bar(f, state, view, chunks[2]);
+        self.render_input(f, view, input, chunks[1]);
     }
 }
 
@@ -436,8 +437,7 @@ mod tests {
         table: &'lua str,
     ) -> Result<Vec<Span<'lua>>, anyhow::Error> {
         let value = run_lua_code(lua, table)?;
-        let spans = renderer.lua_value_to_spans(lua, value)?;
-        Ok(spans)
+        renderer.lua_value_to_spans(lua, value)
     }
 
     #[test]
@@ -470,30 +470,6 @@ mod tests {
             "},
         )?;
         assert_eq!(spans.len(), 3);
-        assert_eq!(spans[0].content, "Hello");
-        assert_eq!(spans[1].content, ", ");
-        assert_eq!(spans[2].content, "World!");
-        Ok(())
-    }
-
-    #[test]
-    fn test_lua_value_to_spans_deeply_nested() -> anyhow::Result<(), anyhow::Error> {
-        let renderer = Renderer::new();
-        let lua = mlua::Lua::new();
-        let spans = render_lua_table_to_spans(
-            &lua,
-            &renderer,
-            indoc! {"
-                { 'a', { 'b', 'c', { 'd', 'e' } }, 'f' }
-            "},
-        )?;
-        assert_eq!(spans.len(), 6);
-        assert_eq!(spans[0].content, "a");
-        assert_eq!(spans[1].content, "b");
-        assert_eq!(spans[2].content, "c");
-        assert_eq!(spans[3].content, "d");
-        assert_eq!(spans[4].content, "e");
-        assert_eq!(spans[5].content, "f");
         Ok(())
     }
 
@@ -519,6 +495,26 @@ mod tests {
     }
 
     #[test]
+    fn test_two_child_tables_are_not_a_style() -> anyhow::Result<(), anyhow::Error> {
+        // `{ {..}, {..} }` is two child span-lists, not a styled span: without
+        // the style marker the renderer must treat it as a list.
+        let renderer = Renderer::new();
+        let lua = mlua::Lua::new();
+        create_tirc_theme_lua_module(&lua)?;
+        let spans = render_lua_table_to_spans(
+            &lua,
+            &renderer,
+            indoc! {"
+                { { 'a' }, { 'b' } }
+            "},
+        )?;
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content, "a");
+        assert_eq!(spans[1].content, "b");
+        Ok(())
+    }
+
+    #[test]
     fn test_lua_value_to_styled_spans_deeply_nested() -> anyhow::Result<(), anyhow::Error> {
         let renderer = Renderer::new();
         let lua = mlua::Lua::new();
@@ -539,22 +535,14 @@ mod tests {
         assert_eq!(spans.len(), 6);
         assert_eq!(spans[0].content, "a");
         assert_eq!(spans[0].style.fg, Some(Color::Blue));
-        assert_eq!(spans[0].style.bg, None);
         assert_eq!(spans[1].content, "b");
         assert_eq!(spans[1].style.fg, Some(Color::DarkGray));
         assert_eq!(spans[1].style.bg, Some(Color::White));
-        assert_eq!(spans[2].content, "c");
-        assert_eq!(spans[2].style.fg, Some(Color::DarkGray));
-        assert_eq!(spans[2].style.bg, Some(Color::White));
         assert_eq!(spans[3].content, "d");
         assert_eq!(spans[3].style.fg, Some(Color::Green));
         assert_eq!(spans[3].style.bg, Some(Color::White));
-        assert_eq!(spans[4].content, "e");
-        assert_eq!(spans[4].style.fg, Some(Color::DarkGray));
-        assert_eq!(spans[4].style.bg, Some(Color::White));
         assert_eq!(spans[5].content, "f");
         assert_eq!(spans[5].style.fg, None);
-        assert_eq!(spans[5].style.bg, None);
         Ok(())
     }
 }

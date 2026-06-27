@@ -195,13 +195,24 @@ pub enum MemberRole {
 pub enum MembershipChange {
     /// Roster seeding (e.g. an IRC NAMES reply): the user is present, without the
     /// "has joined" announcement that [`Join`](MembershipChange::Join) implies.
-    Present { role: MemberRole },
+    Present {
+        role: MemberRole,
+    },
     Join,
-    Part { reason: Option<String> },
-    Kick { by: UserRef, reason: Option<String> },
-    Invite { by: UserRef },
+    Part {
+        reason: Option<String>,
+    },
+    Kick {
+        by: UserRef,
+        reason: Option<String>,
+    },
+    Invite {
+        by: UserRef,
+    },
     /// The user's role changed (IRC MODE +o/+v, Matrix power level).
-    SetRole { role: MemberRole },
+    SetRole {
+        role: MemberRole,
+    },
 }
 
 /// A normalized chat event. Every backend maps its protocol onto these variants;
@@ -254,10 +265,7 @@ pub enum ChatEvent {
         topic: String,
     },
     /// A user changed their display name / nick across all their buffers.
-    Rename {
-        who: UserRef,
-        new_display: String,
-    },
+    Rename { who: UserRef, new_display: String },
     /// A user disconnected entirely, leaving all their buffers.
     Quit {
         who: UserRef,
@@ -276,13 +284,37 @@ pub enum ChatEvent {
     },
 }
 
+impl ChatEvent {
+    /// The buffer target this event routes to, when it belongs to a specific
+    /// buffer. `None` for identity-scoped events ([`Rename`](ChatEvent::Rename),
+    /// [`Quit`](ChatEvent::Quit)) and status-bound [`ServerInfo`](ChatEvent::ServerInfo).
+    pub fn target(&self) -> Option<&TargetId> {
+        match self {
+            ChatEvent::Message { target, .. }
+            | ChatEvent::Edit { target, .. }
+            | ChatEvent::Redaction { target, .. }
+            | ChatEvent::Reaction { target, .. }
+            | ChatEvent::Membership { target, .. }
+            | ChatEvent::Topic { target, .. } => Some(target),
+            ChatEvent::ServerInfo { target, .. } => target.as_ref(),
+            ChatEvent::Rename { .. } | ChatEvent::Quit { .. } => None,
+        }
+    }
+}
+
 /// Backend connection lifecycle and normalized events, as delivered to the core.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BackendEvent {
     /// The connection is up and identified under `nickname`.
-    Ready { nickname: String },
-    Disconnected { reason: Option<String> },
-    Error { message: String },
+    Ready {
+        nickname: String,
+    },
+    Disconnected {
+        reason: Option<String>,
+    },
+    Error {
+        message: String,
+    },
     Event(ChatEvent),
 }
 

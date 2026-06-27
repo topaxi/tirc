@@ -1,95 +1,60 @@
-extern crate irc;
-
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use crossterm::event::{Event as CrosstermEvent, EventStream};
-use futures::prelude::*;
-use futures::stream::FusedStream;
-use irc::client::{prelude::*, ClientStream};
+use futures::StreamExt;
 
-use tirc::{
-    config::{load_config, TircConfig},
-    ui::{self, Event, InputHandler},
-};
+use tirc::backends::irc::{IrcBackend, IrcBackendConfig};
+use tirc::backends::{self, ChatBackend};
+use tirc::config::{load_config, ServerConfig, TircConfig};
+use tirc::core::{BackendId, BackendMessage, BufferId, TxnAllocator};
+use tirc::tui::Tui;
+use tirc::ui::{Event, InputHandler, State, ViewState};
 
 const TICK_RATE: Duration = Duration::from_millis(1000);
 
-fn create_lua_irc_sender(
-    lua: &mlua::Lua,
-    sender: irc::client::Sender,
-) -> mlua::Result<mlua::Table> {
-    let shared_sender = Arc::new(sender);
-    let tbl = lua.create_table()?;
-
-    let sender = Arc::clone(&shared_sender);
-    tbl.set(
-        "send_privmsg",
-        lua.create_function(move |_, (target, message): (String, String)| {
-            sender
-                .send_privmsg(target, message)
-                .map_err(mlua::Error::external)
-        })?,
-    )?;
-
-    let sender = Arc::clone(&shared_sender);
-    tbl.set(
-        "send_notice",
-        lua.create_function(move |_, (target, message): (String, String)| {
-            sender
-                .send_notice(target, message)
-                .map_err(mlua::Error::external)
-        })?,
-    )?;
-
-    Ok(tbl)
-}
-
-async fn setup_irc(
-    config: &TircConfig,
-    lua: &mlua::Lua,
-) -> Result<(Client, ClientStream), anyhow::Error> {
-    let mut irc = create_irc_client(config).await?;
-    let stream = irc.stream()?;
-
-    lua.set_named_registry_value("sender", create_lua_irc_sender(lua, irc.sender())?)?;
-
-    irc.send_cap_req(&[
-        Capability::EchoMessage,
-        Capability::MultiPrefix,
-        Capability::ExtendedJoin,
-        Capability::AwayNotify,
-        Capability::ChgHost,
-        Capability::AccountNotify,
-        Capability::ServerTime,
-        Capability::UserhostInNames,
-        Capability::Batch,
-        Capability::Custom("labeled-response"),
-    ])?;
-
-    irc.identify()?;
-
-    Ok((irc, stream))
+/// Builds a backend from one server config entry. All servers are IRC in Phase
+/// 1; Phase 2 dispatches on a protocol tag.
+fn build_backend(id: BackendId, server: &ServerConfig) -> anyhow::Result<Box<dyn ChatBackend>> {
+    Ok(Box::new(IrcBackend::new(
+        id,
+        IrcBackendConfig {
+            host: server.host.clone(),
+            port: server.port,
+            use_tls: server.use_tls,
+            accept_invalid_cert: server.accept_invalid_cert,
+            nickname: server.nickname.clone(),
+            realname: server.realname.clone(),
+            autojoin: server.autojoin.clone(),
+        },
+    )))
 }
 
 async fn root_task(lua: &mlua::Lua, config: &TircConfig) -> Result<(), anyhow::Error> {
-    let (irc, irc_stream) = setup_irc(config, lua).await?;
-    let mut irc_stream = irc_stream.fuse();
+    if config.servers.is_empty() {
+        anyhow::bail!("No server configured in init.lua (servers is empty)");
+    }
 
-    let mut state = ui::State {
-        server: config
-            .servers
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("No server configured in init.lua"))?
-            .host
-            .clone(),
-        ..Default::default()
-    };
+    let txn = Arc::new(TxnAllocator::new());
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<BackendMessage>();
 
-    let mut tui = tirc::tui::Tui::new()?;
+    let mut state = State::new();
+    let mut view = ViewState::new();
+    let mut handles = Vec::new();
 
+    for (index, server) in config.servers.iter().enumerate() {
+        let id = BackendId(index);
+        let backend = build_backend(id, server)?;
+        state.register_backend(backend.info());
+        view.focus_if_unset(BufferId::status(id));
+        handles.push(backends::spawn(backend, event_tx.clone()));
+    }
+    drop(event_tx);
+
+    let mut tui = Tui::new()?;
     tui.initialize_terminal()?;
 
-    let mut input_handler = InputHandler::new(lua, irc, tui);
+    let mut input_handler = InputHandler::new(lua, tui, handles, txn);
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(TICK_RATE);
@@ -98,27 +63,22 @@ async fn root_task(lua: &mlua::Lua, config: &TircConfig) -> Result<(), anyhow::E
     tokio::pin!(terminate);
 
     loop {
-        input_handler.sync_state(&mut state)?;
-        input_handler.render_ui(&state)?;
+        input_handler.render_ui(&state, &view)?;
 
         let event = tokio::select! {
             Some(event) = events.next() => match event? {
                 CrosstermEvent::Key(key) => Event::Input(key),
                 _ => continue,
             },
-            message = irc_stream.next(), if !irc_stream.is_terminated() => {
-                match message.transpose()? {
-                    Some(message) => Event::Message(Box::new(message)),
-                    None => continue,
-                }
-            }
+            Some(message) = event_rx.recv() => Event::Backend(message),
             _ = tick.tick() => Event::Tick,
             _ = &mut terminate => break,
         };
 
-        if let Err(err) = input_handler.handle_event(&mut state, event) {
-            eprintln!("Error: {:?}", err);
-            break;
+        match input_handler.handle_event(&mut state, &mut view, event) {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(err) => return Err(err),
         }
     }
 
@@ -137,8 +97,7 @@ async fn terminate_signal() {
             signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
         let mut interrupt =
             signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
-        let mut hangup =
-            signal(SignalKind::hangup()).expect("failed to install SIGHUP handler");
+        let mut hangup = signal(SignalKind::hangup()).expect("failed to install SIGHUP handler");
 
         tokio::select! {
             _ = terminate.recv() => {}
@@ -157,47 +116,24 @@ fn main() -> Result<(), anyhow::Error> {
     let lua = mlua::Lua::new();
     let config = load_config(&lua)?;
 
-    tirc::tui::Tui::install_panic_hook();
+    Tui::install_panic_hook();
 
-    let threads = usize::min(2, num_cpus::get());
-    let rt = tokio::runtime::Builder::new_multi_thread()
+    // A multi-thread runtime hosts the (Send) backend tasks; the !Send Lua/UI
+    // loop is pinned to one thread via a LocalSet so mlua needs no `send`
+    // feature.
+    let threads = usize::min(
+        2,
+        std::thread::available_parallelism().map_or(1, |n| n.get()),
+    );
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(threads)
         .enable_all()
         .build()?;
 
-    rt.block_on(root_task(&lua, &config))
-}
+    let local = tokio::task::LocalSet::new();
+    let result = local.block_on(&runtime, root_task(&lua, &config));
 
-async fn create_irc_client(config: &TircConfig) -> Result<Client, anyhow::Error> {
-    let server_config = config
-        .servers
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("No server configured in init.lua (servers is empty)"))?;
-
-    let nickname = server_config.nickname.first().cloned().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Server '{}' has an empty nickname list in init.lua",
-            server_config.host
-        )
-    })?;
-
-    let client_config = Config {
-        nickname: Some(nickname),
-        alt_nicks: server_config.nickname[1..].to_vec(),
-        realname: server_config.realname.clone(),
-        server: Some(server_config.host.clone()),
-        port: Some(server_config.port),
-        use_tls: Some(server_config.use_tls),
-        dangerously_accept_invalid_certs: Some(server_config.accept_invalid_cert),
-        channels: server_config.autojoin.clone(),
-        version: Some(format!(
-            "tirc v{} - https://github.com/topaxi/tirc",
-            env!("CARGO_PKG_VERSION")
-        )),
-        ..Default::default()
-    };
-
-    let client = Client::from_config(client_config).await?;
-
-    Ok(client)
+    // Let the terminal restore (Tui::drop) before surfacing any error.
+    drop(local);
+    result
 }

@@ -1,316 +1,551 @@
-use std::rc::Rc;
-
+use chrono::{DateTime, Local};
 use indexmap::IndexMap;
 
-use irc::{
-    client::data::User,
-    proto::{Command, Message},
+use crate::backends::BackendInfo;
+use crate::core::{
+    BackendId, BufferId, ChatEvent, EventId, MemberRole, MembershipChange, MessageBody, TargetId,
+    TxnId, UserRef,
 };
 
-use super::message::TircMessage;
-
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
+    #[default]
     Normal,
     Command,
     Insert,
 }
 
+/// A member of a buffer's roster. Ordered by `(role, name)` so the user list is
+/// a pure read of an already-sorted vector.
+#[derive(Clone, Debug)]
+pub struct Member {
+    pub user: UserRef,
+    pub role: MemberRole,
+}
+
+/// A single stored line. Holds the normalized [`ChatEvent`] only - never an
+/// `mlua` table - so domain state stays free of Lua and could later cross a
+/// process boundary. The renderer builds the Lua view per-frame.
+#[derive(Clone, Debug)]
+pub struct StoredMessage {
+    pub time: DateTime<Local>,
+    pub event: ChatEvent,
+    /// Optimistic local echo not yet confirmed by the server.
+    pub pending: bool,
+    pub redacted: bool,
+    /// Reaction key -> count. Populated by Matrix; unused by IRC.
+    pub reactions: IndexMap<String, u32>,
+}
+
+impl StoredMessage {
+    fn new(event: ChatEvent, pending: bool) -> Self {
+        StoredMessage {
+            time: Local::now(),
+            event,
+            pending,
+            redacted: false,
+            reactions: IndexMap::new(),
+        }
+    }
+
+    /// A non-pending stored message, used to build a Lua view of an event that is
+    /// not (yet) in a buffer, e.g. when firing the `event` callback.
+    pub fn from_event(event: ChatEvent) -> Self {
+        StoredMessage::new(event, false)
+    }
+
+    fn txn(&self) -> Option<TxnId> {
+        match &self.event {
+            ChatEvent::Message { echo_of, .. } => *echo_of,
+            _ => None,
+        }
+    }
+
+    fn has_event_id(&self, id: &EventId) -> bool {
+        matches!(&self.event, ChatEvent::Message { id: Some(existing), .. } if existing == id)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ChatBuffer {
-    pub messages: Vec<TircMessage>,
+    pub messages: Vec<StoredMessage>,
+    pub members: Vec<Member>,
+    pub topic: Option<String>,
     pub scroll_position: usize,
 }
 
-#[derive(Debug)]
-pub struct State {
-    pub mode: Mode,
-    pub nickname: String,
-    pub server: String,
-    pub current_buffer: String,
-    pub buffers: IndexMap<String, ChatBuffer>,
-    pub users_in_current_buffer: Rc<[User]>,
+impl ChatBuffer {
+    fn upsert_member(&mut self, user: UserRef, role: MemberRole) {
+        match self.members.iter_mut().find(|m| m.user.id == user.id) {
+            Some(member) => {
+                member.user = user;
+                member.role = role;
+            }
+            None => self.members.push(Member { user, role }),
+        }
+        self.sort_members();
+    }
+
+    fn set_member_role(&mut self, id: &str, role: MemberRole) {
+        if let Some(member) = self.members.iter_mut().find(|m| m.user.id == id) {
+            member.role = role;
+            self.sort_members();
+        }
+    }
+
+    fn remove_member(&mut self, id: &str) -> bool {
+        let before = self.members.len();
+        self.members.retain(|m| m.user.id != id);
+        self.members.len() != before
+    }
+
+    fn rename_member(&mut self, id: &str, new: &UserRef) -> bool {
+        if let Some(member) = self.members.iter_mut().find(|m| m.user.id == id) {
+            member.user = new.clone();
+            self.sort_members();
+            return true;
+        }
+        false
+    }
+
+    fn sort_members(&mut self) {
+        self.members.sort_by(|a, b| {
+            a.role
+                .cmp(&b.role)
+                .then_with(|| a.user.name().cmp(b.user.name()))
+        });
+    }
 }
 
-impl Default for State {
-    fn default() -> Self {
-        Self::new()
-    }
+/// Per-backend runtime state the UI needs beyond the buffers themselves.
+#[derive(Debug)]
+pub struct BackendState {
+    pub info: BackendInfo,
+    pub nickname: String,
+}
+
+/// Domain state: every backend and buffer, mutated purely by applying
+/// [`ChatEvent`]s. Holds no view concerns (focus, mode, scroll position of the
+/// active pane) - those live in [`ViewState`].
+#[derive(Debug, Default)]
+pub struct State {
+    pub backends: IndexMap<BackendId, BackendState>,
+    pub buffers: IndexMap<BufferId, ChatBuffer>,
 }
 
 impl State {
     pub fn new() -> State {
-        let default_buffer_name = State::get_default_buffer_name();
+        State::default()
+    }
 
-        let buffers = {
-            let mut buffers = IndexMap::new();
-            buffers.insert(default_buffer_name.to_string(), ChatBuffer::default());
-            buffers
+    /// Registers a backend and its status buffer. Called by the main loop as each
+    /// backend is spawned.
+    pub fn register_backend(&mut self, info: BackendInfo) {
+        let id = info.id;
+        self.buffers.entry(BufferId::status(id)).or_default();
+        self.backends.insert(
+            id,
+            BackendState {
+                info,
+                nickname: String::new(),
+            },
+        );
+    }
+
+    pub fn set_nickname(&mut self, backend: BackendId, nickname: String) {
+        if let Some(state) = self.backends.get_mut(&backend) {
+            state.nickname = nickname;
+        }
+    }
+
+    pub fn nickname(&self, backend: BackendId) -> &str {
+        self.backends
+            .get(&backend)
+            .map(|state| state.nickname.as_str())
+            .unwrap_or_default()
+    }
+
+    fn buffer_mut(&mut self, backend: BackendId, target: TargetId) -> &mut ChatBuffer {
+        self.buffers
+            .entry(BufferId::new(backend, target))
+            .or_default()
+    }
+
+    /// Applies a normalized event from `backend`, mutating buffers, rosters, and
+    /// topics. This is the single point where domain state changes.
+    pub fn apply(&mut self, backend: BackendId, event: ChatEvent) {
+        match event {
+            ChatEvent::Message { .. } => self.apply_message(backend, event),
+            ChatEvent::Edit { target, id, body } => self.apply_edit(backend, target, id, body),
+            ChatEvent::Redaction { target, id, .. } => self.apply_redaction(backend, target, id),
+            ChatEvent::Reaction {
+                target,
+                id,
+                key,
+                add,
+                ..
+            } => self.apply_reaction(backend, target, id, key, add),
+            ChatEvent::Membership { .. } => self.apply_membership(backend, event),
+            ChatEvent::Topic {
+                ref target,
+                ref topic,
+                ..
+            } => {
+                let target = target.clone();
+                let topic = topic.clone();
+                let buffer = self.buffer_mut(backend, target);
+                buffer.topic = Some(topic);
+                buffer.messages.push(StoredMessage::new(event, false));
+            }
+            ChatEvent::Rename { .. } => self.apply_rename(backend, event),
+            ChatEvent::Quit { .. } => self.apply_quit(backend, event),
+            ChatEvent::ServerInfo { ref target, .. } => {
+                let target = target.clone().unwrap_or_else(TargetId::status);
+                self.buffer_mut(backend, target)
+                    .messages
+                    .push(StoredMessage::new(event, false));
+            }
+        }
+    }
+
+    fn apply_message(&mut self, backend: BackendId, event: ChatEvent) {
+        let (target, echo_of) = match &event {
+            ChatEvent::Message {
+                target, echo_of, ..
+            } => (target.clone(), *echo_of),
+            _ => return,
         };
 
-        State {
-            mode: Mode::Normal,
-            nickname: String::new(),
-            server: String::new(),
-            current_buffer: default_buffer_name,
-            buffers,
-            users_in_current_buffer: Rc::new([]),
-        }
-    }
+        let buffer = self.buffer_mut(backend, target);
 
-    pub fn get_default_buffer_name() -> String {
-        String::from("(status)")
-    }
-
-    fn get_buffer_name_by_index(&self, index: usize) -> String {
-        let buffers = &self.buffers;
-        let buffer_name = buffers.keys().nth(index).unwrap();
-        buffer_name.to_string()
-    }
-
-    fn get_current_buffer_index(&self) -> usize {
-        let buffers = &self.buffers;
-        let current_buffer_name = &self.current_buffer;
-
-        buffers
-            .keys()
-            .position(|name| name == current_buffer_name)
-            .unwrap()
-    }
-
-    pub fn next_buffer(&mut self) {
-        let buffers = &self.buffers;
-        let current_buffer_index = self.get_current_buffer_index();
-        let next_buffer_index = (current_buffer_index + 1) % buffers.len();
-        self.current_buffer = self.get_buffer_name_by_index(next_buffer_index);
-    }
-
-    pub fn previous_buffer(&mut self) {
-        let buffers = &self.buffers;
-        let current_buffer_index = self.get_current_buffer_index();
-        let previous_buffer_index = (current_buffer_index + buffers.len() - 1) % buffers.len();
-        self.current_buffer = self.get_buffer_name_by_index(previous_buffer_index);
-    }
-
-    pub fn set_current_buffer_index(&mut self, index: usize) {
-        self.current_buffer = self.get_buffer_name_by_index(index);
-    }
-
-    pub fn set_current_buffer(&mut self, buffer_name: &str) {
-        self.current_buffer = buffer_name.to_string();
-    }
-
-    pub fn create_buffer_if_not_exists(&mut self, buffer_name: &str) {
-        let buffers = &mut self.buffers;
-
-        if buffers.get(buffer_name).is_none() {
-            buffers.insert(buffer_name.to_string(), ChatBuffer::default());
-        }
-    }
-
-    fn push_message_to_buffer(&mut self, buffer_name: &str, message: TircMessage) {
-        let buffer = self.buffers.get_mut(buffer_name).unwrap();
-
-        if let TircMessage::Irc(_, m, _) = &message {
-            if let Some(tags) = &m.tags {
-                if let Some(label) = tags.iter().find(|tag| tag.0 == "label") {
-                    // Find index of message with same tag label
-                    let index = buffer.messages.iter().position(|m| match m {
-                        TircMessage::Irc(_, m, _) => m.tags.as_ref().map_or(false, |tags| {
-                            tags.iter().any(|tag| tag.0 == "label" && tag.1 == label.1)
-                        }),
-                        _ => false,
-                    });
-
-                    if let Some(index) = index {
-                        // Remove old message
-                        buffer.messages[index] = message;
-
-                        return;
-                    }
-                }
+        // Replace the optimistic local echo in place when the server confirms it.
+        if let Some(txn) = echo_of {
+            if let Some(slot) = buffer.messages.iter_mut().find(|m| m.txn() == Some(txn)) {
+                slot.event = event;
+                slot.pending = false;
+                return;
             }
         }
 
-        buffer.messages.push(message);
+        buffer
+            .messages
+            .push(StoredMessage::new(event, echo_of.is_some()));
     }
 
-    fn get_target_buffer_name(&mut self, message: &Message) -> String {
-        let default_buffer_name = State::get_default_buffer_name();
-
-        match &message.command {
-            Command::PRIVMSG(target, _) | Command::NOTICE(target, _) => {
-                let buffer = match message.source_nickname() {
-                    // Incoming message from someone else: a channel message goes
-                    // to the channel, a direct message goes to the sender's nick.
-                    Some(source) if source != self.nickname => {
-                        message.response_target().unwrap_or(source).to_owned()
-                    }
-                    // An echo of one of our own messages (server replied with our
-                    // nick as the source): file it under the conversation partner,
-                    // which for a message to ourselves is our own nick.
-                    Some(_) => target.to_owned(),
-                    // No nick prefix. Either our own outgoing message (no prefix at
-                    // all) which belongs with its recipient, or a server-originated
-                    // message (server-name prefix) which belongs in the status
-                    // buffer.
-                    None if message.prefix.is_none() => target.to_owned(),
-                    None => default_buffer_name.clone(),
-                };
-
-                if buffer == "*" {
-                    default_buffer_name
-                } else {
-                    buffer
-                }
+    fn apply_edit(&mut self, backend: BackendId, target: TargetId, id: EventId, body: MessageBody) {
+        let buffer = self.buffer_mut(backend, target);
+        if let Some(slot) = buffer.messages.iter_mut().find(|m| m.has_event_id(&id)) {
+            if let ChatEvent::Message { body: existing, .. } = &mut slot.event {
+                *existing = body;
             }
-            Command::TOPIC(channel, _)
-            | Command::ChannelMODE(channel, _)
-            | Command::PART(channel, _)
-            | Command::JOIN(channel, _, _) => channel.to_owned(),
-            _ => default_buffer_name,
         }
     }
 
-    pub fn push_message(&mut self, message: TircMessage) {
-        let buffer_name = match &message {
-            TircMessage::Irc(_, m, _) => self.get_target_buffer_name(m),
-            _ => State::get_default_buffer_name(),
+    fn apply_redaction(&mut self, backend: BackendId, target: TargetId, id: EventId) {
+        let buffer = self.buffer_mut(backend, target);
+        if let Some(slot) = buffer.messages.iter_mut().find(|m| m.has_event_id(&id)) {
+            slot.redacted = true;
+        }
+    }
+
+    fn apply_reaction(
+        &mut self,
+        backend: BackendId,
+        target: TargetId,
+        id: EventId,
+        key: String,
+        add: bool,
+    ) {
+        let buffer = self.buffer_mut(backend, target);
+        if let Some(slot) = buffer.messages.iter_mut().find(|m| m.has_event_id(&id)) {
+            let count = slot.reactions.entry(key).or_insert(0);
+            if add {
+                *count += 1;
+            } else if *count > 0 {
+                *count -= 1;
+            }
+        }
+    }
+
+    fn apply_membership(&mut self, backend: BackendId, event: ChatEvent) {
+        let (target, who, change) = match &event {
+            ChatEvent::Membership {
+                target,
+                who,
+                change,
+            } => (target.clone(), who.clone(), change.clone()),
+            _ => return,
         };
 
-        self.create_buffer_if_not_exists(&buffer_name);
-        self.push_message_to_buffer(&buffer_name, message)
+        let buffer = self.buffer_mut(backend, target);
+
+        match &change {
+            // Roster seeding and role changes update the member list silently.
+            MembershipChange::Present { role } => {
+                buffer.upsert_member(who, *role);
+                return;
+            }
+            MembershipChange::SetRole { role } => {
+                buffer.set_member_role(&who.id, *role);
+                return;
+            }
+            MembershipChange::Join => buffer.upsert_member(who, MemberRole::Member),
+            MembershipChange::Part { .. } | MembershipChange::Kick { .. } => {
+                buffer.remove_member(&who.id);
+            }
+            MembershipChange::Invite { .. } => {}
+        }
+
+        // Join/Part/Kick/Invite also render an announcement line.
+        buffer.messages.push(StoredMessage::new(event, false));
+    }
+
+    fn apply_rename(&mut self, backend: BackendId, event: ChatEvent) {
+        let (who, new_display) = match &event {
+            ChatEvent::Rename { who, new_display } => (who.clone(), new_display.clone()),
+            _ => return,
+        };
+
+        let renamed = UserRef::new(new_display.clone());
+
+        if self.nickname(backend) == who.id {
+            self.set_nickname(backend, new_display.clone());
+        }
+
+        self.for_backend_buffers(backend, |buffer| {
+            if buffer.rename_member(&who.id, &renamed) {
+                buffer
+                    .messages
+                    .push(StoredMessage::new(event.clone(), false));
+            }
+        });
+    }
+
+    fn apply_quit(&mut self, backend: BackendId, event: ChatEvent) {
+        let who = match &event {
+            ChatEvent::Quit { who, .. } => who.clone(),
+            _ => return,
+        };
+
+        self.for_backend_buffers(backend, |buffer| {
+            if buffer.remove_member(&who.id) {
+                buffer
+                    .messages
+                    .push(StoredMessage::new(event.clone(), false));
+            }
+        });
+    }
+
+    fn for_backend_buffers(&mut self, backend: BackendId, mut f: impl FnMut(&mut ChatBuffer)) {
+        for (id, buffer) in self.buffers.iter_mut() {
+            if id.backend == backend {
+                f(buffer);
+            }
+        }
+    }
+}
+
+/// View-layer state: which buffer is focused and the input mode. Kept separate
+/// from domain [`State`] so a future split-pane layout can track focus/scroll
+/// per pane without touching the domain model.
+#[derive(Debug, Default)]
+pub struct ViewState {
+    pub mode: Mode,
+    pub focused: Option<BufferId>,
+}
+
+impl ViewState {
+    pub fn new() -> Self {
+        ViewState::default()
+    }
+
+    /// Focuses `buffer` if nothing is focused yet (e.g. the first backend's
+    /// status buffer at startup).
+    pub fn focus_if_unset(&mut self, buffer: BufferId) {
+        if self.focused.is_none() {
+            self.focused = Some(buffer);
+        }
+    }
+
+    pub fn focus(&mut self, buffer: BufferId) {
+        self.focused = Some(buffer);
+    }
+
+    fn focused_index(&self, state: &State) -> Option<usize> {
+        let focused = self.focused.as_ref()?;
+        state.buffers.keys().position(|id| id == focused)
+    }
+
+    fn focus_index(&mut self, state: &State, index: usize) {
+        if let Some((id, _)) = state.buffers.get_index(index) {
+            self.focused = Some(id.clone());
+        }
+    }
+
+    pub fn next_buffer(&mut self, state: &State) {
+        if state.buffers.is_empty() {
+            return;
+        }
+        let current = self.focused_index(state).unwrap_or(0);
+        self.focus_index(state, (current + 1) % state.buffers.len());
+    }
+
+    pub fn previous_buffer(&mut self, state: &State) {
+        if state.buffers.is_empty() {
+            return;
+        }
+        let len = state.buffers.len();
+        let current = self.focused_index(state).unwrap_or(0);
+        self.focus_index(state, (current + len - 1) % len);
+    }
+
+    pub fn focus_buffer_index(&mut self, state: &State, index: usize) {
+        if index < state.buffers.len() {
+            self.focus_index(state, index);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::ui::state::ChatBuffer;
+    use super::*;
+    use crate::core::{MsgKind, Protocol};
 
-    fn target_buffer(nickname: &str, raw: &str) -> String {
-        let mut state = super::State::default();
-        state.nickname = nickname.to_string();
-        let message: irc::proto::Message = raw.parse().expect("valid irc message");
-        state.get_target_buffer_name(&message)
+    fn backend() -> BackendId {
+        BackendId(0)
+    }
+
+    fn test_state() -> State {
+        let mut state = State::new();
+        state.register_backend(BackendInfo {
+            id: backend(),
+            protocol: Protocol::Irc,
+            name: "test".to_string(),
+        });
+        state.set_nickname(backend(), "me".to_string());
+        state
+    }
+
+    fn message(target: &str, sender: &str, echo_of: Option<TxnId>) -> ChatEvent {
+        ChatEvent::Message {
+            target: TargetId::from(target),
+            id: None,
+            sender: UserRef::new(sender),
+            body: MessageBody::plain("hi"),
+            kind: MsgKind::Text,
+            echo_of,
+        }
+    }
+
+    fn buffer<'a>(state: &'a State, target: &str) -> &'a ChatBuffer {
+        state
+            .buffers
+            .get(&BufferId::new(backend(), target))
+            .expect("buffer exists")
     }
 
     #[test]
-    fn test_target_buffer_incoming_channel_message() {
-        assert_eq!(
-            target_buffer("me", ":alice!u@h PRIVMSG #tirc :hi\r\n"),
-            "#tirc"
+    fn status_buffer_is_created_for_backend() {
+        let state = test_state();
+        assert!(state.buffers.contains_key(&BufferId::status(backend())));
+    }
+
+    #[test]
+    fn incoming_message_is_appended() {
+        let mut state = test_state();
+        state.apply(backend(), message("#tirc", "alice", None));
+        assert_eq!(buffer(&state, "#tirc").messages.len(), 1);
+        assert!(!buffer(&state, "#tirc").messages[0].pending);
+    }
+
+    #[test]
+    fn optimistic_echo_is_replaced_in_place() {
+        let mut state = test_state();
+        let txn = TxnId(7);
+
+        // Optimistic local copy.
+        state.apply(backend(), message("#tirc", "me", Some(txn)));
+        assert_eq!(buffer(&state, "#tirc").messages.len(), 1);
+        assert!(buffer(&state, "#tirc").messages[0].pending);
+
+        // Server echo with the same txn replaces it rather than duplicating.
+        state.apply(backend(), message("#tirc", "me", Some(txn)));
+        assert_eq!(buffer(&state, "#tirc").messages.len(), 1);
+        assert!(!buffer(&state, "#tirc").messages[0].pending);
+    }
+
+    #[test]
+    fn join_updates_roster_and_renders_line() {
+        let mut state = test_state();
+        state.apply(
+            backend(),
+            ChatEvent::Membership {
+                target: TargetId::from("#tirc"),
+                who: UserRef::new("alice"),
+                change: MembershipChange::Join,
+            },
         );
+        let buffer = buffer(&state, "#tirc");
+        assert_eq!(buffer.members.len(), 1);
+        assert_eq!(buffer.messages.len(), 1);
     }
 
     #[test]
-    fn test_target_buffer_incoming_direct_message() {
-        assert_eq!(target_buffer("me", ":alice!u@h PRIVMSG me :hi\r\n"), "alice");
+    fn present_seeds_roster_silently_and_sorts_by_role() {
+        let mut state = test_state();
+        for (nick, role) in [("carol", MemberRole::Member), ("alice", MemberRole::Op)] {
+            state.apply(
+                backend(),
+                ChatEvent::Membership {
+                    target: TargetId::from("#tirc"),
+                    who: UserRef::new(nick),
+                    change: MembershipChange::Present { role },
+                },
+            );
+        }
+        let buffer = buffer(&state, "#tirc");
+        assert_eq!(buffer.messages.len(), 0, "roster seeding renders no line");
+        assert_eq!(buffer.members[0].user.id, "alice", "op sorts first");
+        assert_eq!(buffer.members[1].user.id, "carol");
     }
 
     #[test]
-    fn test_target_buffer_outgoing_direct_message() {
-        // Our own outgoing message has no prefix; it belongs with the recipient.
-        assert_eq!(target_buffer("me", "PRIVMSG bob :hi\r\n"), "bob");
-    }
-
-    #[test]
-    fn test_target_buffer_self_message_outgoing() {
-        assert_eq!(target_buffer("me", "PRIVMSG me :hi\r\n"), "me");
-    }
-
-    #[test]
-    fn test_target_buffer_self_message_echo() {
-        assert_eq!(target_buffer("me", ":me!u@h PRIVMSG me :hi\r\n"), "me");
-    }
-
-    #[test]
-    fn test_target_buffer_server_notice_goes_to_status() {
-        assert_eq!(
-            target_buffer("me", ":irc.example.com NOTICE me :Welcome\r\n"),
-            "(status)"
+    fn rename_updates_roster_across_buffer() {
+        let mut state = test_state();
+        state.apply(
+            backend(),
+            ChatEvent::Membership {
+                target: TargetId::from("#tirc"),
+                who: UserRef::new("alice"),
+                change: MembershipChange::Join,
+            },
         );
-        assert_eq!(
-            target_buffer("me", ":irc.example.com NOTICE * :Checking ident\r\n"),
-            "(status)"
+        state.apply(
+            backend(),
+            ChatEvent::Rename {
+                who: UserRef::new("alice"),
+                new_display: "alice2".to_string(),
+            },
         );
+        let buffer = buffer(&state, "#tirc");
+        assert!(buffer.members.iter().any(|m| m.user.id == "alice2"));
+        assert!(!buffer.members.iter().any(|m| m.user.id == "alice"));
     }
 
     #[test]
-    fn test_get_buffer_name_by_index() {
-        let state = super::State::default();
-        assert_eq!(state.get_buffer_name_by_index(0), "(status)");
-    }
+    fn view_navigation_wraps_over_buffers() {
+        let mut state = test_state();
+        state.apply(backend(), message("#a", "x", None));
+        state.apply(backend(), message("#b", "y", None));
 
-    #[test]
-    fn test_get_current_buffer_index() {
-        let state = super::State::default();
-        assert_eq!(state.get_current_buffer_index(), 0);
-    }
+        let mut view = ViewState::new();
+        view.focus(BufferId::status(backend()));
 
-    #[test]
-    fn test_set_current_buffer_index() {
-        let mut state = super::State::default();
-        state
-            .buffers
-            .insert("foo".to_string(), ChatBuffer::default());
-        assert_eq!(state.get_current_buffer_index(), 0);
-        state.set_current_buffer_index(1);
-        assert_eq!(state.get_current_buffer_index(), 1);
-    }
-
-    #[test]
-    fn test_set_current_buffer() {
-        let mut state = super::State::default();
-        state
-            .buffers
-            .insert("foo".to_string(), ChatBuffer::default());
-        assert_eq!(state.get_current_buffer_index(), 0);
-        state.set_current_buffer("foo");
-        assert_eq!(state.get_current_buffer_index(), 1);
-    }
-
-    #[test]
-    fn test_next_buffer() {
-        let mut state = super::State::default();
-        state
-            .buffers
-            .insert("foo".to_string(), ChatBuffer::default());
-        state
-            .buffers
-            .insert("bar".to_string(), ChatBuffer::default());
-        assert_eq!(state.get_current_buffer_index(), 0);
-        state.next_buffer();
-        assert_eq!(state.get_current_buffer_index(), 1);
-        state.next_buffer();
-        assert_eq!(state.get_current_buffer_index(), 2);
-        state.next_buffer();
-        assert_eq!(state.get_current_buffer_index(), 0);
-    }
-
-    #[test]
-    fn test_previous_buffer() {
-        let mut state = super::State::default();
-        state
-            .buffers
-            .insert("foo".to_string(), ChatBuffer::default());
-        state
-            .buffers
-            .insert("bar".to_string(), ChatBuffer::default());
-        assert_eq!(state.get_current_buffer_index(), 0);
-        state.previous_buffer();
-        assert_eq!(state.get_current_buffer_index(), 2);
-        state.previous_buffer();
-        assert_eq!(state.get_current_buffer_index(), 1);
-        state.previous_buffer();
-        assert_eq!(state.get_current_buffer_index(), 0);
-    }
-
-    #[test]
-    fn test_create_buffer_if_not_exists() {
-        let mut state = super::State::default();
-        state.create_buffer_if_not_exists("foo");
-        assert_eq!(state.buffers.len(), 2);
-        state.create_buffer_if_not_exists("foo");
-        assert_eq!(state.buffers.len(), 2);
+        // status, #a, #b -> 3 buffers
+        assert_eq!(state.buffers.len(), 3);
+        view.next_buffer(&state);
+        assert_eq!(view.focused.as_ref().unwrap().target.as_str(), "#a");
+        view.previous_buffer(&state);
+        assert!(view.focused.as_ref().unwrap().target.is_status());
     }
 }

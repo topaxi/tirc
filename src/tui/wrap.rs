@@ -35,11 +35,11 @@
 //! won't break the output, but they might make the output look a bit weird.)
 
 use itertools::Itertools;
+use ratatui::text::{Line, Span, Text};
 use textwrap::{
     core::{display_width, Fragment},
     wrap_algorithms::{wrap_optimal_fit, Penalties},
 };
-use ratatui::text::{Line, Span, Text};
 
 pub struct Options<'a> {
     /// The width in columns at which the text will be wrapped.
