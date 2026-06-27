@@ -1,12 +1,27 @@
 //! Matrix backend: the sole place that touches `matrix-sdk`.
 //!
-//! Unencrypted rooms only for now (E2E is a deferred follow-up). The SDK's sync
-//! loop drives incoming events through registered handlers that translate Matrix
-//! timeline/state events into normalized [`ChatEvent`]s; outgoing [`Command`]s
-//! are applied directly to the client.
+//! E2E encryption is enabled: the crypto state (Olm/Megolm keys) is persisted in
+//! the same per-account sqlite store as the sync token and login session, so a
+//! restored session keeps its keys across runs. Encryption is otherwise
+//! transparent - `room.send` auto-encrypts in encrypted rooms and the SDK
+//! auto-decrypts incoming events during sync. The pieces that need explicit
+//! handling are history backfill (the low-level `room.messages` API does not
+//! decrypt) and events we lack the keys for, which surface as `[unable to
+//! decrypt]` placeholders. Interactive (SAS) device verification is not yet
+//! wired up; incoming requests are surfaced to the status buffer instead.
+//!
+//! The SDK's sync loop drives incoming events through registered handlers that
+//! translate Matrix timeline/state events into normalized [`ChatEvent`]s;
+//! outgoing [`Command`]s are applied directly to the client.
 
+use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::config::SyncSettings;
+use matrix_sdk::deserialized_responses::TimelineEvent;
 use matrix_sdk::room::MessagesOptions;
+use matrix_sdk::ruma::events::key::verification::request::ToDeviceKeyVerificationRequestEvent;
+use matrix_sdk::ruma::events::room::encrypted::{
+    OriginalSyncRoomEncryptedEvent, SyncRoomEncryptedEvent,
+};
 use matrix_sdk::ruma::events::room::member::MembershipState;
 use matrix_sdk::ruma::events::room::member::SyncRoomMemberEvent;
 use matrix_sdk::ruma::events::room::message::{
@@ -16,7 +31,7 @@ use matrix_sdk::ruma::events::room::topic::SyncRoomTopicEvent;
 use matrix_sdk::ruma::events::{
     AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
 };
-use matrix_sdk::authentication::matrix::MatrixSession;
+use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{OwnedRoomId, OwnedTransactionId, RoomId, UserId};
 use matrix_sdk::{Client, Room};
 
@@ -116,6 +131,7 @@ impl ChatBackend for MatrixBackend {
         // Unlike IRC there are no server numerics, so emit explicit connection
         // feedback into the status buffer.
         emit(&events, id, status_line(format!("Logged in as {user_id}")));
+        report_crypto_status(&client, id, &events).await;
 
         // Initial sync loads current room state into the store and advances the
         // store's sync token. Handlers are registered *after* it, so pre-existing
@@ -240,7 +256,7 @@ fn register_handlers(client: &Client, id: BackendId, events: EventSender) {
         }
     });
 
-    let topic_events = events;
+    let topic_events = events.clone();
     client.add_event_handler(move |event: SyncRoomTopicEvent, room: Room| {
         let events = topic_events.clone();
         async move {
@@ -256,6 +272,39 @@ fn register_handlers(client: &Client, id: BackendId, events: EventSender) {
                     },
                 );
             }
+        }
+    });
+
+    // Events the SDK successfully decrypts are re-dispatched under their inner
+    // type (e.g. `m.room.message`), so they reach the message handler above. An
+    // event still typed `m.room.encrypted` here is one we lack the keys for;
+    // surface a placeholder rather than dropping it silently.
+    let encrypted_events = events.clone();
+    client.add_event_handler(move |event: SyncRoomEncryptedEvent, room: Room| {
+        let events = encrypted_events.clone();
+        async move {
+            if let SyncRoomEncryptedEvent::Original(event) = event {
+                emit(&events, id, utd_placeholder(&room, &event).await);
+            }
+        }
+    });
+
+    // Interactive verification has no UI yet; at least tell the user a request
+    // came in so a dangling verification on another client is not a mystery.
+    let verification_events = events;
+    client.add_event_handler(move |event: ToDeviceKeyVerificationRequestEvent| {
+        let events = verification_events.clone();
+        async move {
+            emit(
+                &events,
+                id,
+                status_line(format!(
+                    "Device verification requested by {} (device {}); \
+                     interactive verification is not supported yet - verify this \
+                     session from another client to share encryption keys.",
+                    event.sender, event.content.from_device
+                )),
+            );
         }
     });
 }
@@ -544,19 +593,104 @@ async fn backfill_room(room: &Room, id: BackendId, events: &EventSender) {
     // `chunk` is newest-first; collect translated messages then emit oldest-first.
     let mut chats = Vec::new();
     for timeline_event in messages.chunk {
-        if let Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
-            SyncMessageLikeEvent::Original(event),
-        ))) = timeline_event.raw().deserialize()
-        {
-            if let Some(chat) = message_event_to_chat(event, room).await {
-                chats.push(chat);
-            }
+        if let Some(chat) = backfill_event_to_chat(timeline_event, room).await {
+            chats.push(chat);
         }
     }
 
     for chat in chats.into_iter().rev() {
         emit(events, id, chat);
     }
+}
+
+/// Translates a single backfilled timeline event into a [`ChatEvent`]. Unlike
+/// the live sync path, `room.messages` returns raw events without decrypting, so
+/// encrypted ones are decrypted here (falling back to a placeholder when the keys
+/// are unavailable).
+async fn backfill_event_to_chat(timeline_event: TimelineEvent, room: &Room) -> Option<ChatEvent> {
+    let raw = timeline_event.raw();
+    match raw.deserialize() {
+        Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
+            SyncMessageLikeEvent::Original(event),
+        ))) => message_event_to_chat(event, room).await,
+        Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomEncrypted(
+            SyncMessageLikeEvent::Original(event),
+        ))) => Some(decrypt_backfill_event(event, raw, room).await),
+        _ => None,
+    }
+}
+
+/// Attempts to decrypt a backfilled `m.room.encrypted` event, returning the inner
+/// message or a placeholder when we cannot decrypt it. The raw event is cast back
+/// to its encrypted form (already known from deserialization) for the SDK's
+/// store-backed decryption.
+async fn decrypt_backfill_event(
+    encrypted: OriginalSyncRoomEncryptedEvent,
+    raw: &Raw<AnySyncTimelineEvent>,
+    room: &Room,
+) -> ChatEvent {
+    if let Ok(decrypted) = room.decrypt_event(raw.cast_ref_unchecked(), None).await {
+        if let Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
+            SyncMessageLikeEvent::Original(event),
+        ))) = decrypted.raw().deserialize()
+        {
+            if let Some(chat) = message_event_to_chat(event, room).await {
+                return chat;
+            }
+        }
+    }
+
+    utd_placeholder(room, &encrypted).await
+}
+
+/// Placeholder line for an event we hold but cannot decrypt (missing the Megolm
+/// session). Carries the real sender, id and timestamp so it sorts in place and
+/// is attributed correctly; only the body stands in for the ciphertext.
+async fn utd_placeholder(room: &Room, event: &OriginalSyncRoomEncryptedEvent) -> ChatEvent {
+    ChatEvent::Message {
+        target: room_target(room),
+        id: Some(EventId(event.event_id.to_string())),
+        sender: sender_ref(room, &event.sender).await,
+        body: MessageBody::plain("[unable to decrypt message - encryption keys unavailable]"),
+        kind: MsgKind::Text,
+        echo_of: None,
+        time: server_ts(event.origin_server_ts),
+    }
+}
+
+/// Reports the device's encryption posture into the status buffer at startup so
+/// the user can tell whether this session can decrypt traffic, and whether it
+/// still needs verifying from another client.
+async fn report_crypto_status(client: &Client, id: BackendId, events: &EventSender) {
+    let encryption = client.encryption();
+
+    let device_line = match encryption.get_own_device().await {
+        Ok(Some(device)) => {
+            let state = if device.is_verified() {
+                "verified"
+            } else {
+                "unverified"
+            };
+            format!("Encryption: device {} ({state})", device.device_id())
+        }
+        Ok(None) => "Encryption: own device missing from the crypto store".to_string(),
+        Err(err) => format!("Encryption: could not query own device: {err}"),
+    };
+    emit(events, id, status_line(device_line));
+
+    let cross_signing = match encryption.cross_signing_status().await {
+        Some(status) if status.is_complete() => "Cross-signing: set up".to_string(),
+        Some(_) => {
+            "Cross-signing: incomplete; verify this session from another client to receive keys"
+                .to_string()
+        }
+        None => {
+            "Cross-signing: not set up; messages restricted to verified devices will not decrypt \
+             until this session is verified"
+                .to_string()
+        }
+    };
+    emit(events, id, status_line(cross_signing));
 }
 
 /// Resolves a sender into a [`UserRef`], using the room-local display name when
@@ -727,6 +861,97 @@ mod tests {
             ))
             .await,
             "expected the sent message echoed back through sync"
+        );
+
+        drop(command_tx);
+        let _ = handle.await;
+    }
+
+    /// Same round-trip as [`login_join_send_roundtrip`], but in an E2E-encrypted
+    /// room: a throwaway setup client (a second device of the same user) joins
+    /// `TIRC_TEST_ROOM` and turns on encryption, then the backend sends into it.
+    /// The backend's own device creates the outbound Megolm session and so can
+    /// decrypt its own echo, exercising the encrypt-then-decrypt path end to end.
+    /// Run it the same way as the other Matrix tests (see the module doc), with a
+    /// `TIRC_TEST_ROOM` you are willing to leave encrypted.
+    #[tokio::test]
+    #[ignore = "requires the local matrix homeserver from dev/matrix"]
+    async fn encrypted_room_send_roundtrip() {
+        let homeserver = std::env::var("TIRC_TEST_HOMESERVER").unwrap();
+        let user_id = std::env::var("TIRC_TEST_USER").unwrap();
+        let password = std::env::var("TIRC_TEST_PASSWORD").unwrap();
+        let room = std::env::var("TIRC_TEST_ROOM").unwrap();
+
+        // Turn on encryption out of band so the backend observes an already
+        // encrypted room when it syncs.
+        let setup = Client::builder()
+            .homeserver_url(&homeserver)
+            .sqlite_store(unique_store_dir(), None)
+            .build()
+            .await
+            .unwrap();
+        setup
+            .matrix_auth()
+            .login_username(&user_id, &password)
+            .initial_device_display_name("tirc-test-setup")
+            .await
+            .unwrap();
+        join(&setup, &room).await.unwrap();
+        setup.sync_once(SyncSettings::default()).await.unwrap();
+        let setup_room = setup.get_room(&RoomId::parse(&room).unwrap()).unwrap();
+        setup_room.enable_encryption().await.unwrap();
+        assert!(
+            setup_room
+                .latest_encryption_state()
+                .await
+                .unwrap()
+                .is_encrypted(),
+            "room should be encrypted before the backend sends into it"
+        );
+
+        let config = MatrixBackendConfig {
+            homeserver,
+            user_id,
+            password,
+            device_id: None,
+            autojoin: vec![room.clone()],
+            store_dir: Some(unique_store_dir()),
+        };
+
+        let backend = Box::new(MatrixBackend::new(BackendId(0), config));
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(backend.run(event_tx, command_rx));
+
+        assert!(
+            wait_for(&mut event_rx, |m| matches!(
+                m.event,
+                BackendEvent::Ready { .. }
+            ))
+            .await,
+            "expected a Ready event after login"
+        );
+
+        command_tx
+            .send(Command::SendMessage {
+                target: TargetId(room),
+                body: "encrypted hello".to_string(),
+                kind: MsgKind::Text,
+                txn: TxnId(1),
+            })
+            .unwrap();
+
+        // Match on `id: Some(_)`: the optimistic local echo (emitted before the
+        // send) has no event id, so requiring one ensures we waited for the real
+        // copy the homeserver round-tripped, i.e. one the backend decrypted.
+        assert!(
+            wait_for(&mut event_rx, |m| matches!(
+                &m.event,
+                BackendEvent::Event(ChatEvent::Message { body, id: Some(_), .. })
+                    if body.text == "encrypted hello"
+            ))
+            .await,
+            "expected the encrypted message decrypted back through sync"
         );
 
         drop(command_tx);

@@ -1,8 +1,9 @@
 # Lightweight local Matrix homeserver for tirc development and testing.
 #
 # Conduit is a single-binary homeserver that is quick to start and supports
-# unencrypted rooms, which is all Phase 2 targets. Open registration is enabled
-# for convenience - this is a throwaway local instance, never expose it.
+# both unencrypted and E2E-encrypted rooms (encryption is client-side; the
+# homeserver only relays ciphertext). Open registration is enabled for
+# convenience - this is a throwaway local instance, never expose it.
 #
 #   docker compose -f dev/matrix/docker-compose.yml up -d
 #   ./dev/matrix/register.sh alice alicepassword

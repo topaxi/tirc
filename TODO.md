@@ -30,9 +30,13 @@ postponed during the protocol-abstraction work.
 - [ ] **Matrix inbound edits / redactions / reactions.** [matrix] `State` already
       handles `ChatEvent::Edit/Redaction/Reaction`; the adapter doesn't emit them,
       and reactions aren't rendered (`[message deleted]`/`(edited)` are).
-- [ ] **Matrix E2E encryption.** [matrix] _(deferred)_ Most real rooms are
-      encrypted; needs device verification + crypto store (re-enable `matrix-sdk`
-      `e2e-encryption`, resolve the async `Send` overflow).
+- [x] **Matrix E2E encryption.** [matrix] `e2e-encryption` is enabled (the async
+      `Send` overflow is resolved with `#![recursion_limit = "256"]`); the crypto
+      store rides the per-account sqlite store, sends auto-encrypt, sync
+      auto-decrypts, backfill decrypts (or shows `[unable to decrypt ...]`), and
+      startup reports the device/cross-signing posture. _Remaining:_ interactive
+      (SAS/QR) device verification from within tirc - incoming requests are only
+      surfaced to the status buffer for now.
 - [ ] **Nick / room completion.** [input] Tab-complete nicknames, `#channels`, room
       aliases.
 - [ ] **Input history.** [input] Up/Down to recall previously sent messages.

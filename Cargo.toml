@@ -31,8 +31,12 @@ textwrap = "0.16"
 itertools = "0.15"
 unicode-width = "0.2"
 async-trait = "0.1.89"
-# E2E encryption is deferred (Phase 2 targets unencrypted rooms) and its crypto
-# store also triggers a Send-bound overflow in async event handlers. rustls TLS
-# is pulled in unconditionally by matrix-sdk, so dropping default features keeps
-# HTTPS working.
-matrix-sdk = { version = "0.18.0", default-features = false, features = ["sqlite"] }
+# rustls TLS is pulled in unconditionally by matrix-sdk, so dropping default
+# features keeps HTTPS working. `e2e-encryption` re-uses the same sqlite store
+# for the crypto state (Olm/Megolm keys); `automatic-room-key-forwarding` lets
+# our other verified sessions forward us room keys so we can decrypt history.
+matrix-sdk = { version = "0.18.0", default-features = false, features = [
+  "sqlite",
+  "e2e-encryption",
+  "automatic-room-key-forwarding",
+] }

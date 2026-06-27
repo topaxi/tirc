@@ -1,8 +1,8 @@
 # Local Matrix homeserver for development
 
 A throwaway [Conduit](https://conduit.rs/) homeserver for testing the Matrix
-backend against **unencrypted** rooms. Never expose this instance; it has open
-registration.
+backend against both unencrypted and **E2E-encrypted** rooms. Never expose this
+instance; it has open registration.
 
 ## Start
 
@@ -52,5 +52,9 @@ docker compose -f dev/matrix/docker-compose.yml down        # stop
 docker compose -f dev/matrix/docker-compose.yml down -v     # stop + wipe data
 ```
 
-E2E-encrypted rooms are out of scope for now; create rooms with encryption
-disabled.
+E2E-encrypted rooms work: the SDK persists its crypto state in the per-account
+sqlite store, sends are auto-encrypted, and incoming events are decrypted when
+the keys are available. A freshly-logged-in session is unverified, so messages
+from senders that only share keys with verified devices show as `[unable to
+decrypt ...]` until you verify this session from another client. Interactive
+(SAS) verification from within tirc is not implemented yet.
