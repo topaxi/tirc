@@ -21,13 +21,11 @@ fn default_port() -> u16 {
     6697
 }
 
-/// One configured backend. `protocol` selects which fields are required; IRC
-/// fields and Matrix fields share this struct so a Lua config author fills in
-/// only the relevant subset. An entry without `protocol` defaults to IRC, so
-/// existing IRC-only configs keep working unchanged.
+/// One configured backend. The required `protocol` selects which fields apply;
+/// IRC fields and Matrix fields share this struct so a Lua config author fills in
+/// only the relevant subset.
 #[derive(Deserialize, Debug)]
 pub struct ServerConfig {
-    #[serde(default)]
     pub protocol: Protocol,
 
     // IRC fields.
@@ -71,6 +69,7 @@ fn get_default_config() -> &'static str {
 
         config.servers = {
           {
+            protocol = 'irc',
             host = 'irc.topaxi.ch',
             nickname = { 'Rincewind', 'Twoflower' },
             port = 6697,
@@ -294,27 +293,22 @@ const LUARC_JSON: &str = r#"{
 /// Exports the bundled Lua type definitions into `<config>/types/` and writes a
 /// `.luarc.json` so an editor's Lua language server can type-check `init.lua`.
 ///
-/// Definitions are refreshed only when the binary version changes (tracked by a
-/// `types/.version` marker), and the `.luarc.json` is written once and never
-/// clobbered, so a user's own language-server settings are preserved.
+/// Each file is rewritten only when its content differs from the bundled copy, so
+/// the definitions track the running binary without needless writes (which would
+/// make the language server re-analyze). The `.luarc.json` is written once and
+/// never clobbered, so a user's own language-server settings are preserved.
 fn write_type_definitions(config_dir: &Path) -> anyhow::Result<()> {
     let types_dir = config_dir.join("types");
-    let version_marker = types_dir.join(".version");
-    let version = env!("CARGO_PKG_VERSION");
 
-    let up_to_date = std::fs::read_to_string(&version_marker)
-        .map(|marker| marker.trim() == version)
-        .unwrap_or(false);
-
-    if !up_to_date {
-        for (relative, content) in TYPE_DEFINITIONS {
-            let path = types_dir.join(relative);
+    for (relative, content) in TYPE_DEFINITIONS {
+        let path = types_dir.join(relative);
+        let up_to_date = std::fs::read_to_string(&path).is_ok_and(|existing| existing == *content);
+        if !up_to_date {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(path, content)?;
         }
-        std::fs::write(&version_marker, version)?;
     }
 
     let luarc = config_dir.join(".luarc.json");
