@@ -171,12 +171,16 @@ impl Renderer {
         };
 
         let target_name = buffer.label(&buffer_id.target);
+        let total = buffer.messages.len();
+        // Clamp scroll so we always render at least the oldest message when any exist.
+        let scroll = buffer.scroll_position.min(total.saturating_sub(1));
         let messages = buffer
             .messages
             .iter()
             .rev()
+            .skip(scroll)
             // Render a bit more than fits, as some lines are filtered out and
-            // others wrap. TODO: scroll from buffer.scroll_position.
+            // others wrap.
             .take((rect.height as usize) + (rect.height as usize) / 2)
             .filter_map(|message| {
                 self.render_message(lua, backend, &buffer_id.target, target_name, message)
@@ -393,7 +397,7 @@ impl Renderer {
         &mut self,
         f: &mut ratatui::Frame,
         state: &State,
-        view: &ViewState,
+        view: &mut ViewState,
         lua: &mlua::Lua,
         input: &Input,
     ) {
@@ -404,7 +408,7 @@ impl Renderer {
             .focused(state, view)
             .map(|(id, buffer, _, _)| (id.target.clone(), &buffer.members));
 
-        match members {
+        let msg_rect = match members {
             Some((target, members)) if members.len() > 1 => {
                 let split = Layout::default()
                     .direction(Direction::Horizontal)
@@ -412,10 +416,13 @@ impl Renderer {
                     .split(chunks[0]);
 
                 self.render_users(f, members, lua, &target, split[1]);
-                self.render_messages(f, state, view, lua, split[0]);
+                split[0]
             }
-            _ => self.render_messages(f, state, view, lua, chunks[0]),
-        }
+            _ => chunks[0],
+        };
+
+        view.viewport_height = msg_rect.height;
+        self.render_messages(f, state, view, lua, msg_rect);
 
         self.render_buffer_bar(f, state, view, chunks[2]);
         self.render_input(f, view, input, chunks[1]);

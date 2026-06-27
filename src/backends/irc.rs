@@ -4,6 +4,8 @@
 //! (this subsumes the old `to_lua_message` shaping and the `get_target_buffer_name`
 //! routing), and outgoing [`Command`]s are translated into IRC sends.
 
+use std::time::Duration;
+
 use futures::prelude::*;
 use irc::client::prelude::{Capability, Client, Config};
 use irc::proto::{message::Tag, Command as IrcCommand, Message, Prefix, Response};
@@ -33,11 +35,16 @@ pub struct IrcBackendConfig {
 pub struct IrcBackend {
     id: BackendId,
     config: IrcBackendConfig,
+    quit_requested: bool,
 }
 
 impl IrcBackend {
     pub fn new(id: BackendId, config: IrcBackendConfig) -> Self {
-        IrcBackend { id, config }
+        IrcBackend {
+            id,
+            config,
+            quit_requested: false,
+        }
     }
 
     fn irc_config(&self) -> anyhow::Result<Config> {
@@ -66,21 +73,17 @@ impl IrcBackend {
     }
 }
 
-#[async_trait::async_trait]
-impl ChatBackend for IrcBackend {
-    fn info(&self) -> BackendInfo {
-        BackendInfo {
-            id: self.id,
-            protocol: Protocol::Irc,
-            name: self.config.host.clone(),
-        }
-    }
-
-    async fn run(
-        self: Box<Self>,
-        events: EventSender,
-        mut commands: CommandReceiver,
-    ) -> anyhow::Result<()> {
+impl IrcBackend {
+    /// One connection attempt. Returns `Ok(true)` if `RPL_WELCOME` was received
+    /// before the connection ended (backoff can reset), `Ok(false)` if the stream
+    /// closed before we were welcomed (keep backoff), or `Err` on a network
+    /// error. Sets `self.quit_requested` when a `Quit` command arrives or the
+    /// command channel closes (UI shutting down).
+    async fn connect_once(
+        &mut self,
+        events: &EventSender,
+        commands: &mut CommandReceiver,
+    ) -> anyhow::Result<bool> {
         let id = self.id;
         let mut client = Client::from_config(self.irc_config()?).await?;
         let mut stream = client.stream()?;
@@ -106,6 +109,8 @@ impl ChatBackend for IrcBackend {
             });
         };
 
+        let mut ready_received = false;
+
         loop {
             tokio::select! {
                 incoming = stream.next() => {
@@ -117,8 +122,8 @@ impl ChatBackend for IrcBackend {
 
                     let nickname = client.current_nickname().to_string();
 
-                    // Surface connection readiness on the welcome numeric.
                     if matches!(&message.command, IrcCommand::Response(Response::RPL_WELCOME, _)) {
+                        ready_received = true;
                         let _ = events.send(BackendMessage {
                             backend: id,
                             event: BackendEvent::Ready { nickname: nickname.clone() },
@@ -131,11 +136,113 @@ impl ChatBackend for IrcBackend {
                 }
                 command = commands.recv() => {
                     match command {
-                        Some(command) => apply_command(&client, &nickname_of(&client), command, &emit)?,
-                        None => break,
+                        Some(crate::core::Command::Quit { reason }) => {
+                            self.quit_requested = true;
+                            // Ignore send error - connection may already be gone.
+                            let _ = client.send_quit(reason.unwrap_or_default());
+                            // Drain until the server closes the stream.
+                            while let Some(Ok(msg)) = stream.next().await {
+                                let nick = client.current_nickname().to_string();
+                                for event in translate(&msg, &nick) {
+                                    emit(event);
+                                }
+                            }
+                            return Ok(ready_received);
+                        }
+                        Some(command) => {
+                            apply_command(&client, &nickname_of(&client), command, &emit)?;
+                        }
+                        None => {
+                            // Command channel closed: UI is shutting down.
+                            self.quit_requested = true;
+                            return Ok(ready_received);
+                        }
                     }
                 }
             }
+        }
+
+        Ok(ready_received)
+    }
+}
+
+const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(300);
+
+#[async_trait::async_trait]
+impl ChatBackend for IrcBackend {
+    fn info(&self) -> BackendInfo {
+        BackendInfo {
+            id: self.id,
+            protocol: Protocol::Irc,
+            name: self.config.host.clone(),
+        }
+    }
+
+    async fn run(
+        self: Box<Self>,
+        events: EventSender,
+        mut commands: CommandReceiver,
+    ) -> anyhow::Result<()> {
+        let mut this = *self;
+        let mut backoff = Duration::from_secs(1);
+
+        loop {
+            let result = this.connect_once(&events, &mut commands).await;
+
+            if this.quit_requested {
+                break;
+            }
+
+            let ready = match &result {
+                Ok(ready) => {
+                    let _ = events.send(BackendMessage {
+                        backend: this.id,
+                        event: BackendEvent::Disconnected {
+                            reason: Some("Server closed connection".to_string()),
+                        },
+                    });
+                    *ready
+                }
+                Err(e) => {
+                    let _ = events.send(BackendMessage {
+                        backend: this.id,
+                        event: BackendEvent::Error {
+                            message: e.to_string(),
+                        },
+                    });
+                    false
+                }
+            };
+
+            if ready {
+                backoff = Duration::from_secs(1);
+            }
+
+            let _ = events.send(BackendMessage {
+                backend: this.id,
+                event: BackendEvent::Event(ChatEvent::ServerInfo {
+                    target: None,
+                    from: None,
+                    code: None,
+                    text: format!("Reconnecting in {}s...", backoff.as_secs()),
+                    raw: None,
+                }),
+            });
+
+            tokio::select! {
+                _ = tokio::time::sleep(backoff) => {}
+                cmd = commands.recv() => {
+                    match cmd {
+                        Some(crate::core::Command::Quit { .. }) | None => {
+                            this.quit_requested = true;
+                            break;
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+
+            backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
         }
 
         Ok(())
@@ -197,7 +304,8 @@ fn apply_command(
         Command::SetNick { nick } => client.send(IrcCommand::NICK(nick))?,
         Command::Whois { user } => client.send(IrcCommand::WHOIS(None, user))?,
         Command::ListChannels => client.send(IrcCommand::LIST(None, None))?,
-        Command::Quit { reason } => client.send_quit(reason.unwrap_or_default())?,
+        // Quit is handled before apply_command is called (in connect_once).
+        Command::Quit { .. } => {}
         // IRC has no native reactions or message deletion.
         Command::React { .. } | Command::Redact { .. } => {}
     }

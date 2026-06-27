@@ -1,4 +1,6 @@
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -43,7 +45,12 @@ impl Tui {
 
     fn restore_terminal() -> io::Result<()> {
         disable_raw_mode()?;
-        execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+        execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableBracketedPaste
+        )?;
 
         Ok(())
     }
@@ -68,7 +75,8 @@ impl Tui {
         execute!(
             self.terminal.backend_mut(),
             EnterAlternateScreen,
-            EnableMouseCapture
+            EnableMouseCapture,
+            EnableBracketedPaste
         )?;
 
         Ok(())
@@ -78,7 +86,7 @@ impl Tui {
         &mut self,
         lua: &Lua,
         state: &State,
-        view: &ViewState,
+        view: &mut ViewState,
     ) -> Result<(), anyhow::Error> {
         self.terminal.draw(|f| {
             self.renderer.render(f, state, view, lua, &self.input);
@@ -95,7 +103,8 @@ impl Drop for Tui {
         let _ = execute!(
             self.terminal.backend_mut(),
             LeaveAlternateScreen,
-            DisableMouseCapture
+            DisableMouseCapture,
+            DisableBracketedPaste
         );
     }
 }

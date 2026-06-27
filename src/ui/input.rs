@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent};
+use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use mlua::Lua;
 
 use crate::backends::BackendHandle;
@@ -19,6 +19,8 @@ use super::{Mode, State, ViewState};
 #[derive(Debug)]
 pub enum Event {
     Input(KeyEvent),
+    Mouse(crossterm::event::MouseEvent),
+    Paste(String),
     Backend(BackendMessage),
     Tick,
 }
@@ -53,7 +55,7 @@ impl<'lua> InputHandler<'lua> {
         &self.ui
     }
 
-    pub fn render_ui(&mut self, state: &State, view: &ViewState) -> Result<(), anyhow::Error> {
+    pub fn render_ui(&mut self, state: &State, view: &mut ViewState) -> Result<(), anyhow::Error> {
         self.ui.render(self.lua, state, view)
     }
 
@@ -71,6 +73,42 @@ impl<'lua> InputHandler<'lua> {
                 kind,
                 txn: self.txn.next(),
             });
+        }
+    }
+
+    fn handle_mouse(
+        &mut self,
+        state: &mut State,
+        view: &mut ViewState,
+        event: crossterm::event::MouseEvent,
+    ) {
+        let delta = 3usize;
+        match event.kind {
+            MouseEventKind::ScrollUp => {
+                if let Some(buffer) = state.focused_buffer_mut(view) {
+                    buffer.scroll_up(delta);
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if let Some(buffer) = state.focused_buffer_mut(view) {
+                    buffer.scroll_down(delta);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_paste(&mut self, view: &ViewState, text: String) {
+        if view.mode != Mode::Insert {
+            return;
+        }
+        // Collapse CR/LF to a space - a multi-line paste must not send multiple messages.
+        for ch in text.chars() {
+            let ch = if ch == '\r' || ch == '\n' { ' ' } else { ch };
+            self.ui.handle_event(&CrosstermEvent::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
         }
     }
 
@@ -210,11 +248,31 @@ impl<'lua> InputHandler<'lua> {
     ) -> Result<bool, anyhow::Error> {
         match event {
             Event::Input(key) => self.handle_key(state, view, key),
+            Event::Mouse(mouse) => {
+                self.handle_mouse(state, view, mouse);
+                Ok(true)
+            }
+            Event::Paste(text) => {
+                self.handle_paste(view, text);
+                Ok(true)
+            }
             Event::Backend(message) => {
-                self.handle_backend(state, message);
+                self.handle_backend(state, view, message);
                 Ok(true)
             }
             Event::Tick => Ok(true),
+        }
+    }
+
+    fn scroll_up(&self, state: &mut State, view: &ViewState, lines: usize) {
+        if let Some(buffer) = state.focused_buffer_mut(view) {
+            buffer.scroll_up(lines);
+        }
+    }
+
+    fn scroll_down(&self, state: &mut State, view: &ViewState, lines: usize) {
+        if let Some(buffer) = state.focused_buffer_mut(view) {
+            buffer.scroll_down(lines);
         }
     }
 
@@ -224,12 +282,36 @@ impl<'lua> InputHandler<'lua> {
         view: &mut ViewState,
         event: KeyEvent,
     ) -> Result<bool, anyhow::Error> {
+        let page = (view.viewport_height as usize).max(1);
+
         match (view.mode, event.code) {
             (Mode::Normal, KeyCode::Tab) => view.next_buffer(state),
             (Mode::Normal, KeyCode::BackTab) => view.previous_buffer(state),
             (Mode::Normal, code) if Self::key_code_is_digit(code) => {
                 let index = Self::get_key_code_as_digit(code) as usize;
                 view.focus_buffer_index(state, index);
+            }
+            (Mode::Normal, KeyCode::PageUp) => self.scroll_up(state, view, page),
+            (Mode::Normal, KeyCode::PageDown) => self.scroll_down(state, view, page),
+            (Mode::Normal, KeyCode::Char('u'))
+                if event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.scroll_up(state, view, page / 2)
+            }
+            (Mode::Normal, KeyCode::Char('d'))
+                if event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.scroll_down(state, view, page / 2)
+            }
+            (Mode::Normal, KeyCode::Home) => {
+                if let Some(buffer) = state.focused_buffer_mut(view) {
+                    buffer.scroll_to_top(view.viewport_height as usize);
+                }
+            }
+            (Mode::Normal, KeyCode::End) => {
+                if let Some(buffer) = state.focused_buffer_mut(view) {
+                    buffer.scroll_to_bottom();
+                }
             }
             (Mode::Normal, KeyCode::Char('i')) => view.mode = Mode::Insert,
             (Mode::Normal, KeyCode::Char(':')) => view.mode = Mode::Command,
@@ -260,7 +342,7 @@ impl<'lua> InputHandler<'lua> {
         Ok(true)
     }
 
-    fn handle_backend(&mut self, state: &mut State, message: BackendMessage) {
+    fn handle_backend(&mut self, state: &mut State, view: &ViewState, message: BackendMessage) {
         let backend = message.backend;
 
         match message.event {
@@ -277,7 +359,22 @@ impl<'lua> InputHandler<'lua> {
             }
             BackendEvent::Event(event) => {
                 self.emit_lua_event(state, backend, &event);
+                // Anchor the view: if the user has scrolled up in the focused
+                // buffer, advance scroll_position so that the same messages
+                // stay visible when a new one is appended at the tail.
+                let before = state
+                    .focused_buffer_mut(view)
+                    .map(|b| (b.messages.len(), b.scroll_position));
                 state.apply(backend, event);
+                if let Some((len_before, pos)) = before {
+                    if pos > 0 {
+                        if let Some(buffer) = state.focused_buffer_mut(view) {
+                            if buffer.messages.len() > len_before {
+                                buffer.scroll_position = pos + (buffer.messages.len() - len_before);
+                            }
+                        }
+                    }
+                }
             }
         }
     }

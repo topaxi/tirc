@@ -4,6 +4,8 @@ use std::time::Duration;
 use crossterm::event::{Event as CrosstermEvent, EventStream};
 use futures::StreamExt;
 
+use tirc::core::ChatEvent;
+
 use anyhow::Context;
 
 use tirc::backends::irc::{IrcBackend, IrcBackendConfig};
@@ -105,12 +107,15 @@ async fn root_task(lua: &mlua::Lua, config: &TircConfig) -> Result<(), anyhow::E
     tokio::pin!(terminate);
 
     loop {
-        input_handler.render_ui(&state, &view)?;
+        input_handler.render_ui(&state, &mut view)?;
 
         let event = tokio::select! {
-            Some(event) = events.next() => match event? {
-                CrosstermEvent::Key(key) => Event::Input(key),
-                _ => continue,
+            Some(event) = events.next() => match event {
+                Ok(CrosstermEvent::Key(key)) => Event::Input(key),
+                Ok(CrosstermEvent::Mouse(mouse)) => Event::Mouse(mouse),
+                Ok(CrosstermEvent::Paste(text)) => Event::Paste(text),
+                Ok(_) => continue,
+                Err(_) => continue,
             },
             Some(message) = event_rx.recv() => Event::Backend(message),
             _ = tick.tick() => Event::Tick,
@@ -120,7 +125,22 @@ async fn root_task(lua: &mlua::Lua, config: &TircConfig) -> Result<(), anyhow::E
         match input_handler.handle_event(&mut state, &mut view, event) {
             Ok(true) => {}
             Ok(false) => break,
-            Err(err) => return Err(err),
+            Err(err) => {
+                // Surface handler errors to the focused buffer's status rather
+                // than exiting, so a transient Lua or IRC error is recoverable.
+                if let Some(backend) = view.focused.as_ref().map(|b| b.backend) {
+                    state.apply(
+                        backend,
+                        ChatEvent::ServerInfo {
+                            target: None,
+                            from: None,
+                            code: None,
+                            text: format!("Error: {err}"),
+                            raw: None,
+                        },
+                    );
+                }
+            }
         }
     }
 

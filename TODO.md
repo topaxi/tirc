@@ -13,20 +13,10 @@ postponed during the protocol-abstraction work.
 
 ## P0 - Necessary
 
-- [ ] **Message scrollback.** [read] Can't scroll up to read history at all.
-      `ChatBuffer.scroll_position` exists (`src/ui/state.rs`) but is unused;
-      `renderer.rs` always renders the tail. Wire PageUp/PageDown, `Ctrl-U`/`Ctrl-D`,
-      Home/End, mouse wheel. Pair with Matrix pagination (P1).
 - [ ] **Selectable text / copy-paste.** [mouse] Mouse capture suppresses the
       terminal's native selection. Add a copy/selection mode (release capture,
-      tmux-style) and/or app-level selection + clipboard yank.
-- [ ] **Auto-reconnect with backoff.** [net] A backend that errors emits
-      `BackendEvent::Error`/`Disconnected` and stops (`backends/mod.rs::spawn`); it
-      must reconnect on its own.
-- [ ] **Don't exit on errors; surface them.** [net] A handler error currently breaks
-      the main loop and quits (`main.rs`); route failures to the status buffer.
-- [ ] **Paste safety.** [input] A multi-line paste must not send one message per
-      line; buffer it (precursor to multiline composing in P1).
+      tmux-style) and/or app-level selection + clipboard yank. _(deferred: conflicts
+      with scroll mouse handling added in the scrollback work)_
 
 ## P1 - Expected
 

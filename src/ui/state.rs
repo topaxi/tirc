@@ -86,6 +86,29 @@ impl ChatBuffer {
 }
 
 impl ChatBuffer {
+    /// Scroll toward older messages. Clamped so the oldest message stays
+    /// visible - advancing past it would produce a blank screen.
+    pub fn scroll_up(&mut self, lines: usize) {
+        let max = self.messages.len().saturating_sub(1);
+        self.scroll_position = self.scroll_position.saturating_add(lines).min(max);
+    }
+
+    /// Scroll toward newer messages. Clamps at 0 (the tail).
+    pub fn scroll_down(&mut self, lines: usize) {
+        self.scroll_position = self.scroll_position.saturating_sub(lines);
+    }
+
+    /// Scroll so the oldest messages fill a full viewport. Requires the
+    /// current viewport height so the oldest line lands at the top, not the bottom.
+    pub fn scroll_to_top(&mut self, viewport_height: usize) {
+        self.scroll_position = self.messages.len().saturating_sub(viewport_height);
+    }
+
+    /// Return to the newest messages.
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_position = 0;
+    }
+
     fn upsert_member(&mut self, user: UserRef, role: MemberRole) {
         match self.members.iter_mut().find(|m| m.user.id == user.id) {
             Some(member) => {
@@ -174,6 +197,11 @@ impl State {
             .get(&backend)
             .map(|state| state.nickname.as_str())
             .unwrap_or_default()
+    }
+
+    pub fn focused_buffer_mut<'a>(&'a mut self, view: &ViewState) -> Option<&'a mut ChatBuffer> {
+        let focused = view.focused.as_ref()?;
+        self.buffers.get_mut(focused)
     }
 
     fn buffer_mut(&mut self, backend: BackendId, target: TargetId) -> &mut ChatBuffer {
@@ -388,6 +416,10 @@ impl State {
 pub struct ViewState {
     pub mode: Mode,
     pub focused: Option<BufferId>,
+    /// Height of the message area from the most recent render (terminal rows).
+    /// Updated by the renderer after each draw; used by scroll key handlers to
+    /// compute page-height steps without a second terminal size query.
+    pub viewport_height: u16,
 }
 
 impl ViewState {
@@ -639,5 +671,70 @@ mod tests {
         assert_eq!(view.focused.as_ref().unwrap().target.as_str(), "#a");
         view.previous_buffer(&state);
         assert!(view.focused.as_ref().unwrap().target.is_status());
+    }
+
+    fn buffer_with_messages(n: usize) -> ChatBuffer {
+        let mut buf = ChatBuffer::default();
+        for i in 0..n {
+            let event = ChatEvent::Message {
+                target: TargetId::from("#test"),
+                id: None,
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain(format!("msg {i}")),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            };
+            buf.messages.push(StoredMessage::new(event, false));
+        }
+        buf
+    }
+
+    #[test]
+    fn scroll_up_clamps_at_last_message() {
+        let mut buf = buffer_with_messages(10);
+        buf.scroll_up(5);
+        assert_eq!(buf.scroll_position, 5);
+        buf.scroll_up(100);
+        // max is messages.len() - 1 = 9
+        assert_eq!(buf.scroll_position, 9);
+    }
+
+    #[test]
+    fn scroll_down_clamps_at_zero() {
+        let mut buf = buffer_with_messages(10);
+        buf.scroll_position = 5;
+        buf.scroll_down(3);
+        assert_eq!(buf.scroll_position, 2);
+        buf.scroll_down(100);
+        assert_eq!(buf.scroll_position, 0);
+    }
+
+    #[test]
+    fn scroll_to_top_leaves_viewport_height_messages_visible() {
+        let mut buf = buffer_with_messages(20);
+        buf.scroll_to_top(10);
+        // With 20 messages and viewport 10, scroll_position should be 10
+        // so that messages [0..10] (oldest) fill the screen.
+        assert_eq!(buf.scroll_position, 10);
+    }
+
+    #[test]
+    fn scroll_to_bottom_returns_to_tail() {
+        let mut buf = buffer_with_messages(10);
+        buf.scroll_position = 7;
+        buf.scroll_to_bottom();
+        assert_eq!(buf.scroll_position, 0);
+    }
+
+    #[test]
+    fn scroll_on_empty_buffer_is_safe() {
+        let mut buf = ChatBuffer::default();
+        buf.scroll_up(5);
+        assert_eq!(buf.scroll_position, 0);
+        buf.scroll_down(5);
+        assert_eq!(buf.scroll_position, 0);
+        buf.scroll_to_top(10);
+        assert_eq!(buf.scroll_position, 0);
     }
 }
