@@ -322,6 +322,7 @@ impl<'lua> InputHandler<'lua> {
 fn server_info(text: String) -> ChatEvent {
     ChatEvent::ServerInfo {
         target: None,
+        from: None,
         code: None,
         text,
         raw: None,

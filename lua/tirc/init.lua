@@ -35,10 +35,12 @@
 ---@field kind? 'text' | 'action' | 'notice' message presentation
 ---@field who? TircUserRef set for 'membership'/'topic'/'rename'/'quit'
 ---@field change? 'present' | 'join' | 'part' | 'kick' | 'invite' | 'set_role'
+---@field realname? string IRC extended-join real name, set for 'join'
 ---@field role? 'owner' | 'admin' | 'op' | 'halfop' | 'voice' | 'member'
 ---@field reason? string
 ---@field topic? string set for 'topic'
 ---@field new? string set for 'rename'
+---@field from? string originating server/nick for 'server_info'
 ---@field code? string protocol classifier for 'server_info' (e.g. 'RPL_WELCOME', 'MODE')
 ---@field text? string set for 'server_info'
 ---@field raw? string wire representation escape hatch

@@ -198,7 +198,11 @@ pub enum MembershipChange {
     Present {
         role: MemberRole,
     },
-    Join,
+    Join {
+        /// IRC extended-join real name / gecos, when advertised. `None` for
+        /// Matrix (which surfaces a display name via [`UserRef::display`]).
+        realname: Option<String>,
+    },
     Part {
         reason: Option<String>,
     },
@@ -272,12 +276,14 @@ pub enum ChatEvent {
         reason: Option<String>,
     },
     /// Server-originated or otherwise un-normalized line. `target` of `None`
-    /// routes to the backend's status buffer. `code` is a protocol-specific
-    /// classifier (IRC numeric symbolic name like `RPL_WELCOME`, or a verb like
-    /// `MODE`; later a Matrix state-event type) that themes can branch on or
-    /// suppress. `raw` carries the wire representation for theme escape hatches.
+    /// routes to the backend's status buffer. `from` is the originating server
+    /// or nick, when known. `code` is a protocol-specific classifier (IRC numeric
+    /// symbolic name like `RPL_WELCOME`, or a verb like `MODE`; later a Matrix
+    /// state-event type) that themes can branch on or suppress. `raw` carries the
+    /// wire representation for theme escape hatches.
     ServerInfo {
         target: Option<TargetId>,
+        from: Option<String>,
         code: Option<String>,
         text: String,
         raw: Option<String>,

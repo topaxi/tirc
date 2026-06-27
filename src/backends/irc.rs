@@ -6,7 +6,7 @@
 
 use futures::prelude::*;
 use irc::client::prelude::{Capability, Client, Config};
-use irc::proto::{message::Tag, Command as IrcCommand, Message, Response};
+use irc::proto::{message::Tag, Command as IrcCommand, Message, Prefix, Response};
 
 use crate::core::{
     BackendEvent, BackendId, BackendMessage, ChatEvent, Command, MemberRole, MembershipChange,
@@ -262,19 +262,46 @@ fn role_from_prefix(prefix: char) -> Option<MemberRole> {
 
 /// Splits an entry from an RPL_NAMREPLY list into its highest role and bare nick.
 /// With `multi-prefix`, entries may carry several prefixes (e.g. `@+nick`); the
-/// first (highest) wins.
+/// first (highest) wins. With `userhost-in-names`, entries are `nick!user@host`;
+/// only the nick is kept.
 fn parse_names_entry(entry: &str) -> (MemberRole, &str) {
-    let mut role = MemberRole::Member;
-    let mut rest = entry;
+    let role = entry
+        .chars()
+        .next()
+        .and_then(role_from_prefix)
+        .unwrap_or(MemberRole::Member);
 
-    if let Some(first) = rest.chars().next() {
-        if let Some(parsed) = role_from_prefix(first) {
-            role = parsed;
-        }
+    let rest = entry.trim_start_matches(|c| role_from_prefix(c).is_some());
+    let nick = rest.split('!').next().unwrap_or(rest);
+    (role, nick)
+}
+
+/// The originating server name or nick from a message prefix, if any.
+fn prefix_name(message: &Message) -> Option<String> {
+    match &message.prefix {
+        Some(Prefix::Nickname(nick, _, _)) => Some(nick.clone()),
+        Some(Prefix::ServerName(server)) => Some(server.clone()),
+        None => None,
     }
+}
 
-    rest = rest.trim_start_matches(|c| role_from_prefix(c).is_some());
-    (role, rest)
+/// The MODE command without its `MODE ` verb, i.e. `<target> <modes> [args]`,
+/// which the theme parses to render `cmode/`/`umode/` lines.
+fn mode_text(message: &Message) -> String {
+    let command = String::from(&message.command);
+    command
+        .strip_prefix("MODE ")
+        .map(str::to_string)
+        .unwrap_or(command)
+}
+
+/// Renders a numeric reply's parameters as display text, dropping the leading
+/// target nick so replies like ISUPPORT keep their tokens.
+fn numeric_text(args: &[String]) -> String {
+    match args.split_first() {
+        Some((_, rest)) if !rest.is_empty() => rest.join(" "),
+        _ => args.join(" "),
+    }
 }
 
 /// Translates an incoming IRC message into zero or more normalized events. Most
@@ -323,6 +350,7 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
             if source.is_none() && message.prefix.is_some() {
                 return Some(ChatEvent::ServerInfo {
                     target: Some(target_id),
+                    from: prefix_name(message),
                     code: Some("PRIVMSG".to_string()),
                     text: text.clone(),
                     raw: Some(raw()),
@@ -359,16 +387,19 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
                 }),
                 None => Some(ChatEvent::ServerInfo {
                     target: Some(target_id),
+                    from: prefix_name(message),
                     code: Some("NOTICE".to_string()),
                     text: text.clone(),
                     raw: Some(raw()),
                 }),
             }
         }
-        IrcCommand::JOIN(channel, _, _) => Some(ChatEvent::Membership {
+        IrcCommand::JOIN(channel, _account, realname) => Some(ChatEvent::Membership {
             target: TargetId(channel.clone()),
             who: UserRef::new(message.source_nickname()?.to_string()),
-            change: MembershipChange::Join,
+            change: MembershipChange::Join {
+                realname: realname.clone(),
+            },
         }),
         IrcCommand::PART(channel, reason) => Some(ChatEvent::Membership {
             target: TargetId(channel.clone()),
@@ -394,14 +425,27 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
         }),
         IrcCommand::ChannelMODE(channel, _) => Some(ChatEvent::ServerInfo {
             target: Some(TargetId(channel.clone())),
+            from: prefix_name(message),
             code: Some("MODE".to_string()),
-            text: raw(),
+            // `<target> <modestring> [args]` (no verb/tags/prefix) so the theme can
+            // render it structurally, e.g. `cmode/#c +nt`.
+            text: mode_text(message),
+            raw: Some(raw()),
+        }),
+        IrcCommand::UserMODE(_, _) => Some(ChatEvent::ServerInfo {
+            target: None,
+            from: prefix_name(message),
+            code: Some("MODE".to_string()),
+            text: mode_text(message),
             raw: Some(raw()),
         }),
         IrcCommand::Response(response, args) => Some(ChatEvent::ServerInfo {
             target: None,
+            from: prefix_name(message),
             code: Some(format!("{response:?}")),
-            text: args.last().cloned().unwrap_or_default(),
+            // Drop the leading target nick; keep the remaining params, which for
+            // replies like ISUPPORT (005) carry the actual tokens.
+            text: numeric_text(args),
             raw: Some(raw()),
         }),
         // PING/PONG/CAP/etc. carry no user-facing content.
@@ -493,7 +537,7 @@ mod tests {
         assert!(matches!(
             translate_raw("me", ":alice!u@h JOIN #tirc").unwrap(),
             ChatEvent::Membership {
-                change: MembershipChange::Join,
+                change: MembershipChange::Join { .. },
                 ..
             }
         ));
@@ -529,6 +573,79 @@ mod tests {
         assert_eq!(roles[0], (MemberRole::Op, "alice".to_string()));
         assert_eq!(roles[1], (MemberRole::Voice, "bob".to_string()));
         assert_eq!(roles[2], (MemberRole::Member, "carol".to_string()));
+    }
+
+    #[test]
+    fn channel_mode_text_drops_verb_and_metadata() {
+        let event = translate_raw(
+            "me",
+            "@time=2026-06-27T11:46:54.613Z :irc.topaxi.ch MODE #tirc +n+t",
+        )
+        .unwrap();
+        match event {
+            ChatEvent::ServerInfo {
+                code, text, target, ..
+            } => {
+                assert_eq!(code.as_deref(), Some("MODE"));
+                assert_eq!(text, "#tirc +n+t");
+                assert_eq!(target.as_ref().map(TargetId::as_str), Some("#tirc"));
+            }
+            other => panic!("expected server info, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extended_join_carries_realname() {
+        let event = translate_raw("me", ":topaxci!u@h JOIN #tirc account :Damian").unwrap();
+        match event {
+            ChatEvent::Membership {
+                change: MembershipChange::Join { realname },
+                ..
+            } => assert_eq!(realname.as_deref(), Some("Damian")),
+            other => panic!("expected join, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn names_reply_strips_userhost_and_keeps_role() {
+        // With userhost-in-names + multi-prefix the entry is `@nick!user@host`.
+        let events = translate(
+            &parse(":irc.example.com 353 me = #tirc :@topaxi!topaxi@host alice!a@h"),
+            "me",
+        );
+        let roles: Vec<(MemberRole, String)> = events
+            .into_iter()
+            .map(|event| match event {
+                ChatEvent::Membership {
+                    who,
+                    change: MembershipChange::Present { role },
+                    ..
+                } => (role, who.id),
+                other => panic!("expected present membership, got {other:?}"),
+            })
+            .collect();
+
+        assert_eq!(roles[0], (MemberRole::Op, "topaxi".to_string()));
+        assert_eq!(roles[1], (MemberRole::Member, "alice".to_string()));
+    }
+
+    #[test]
+    fn isupport_keeps_all_tokens() {
+        let event = translate_raw(
+            "me",
+            ":irc.example.com 005 me NICKLEN=30 PREFIX=(qaohv)~&@%+ :are supported by this server",
+        )
+        .unwrap();
+        match event {
+            ChatEvent::ServerInfo { text, from, .. } => {
+                assert_eq!(
+                    text,
+                    "NICKLEN=30 PREFIX=(qaohv)~&@%+ are supported by this server"
+                );
+                assert_eq!(from.as_deref(), Some("irc.example.com"));
+            }
+            other => panic!("expected server info, got {other:?}"),
+        }
     }
 
     #[test]

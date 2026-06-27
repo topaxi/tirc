@@ -413,7 +413,7 @@ mod tests {
             ChatEvent::Membership {
                 target: TargetId::from("#tirc"),
                 who: UserRef::new("alice"),
-                change: MembershipChange::Join,
+                change: MembershipChange::Join { realname: None },
             },
             ChatEvent::Membership {
                 target: TargetId::from("#tirc"),
@@ -422,8 +422,16 @@ mod tests {
             },
             ChatEvent::ServerInfo {
                 target: None,
+                from: Some("irc.example.com".to_string()),
                 code: Some("RPL_WELCOME".to_string()),
                 text: "Welcome to the network".to_string(),
+                raw: None,
+            },
+            ChatEvent::ServerInfo {
+                target: Some(TargetId::from("#tirc")),
+                from: Some("op".to_string()),
+                code: Some("MODE".to_string()),
+                text: "#tirc +o-v alice bob".to_string(),
                 raw: None,
             },
         ];

@@ -289,7 +289,7 @@ impl State {
                 buffer.set_member_role(&who.id, *role);
                 return;
             }
-            MembershipChange::Join => buffer.upsert_member(who, MemberRole::Member),
+            MembershipChange::Join { .. } => buffer.upsert_member(who, MemberRole::Member),
             MembershipChange::Part { .. } | MembershipChange::Kick { .. } => {
                 buffer.remove_member(&who.id);
             }
@@ -482,7 +482,7 @@ mod tests {
             ChatEvent::Membership {
                 target: TargetId::from("#tirc"),
                 who: UserRef::new("alice"),
-                change: MembershipChange::Join,
+                change: MembershipChange::Join { realname: None },
             },
         );
         let buffer = buffer(&state, "#tirc");
@@ -517,7 +517,7 @@ mod tests {
             ChatEvent::Membership {
                 target: TargetId::from("#tirc"),
                 who: UserRef::new("alice"),
-                change: MembershipChange::Join,
+                change: MembershipChange::Join { realname: None },
             },
         );
         state.apply(

@@ -98,16 +98,24 @@ local function format_membership(event)
 
   local verb = ({
     join = ' has joined ',
-    part = ' has left ',
+    part = ' has parted ',
     kick = ' was kicked from ',
     invite = ' was invited to ',
   })[change] or ' '
 
-  local line = {
-    { event.who.name, blue },
-    { verb, twhite },
-    { event.target, green },
-  }
+  local line = { { event.who.name, blue } }
+
+  -- Extended-join real name, e.g. `topaxi (Damian) has joined #tirc`.
+  if change == 'join' and event.realname and event.realname ~= 'Unknown' then
+    line[#line + 1] = {
+      { ' (', gray },
+      { event.realname, blue },
+      { ')', gray },
+    }
+  end
+
+  line[#line + 1] = { verb, twhite }
+  line[#line + 1] = { event.target, green }
 
   if event.reason and event.reason ~= '' then
     line[#line + 1] = { ' (' .. event.reason .. ')', gray }
@@ -150,8 +158,67 @@ local function format_quit(event)
   return line
 end
 
+---@param modestring string
+local function format_modestring(modestring)
+  local spans = {}
+
+  for ch in modestring:gmatch('.') do
+    if ch == '+' then
+      spans[#spans + 1] = { ch, green }
+    elseif ch == '-' then
+      spans[#spans + 1] = { ch, red }
+    else
+      spans[#spans + 1] = ch
+    end
+  end
+
+  return spans
+end
+
+--- Renders a MODE line from `event.text` of `<target> <modestring> [args]`,
+--- e.g. `cmode/#tirc +nt` or `umode/topaxi +iwxz`.
+---@param event TircEvent
+local function format_mode(event)
+  local parts = utils.split(event.text, '%s')
+  local target = parts[1] or ''
+  local modestring = parts[2] or ''
+  local is_channel_mode = target:match('^[#&]') ~= nil
+  local prefix = is_channel_mode and 'cmode' or 'umode'
+
+  local result = {
+    { prefix .. '/', twhite },
+    { target, is_channel_mode and green or blue },
+    ' ',
+    format_modestring(modestring),
+  }
+
+  if #parts > 2 then
+    local args = {}
+    for i = 3, #parts do
+      args[#args + 1] = parts[i]
+    end
+    result[#result + 1] = ' '
+    result[#result + 1] = table.concat(args, ' ')
+  end
+
+  return result
+end
+
 ---@param event TircEvent
 local function format_server_info(event)
+  if event.code == 'MODE' then
+    return format_mode(event)
+  end
+
+  -- Server notices keep the originating server name, like `!irc.example.com ...`.
+  if event.code == 'NOTICE' and event.from then
+    return {
+      { '!' .. event.from, green },
+      ' ',
+      event.text,
+    }
+  end
+
   return utils.list_concat(server_notice_icon, { event.text })
 end
 

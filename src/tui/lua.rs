@@ -197,9 +197,14 @@ pub fn to_lua_event(
             table.set("reason", reason.clone())?;
         }
         ChatEvent::ServerInfo {
-            code, text, raw, ..
+            from,
+            code,
+            text,
+            raw,
+            ..
         } => {
             table.set("type", "server_info")?;
+            table.set("from", from.clone())?;
             table.set("code", code.clone())?;
             table.set("text", text.as_str())?;
             table.set("raw", raw.clone())?;
@@ -219,7 +224,10 @@ fn set_membership_change(
             table.set("change", "present")?;
             table.set("role", role_str(*role))?;
         }
-        MembershipChange::Join => table.set("change", "join")?,
+        MembershipChange::Join { realname } => {
+            table.set("change", "join")?;
+            table.set("realname", realname.clone())?;
+        }
         MembershipChange::Part { reason } => {
             table.set("change", "part")?;
             table.set("reason", reason.clone())?;
@@ -353,6 +361,7 @@ mod tests {
         let lua = mlua::Lua::new();
         let message = stored(ChatEvent::ServerInfo {
             target: None,
+            from: Some("irc.example.com".to_string()),
             code: Some("RPL_WELCOME".to_string()),
             text: "Welcome".to_string(),
             raw: None,
