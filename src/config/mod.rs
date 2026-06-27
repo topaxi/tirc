@@ -387,8 +387,8 @@ mod tests {
     /// formatter and returns the raw Lua result.
     fn render_message_text(lua: &Lua, event: ChatEvent) -> mlua::Value {
         let message = stored(event);
-        let table =
-            to_lua_event(lua, &message, &backend(), &TargetId::from("#tirc")).expect("event table");
+        let table = to_lua_event(lua, &message, &backend(), &TargetId::from("#tirc"), "#tirc")
+            .expect("event table");
 
         call_formatter(lua, "message_text", (table, "me".to_string()))
             .expect("message_text formatter registered")

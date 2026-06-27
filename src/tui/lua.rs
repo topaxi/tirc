@@ -126,6 +126,7 @@ pub fn to_lua_event(
     message: &StoredMessage,
     backend: &BackendInfo,
     target: &TargetId,
+    target_name: &str,
 ) -> mlua::Result<mlua::Table> {
     let table = lua.create_table()?;
 
@@ -136,6 +137,8 @@ pub fn to_lua_event(
     table.set("backend", backend_table)?;
 
     table.set("target", target.as_str())?;
+    // Friendly buffer name (Matrix room name); equals `target` for IRC.
+    table.set("target_name", target_name)?;
     table.set("pending", message.pending)?;
     table.set("redacted", message.redacted)?;
 
@@ -346,7 +349,14 @@ mod tests {
             echo_of: None,
         });
 
-        let table = to_lua_event(&lua, &message, &backend(), &TargetId::from("#tirc")).unwrap();
+        let table = to_lua_event(
+            &lua,
+            &message,
+            &backend(),
+            &TargetId::from("#tirc"),
+            "#tirc",
+        )
+        .unwrap();
         assert_eq!(table.get::<String>("type").unwrap(), "message");
         assert_eq!(table.get::<String>("kind").unwrap(), "text");
 
@@ -371,7 +381,8 @@ mod tests {
             raw: None,
         });
 
-        let table = to_lua_event(&lua, &message, &backend(), &TargetId::status()).unwrap();
+        let table =
+            to_lua_event(&lua, &message, &backend(), &TargetId::status(), "(status)").unwrap();
         assert_eq!(table.get::<String>("type").unwrap(), "server_info");
         assert_eq!(table.get::<String>("code").unwrap(), "RPL_WELCOME");
     }
@@ -385,7 +396,14 @@ mod tests {
             body: MessageBody::plain("edited"),
         });
 
-        let table = to_lua_event(&lua, &message, &backend(), &TargetId::from("!room:m")).unwrap();
+        let table = to_lua_event(
+            &lua,
+            &message,
+            &backend(),
+            &TargetId::from("!room:m"),
+            "room",
+        )
+        .unwrap();
         assert_eq!(table.get::<String>("type").unwrap(), "edit");
         let body: mlua::Table = table.get("body").unwrap();
         assert_eq!(body.get::<String>("text").unwrap(), "edited");

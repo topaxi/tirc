@@ -115,7 +115,7 @@ local function format_membership(event)
   end
 
   line[#line + 1] = { verb, twhite }
-  line[#line + 1] = { event.target, green }
+  line[#line + 1] = { event.target_name or event.target, green }
 
   if event.reason and event.reason ~= '' then
     line[#line + 1] = { ' (' .. event.reason .. ')', gray }

@@ -28,6 +28,7 @@
 ---@field type 'message' | 'edit' | 'redaction' | 'reaction' | 'membership' | 'topic' | 'rename' | 'quit' | 'server_info'
 ---@field backend { id: integer, protocol: 'irc' | 'matrix', name: string }
 ---@field target string buffer target (channel/room/nick)
+---@field target_name string friendly buffer name (Matrix room name); equals `target` for IRC
 ---@field pending boolean optimistic local echo not yet confirmed
 ---@field redacted boolean
 ---@field sender? TircUserRef set for 'message'/'reaction'

@@ -6,18 +6,22 @@
 //! are applied directly to the client.
 
 use matrix_sdk::config::SyncSettings;
+use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::ruma::events::room::member::MembershipState;
 use matrix_sdk::ruma::events::room::member::SyncRoomMemberEvent;
 use matrix_sdk::ruma::events::room::message::{
-    MessageType, RoomMessageEventContent, SyncRoomMessageEvent,
+    MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent, SyncRoomMessageEvent,
 };
 use matrix_sdk::ruma::events::room::topic::SyncRoomTopicEvent;
-use matrix_sdk::ruma::{OwnedRoomId, RoomId, UserId};
+use matrix_sdk::ruma::events::{
+    AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
+};
+use matrix_sdk::ruma::{OwnedRoomId, OwnedTransactionId, RoomId, UserId};
 use matrix_sdk::{Client, Room};
 
 use crate::core::{
     BackendEvent, BackendId, BackendMessage, ChatEvent, Command, EventId, Formatted, MemberRole,
-    MembershipChange, MessageBody, MsgKind, Protocol, TargetId, UserRef,
+    MembershipChange, MessageBody, MsgKind, Protocol, TargetId, TxnId, UserRef,
 };
 
 use super::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
@@ -168,33 +172,9 @@ fn register_handlers(client: &Client, id: BackendId, events: EventSender) {
         let events = message_events.clone();
         async move {
             if let SyncRoomMessageEvent::Original(event) = event {
-                let (kind, body) = match event.content.msgtype {
-                    MessageType::Text(content) => {
-                        (MsgKind::Text, message_body(content.body, content.formatted))
-                    }
-                    MessageType::Emote(content) => (
-                        MsgKind::Action,
-                        message_body(content.body, content.formatted),
-                    ),
-                    MessageType::Notice(content) => (
-                        MsgKind::Notice,
-                        message_body(content.body, content.formatted),
-                    ),
-                    _ => return,
-                };
-
-                emit(
-                    &events,
-                    id,
-                    ChatEvent::Message {
-                        target: room_target(&room),
-                        id: Some(EventId(event.event_id.to_string())),
-                        sender: sender_ref(&room, &event.sender).await,
-                        body,
-                        kind,
-                        echo_of: None,
-                    },
-                );
+                if let Some(chat) = message_event_to_chat(event, &room).await {
+                    emit(&events, id, chat);
+                }
             }
         }
     });
@@ -261,22 +241,48 @@ fn register_handlers(client: &Client, id: BackendId, events: EventSender) {
     });
 }
 
-/// Applies an outgoing command to the Matrix client. Matrix has native local
-/// echo via the sync timeline, so sends do not emit an optimistic copy.
+/// Applies an outgoing command to the Matrix client.
 async fn apply_command(client: &Client, id: BackendId, events: &EventSender, command: Command) {
     match command {
         Command::SendMessage {
-            target, body, kind, ..
+            target,
+            body,
+            kind,
+            txn,
         } => {
             let Some(room) = room_by_target(client, &target) else {
                 return;
             };
+
+            // Optimistic local echo for perceived latency, mirroring the IRC path:
+            // emit the message immediately tagged with `txn`, then send with the
+            // same id as the Matrix transaction id. The homeserver echoes that id
+            // back in the synced event's `unsigned.transaction_id`, so the sync
+            // copy replaces this optimistic one in `State` instead of duplicating.
+            let sender = client
+                .user_id()
+                .map(|user| UserRef::new(user.as_str()))
+                .unwrap_or_else(|| UserRef::new("me"));
+            emit(
+                events,
+                id,
+                ChatEvent::Message {
+                    target,
+                    id: None,
+                    sender,
+                    body: MessageBody::plain(body.clone()),
+                    kind,
+                    echo_of: Some(txn),
+                },
+            );
+
             let content = match kind {
                 MsgKind::Action => RoomMessageEventContent::emote_plain(body),
                 MsgKind::Notice => RoomMessageEventContent::notice_plain(body),
                 _ => RoomMessageEventContent::text_plain(body),
             };
-            let _ = room.send(content).await;
+            let transaction_id = OwnedTransactionId::from(txn.0.to_string());
+            let _ = room.send(content).with_transaction_id(transaction_id).await;
         }
         Command::Join { target } => {
             let _ = join(client, target.as_str()).await;
@@ -391,6 +397,8 @@ async fn populate_room(room: &Room, id: BackendId, events: &EventSender) {
             );
         }
     }
+
+    backfill_room(room, id, events).await;
 }
 
 /// Maps a Matrix power level to a member role (100 = admin, 50 = moderator).
@@ -451,6 +459,75 @@ fn message_body(
     MessageBody {
         text: body,
         formatted: formatted.map(|f| Formatted::Html(f.body)),
+    }
+}
+
+/// Translates a room message event into a normalized [`ChatEvent::Message`].
+/// Shared by the live sync handler and history backfill so both render
+/// identically. `echo_of` is recovered from the homeserver-echoed transaction id
+/// (the Matrix analogue of IRC's labeled-response), so our own sends de-duplicate
+/// against their optimistic local copy in [`State`](crate::ui::State).
+async fn message_event_to_chat(
+    event: OriginalSyncRoomMessageEvent,
+    room: &Room,
+) -> Option<ChatEvent> {
+    let (kind, body) = match event.content.msgtype {
+        MessageType::Text(content) => {
+            (MsgKind::Text, message_body(content.body, content.formatted))
+        }
+        MessageType::Emote(content) => (
+            MsgKind::Action,
+            message_body(content.body, content.formatted),
+        ),
+        MessageType::Notice(content) => (
+            MsgKind::Notice,
+            message_body(content.body, content.formatted),
+        ),
+        _ => return None,
+    };
+
+    let echo_of = event
+        .unsigned
+        .transaction_id
+        .as_ref()
+        .and_then(|txn| txn.as_str().parse::<u64>().ok())
+        .map(TxnId);
+
+    Some(ChatEvent::Message {
+        target: room_target(room),
+        id: Some(EventId(event.event_id.to_string())),
+        sender: sender_ref(room, &event.sender).await,
+        body,
+        kind,
+        echo_of,
+    })
+}
+
+/// Backfills the most recent messages of a room (oldest-first) so freshly-opened
+/// buffers show history instead of being empty until new activity.
+async fn backfill_room(room: &Room, id: BackendId, events: &EventSender) {
+    let mut options = MessagesOptions::backward();
+    options.limit = 30u32.into();
+
+    let Ok(messages) = room.messages(options).await else {
+        return;
+    };
+
+    // `chunk` is newest-first; collect translated messages then emit oldest-first.
+    let mut chats = Vec::new();
+    for timeline_event in messages.chunk {
+        if let Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
+            SyncMessageLikeEvent::Original(event),
+        ))) = timeline_event.raw().deserialize()
+        {
+            if let Some(chat) = message_event_to_chat(event, room).await {
+                chats.push(chat);
+            }
+        }
+    }
+
+    for chat in chats.into_iter().rev() {
+        emit(events, id, chat);
     }
 }
 

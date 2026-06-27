@@ -170,6 +170,7 @@ impl Renderer {
             return;
         };
 
+        let target_name = buffer.label(&buffer_id.target);
         let messages = buffer
             .messages
             .iter()
@@ -177,7 +178,9 @@ impl Renderer {
             // Render a bit more than fits, as some lines are filtered out and
             // others wrap. TODO: scroll from buffer.scroll_position.
             .take((rect.height as usize) + (rect.height as usize) / 2)
-            .filter_map(|message| self.render_message(lua, backend, &buffer_id.target, message))
+            .filter_map(|message| {
+                self.render_message(lua, backend, &buffer_id.target, target_name, message)
+            })
             .collect::<Vec<_>>();
 
         let messages = messages
@@ -231,9 +234,10 @@ impl Renderer {
         lua: &mlua::Lua,
         backend: &BackendInfo,
         target: &TargetId,
+        target_name: &str,
         message: &StoredMessage,
     ) -> Option<RenderedMessage<'_>> {
-        let event = to_lua_event(lua, message, backend, target).ok()?;
+        let event = to_lua_event(lua, message, backend, target, target_name).ok()?;
 
         let mut time_spans = date_time_to_table(lua, &message.time)
             .ok()
