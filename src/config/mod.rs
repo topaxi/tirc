@@ -260,6 +260,71 @@ fn get_version_lua_value(lua: &Lua) -> mlua::Table {
     table
 }
 
+const TIRC_INIT_LUA: &str = include_str!("../../lua/tirc/init.lua");
+const TIRC_CONFIG_LUA: &str = include_str!("../../lua/tirc/config.lua");
+const TIRC_UTILS_LUA: &str = include_str!("../../lua/tirc/utils.lua");
+const TIRC_THEME_LUA: &str = include_str!("../../lua/tirc/tui/theme.lua");
+const TIRC_DEFAULT_THEME_LUA: &str = include_str!("../../lua/tirc/tui/themes/default.lua");
+
+/// Bundled Lua sources written to the config `types/` directory so an editor's
+/// Lua language server can resolve `require('tirc.*')` and the `---@class` types
+/// (`TircEvent`, `TircUi`, `TircTheme`, ...) when editing `init.lua`. Keyed by
+/// their require path relative to `types/`.
+const TYPE_DEFINITIONS: &[(&str, &str)] = &[
+    ("tirc/init.lua", TIRC_INIT_LUA),
+    ("tirc/config.lua", TIRC_CONFIG_LUA),
+    ("tirc/utils.lua", TIRC_UTILS_LUA),
+    ("tirc/tui/theme.lua", TIRC_THEME_LUA),
+    ("tirc/tui/themes/default.lua", TIRC_DEFAULT_THEME_LUA),
+];
+
+/// `.luarc.json` pointing the Lua language server at the exported definitions.
+const LUARC_JSON: &str = r#"{
+  "runtime": {
+    "version": "LuaJIT",
+    "path": ["?.lua", "?/init.lua", "types/?.lua", "types/?/init.lua"]
+  },
+  "workspace": {
+    "library": ["types"],
+    "checkThirdParty": false
+  }
+}
+"#;
+
+/// Exports the bundled Lua type definitions into `<config>/types/` and writes a
+/// `.luarc.json` so an editor's Lua language server can type-check `init.lua`.
+///
+/// Definitions are refreshed only when the binary version changes (tracked by a
+/// `types/.version` marker), and the `.luarc.json` is written once and never
+/// clobbered, so a user's own language-server settings are preserved.
+fn write_type_definitions(config_dir: &Path) -> anyhow::Result<()> {
+    let types_dir = config_dir.join("types");
+    let version_marker = types_dir.join(".version");
+    let version = env!("CARGO_PKG_VERSION");
+
+    let up_to_date = std::fs::read_to_string(&version_marker)
+        .map(|marker| marker.trim() == version)
+        .unwrap_or(false);
+
+    if !up_to_date {
+        for (relative, content) in TYPE_DEFINITIONS {
+            let path = types_dir.join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, content)?;
+        }
+        std::fs::write(&version_marker, version)?;
+    }
+
+    let luarc = config_dir.join(".luarc.json");
+    if !luarc.exists() {
+        std::fs::write(&luarc, LUARC_JSON)?;
+    }
+
+    Ok(())
+}
+
 /// Registers the `_tirc` runtime module and all builtin `tirc.*` Lua modules.
 ///
 /// This is everything needed to evaluate a user config or a theme, without
@@ -276,28 +341,28 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
     create_tirc_theme_lua_module(lua)?;
 
     let public_tirc_module: Table = lua
-        .load(include_str!("../../lua/tirc/init.lua"))
+        .load(TIRC_INIT_LUA)
         .set_name("{builtin}/lua/tirc/init.lua")
         .call(())?;
 
     set_loaded_modules(lua, "tirc", public_tirc_module)?;
 
     let config_module: Table = lua
-        .load(include_str!("../../lua/tirc/config.lua"))
+        .load(TIRC_CONFIG_LUA)
         .set_name("{builtin}/lua/tirc/config.lua")
         .call(())?;
 
     set_loaded_modules(lua, "tirc.config", config_module)?;
 
     let utils_module: Table = lua
-        .load(include_str!("../../lua/tirc/utils.lua"))
+        .load(TIRC_UTILS_LUA)
         .set_name("{builtin}/lua/tirc/utils.lua")
         .call(())?;
 
     set_loaded_modules(lua, "tirc.utils", utils_module)?;
 
     let default_theme_module: Table = lua
-        .load(include_str!("../../lua/tirc/tui/themes/default.lua"))
+        .load(TIRC_DEFAULT_THEME_LUA)
         .set_name("{builtin}/lua/tirc/tui/themes/default.lua")
         .call(())?;
 
@@ -318,6 +383,10 @@ pub fn load_config(lua: &Lua) -> Result<TircConfig, anyhow::Error> {
 
         std::fs::write(&config_filename, get_default_config())?;
     }
+
+    // Best-effort: keep editor type definitions in sync. Never fatal - a
+    // read-only config dir should not stop the client from starting.
+    let _ = write_type_definitions(config_dirname);
 
     let config_lua_code = std::fs::read_to_string(&config_filename)?;
 
@@ -479,5 +548,67 @@ mod tests {
             },
         );
         assert!(matches!(value, mlua::Value::Nil));
+    }
+
+    #[test]
+    fn type_definitions_are_exported_for_the_editor() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("tirc-types-{nanos}"));
+
+        write_type_definitions(&dir).expect("export type definitions");
+
+        assert!(dir.join("types/tirc/init.lua").exists());
+        assert!(dir.join("types/tirc/tui/theme.lua").exists());
+        assert!(dir.join("types/tirc/tui/themes/default.lua").exists());
+        assert!(dir.join(".luarc.json").exists());
+
+        let init = std::fs::read_to_string(dir.join("types/tirc/init.lua")).unwrap();
+        assert!(init.contains("---@class TircEvent"));
+        let theme = std::fs::read_to_string(dir.join("types/tirc/tui/themes/default.lua")).unwrap();
+        assert!(theme.contains("---@class TircTheme"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_subclass_overrides_a_formatter_via_dispatch() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).expect("builtin modules");
+
+        // A subclass overriding `format_message` must take effect even though
+        // `message_text` (which dispatches to it) lives on the base class.
+        lua.load(indoc! {"
+            local Default = require('tirc.tui.themes.default')
+            local Sub = Default.extend()
+            function Sub:format_message(_event)
+              return { 'OVERRIDDEN' }
+            end
+            Sub.setup({})
+        "})
+            .exec()
+            .expect("subclass setup");
+
+        let value = render_message_text(
+            &lua,
+            ChatEvent::Message {
+                target: TargetId::from("#tirc"),
+                id: None,
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain("hi"),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+
+        match value {
+            mlua::Value::Table(table) => {
+                assert_eq!(table.get::<String>(1).unwrap(), "OVERRIDDEN");
+            }
+            other => panic!("expected overridden spans, got {other:?}"),
+        }
     }
 }
