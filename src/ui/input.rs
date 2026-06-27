@@ -1,5 +1,6 @@
 use std::{
     fmt,
+    path::PathBuf,
     rc::Rc,
     sync::atomic::{AtomicUsize, Ordering},
 };
@@ -11,7 +12,10 @@ use irc::{
 };
 use mlua::Lua;
 
-use crate::{config::emit_event, tui::Tui};
+use crate::{
+    config::{emit_event, reload_lua_theme},
+    tui::Tui,
+};
 
 use super::{state::ChatBuffer, Mode, State, TircMessage};
 
@@ -31,11 +35,17 @@ pub struct InputHandler<'lua> {
     lua: &'lua Lua,
     irc: Client,
     ui: Tui,
+    config_path: PathBuf,
 }
 
 impl<'lua> InputHandler<'lua> {
-    pub fn new(lua: &'lua Lua, irc: Client, ui: Tui) -> Self {
-        Self { lua, irc, ui }
+    pub fn new(lua: &'lua Lua, irc: Client, ui: Tui, config_path: PathBuf) -> Self {
+        Self {
+            lua,
+            irc,
+            ui,
+            config_path,
+        }
     }
 
     pub fn ui(&self) -> &Tui {
@@ -160,6 +170,16 @@ impl<'lua> InputHandler<'lua> {
             }
             ["list"] => {
                 self.irc.send(Command::LIST(None, None))?;
+            }
+            ["reload"] => {
+                let result = reload_lua_theme(self.lua, &self.config_path);
+                let notice_text = match &result {
+                    Ok(()) => "Theme reloaded successfully".to_owned(),
+                    Err(err) => format!("Reload error: {}", err),
+                };
+                let notice: Message =
+                    format!(":tirc!tirc@localhost NOTICE * :{}\r\n", notice_text).parse()?;
+                state.push_message(TircMessage::from_message(Box::new(notice), self.lua)?);
             }
             _ => {}
         }

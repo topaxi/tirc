@@ -71,7 +71,11 @@ async fn setup_irc(
     Ok((irc, stream))
 }
 
-async fn root_task(lua: &mlua::Lua, config: &TircConfig) -> Result<(), anyhow::Error> {
+async fn root_task(
+    lua: &mlua::Lua,
+    config: &TircConfig,
+    config_path: &std::path::Path,
+) -> Result<(), anyhow::Error> {
     let (irc, irc_stream) = setup_irc(config, lua).await?;
     let mut irc_stream = irc_stream.fuse();
 
@@ -89,7 +93,7 @@ async fn root_task(lua: &mlua::Lua, config: &TircConfig) -> Result<(), anyhow::E
 
     tui.initialize_terminal()?;
 
-    let mut input_handler = InputHandler::new(lua, irc, tui);
+    let mut input_handler = InputHandler::new(lua, irc, tui, config_path.to_owned());
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(TICK_RATE);
@@ -137,8 +141,7 @@ async fn terminate_signal() {
             signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
         let mut interrupt =
             signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
-        let mut hangup =
-            signal(SignalKind::hangup()).expect("failed to install SIGHUP handler");
+        let mut hangup = signal(SignalKind::hangup()).expect("failed to install SIGHUP handler");
 
         tokio::select! {
             _ = terminate.recv() => {}
@@ -155,7 +158,7 @@ async fn terminate_signal() {
 
 fn main() -> Result<(), anyhow::Error> {
     let lua = mlua::Lua::new();
-    let config = load_config(&lua)?;
+    let (config, config_path) = load_config(&lua)?;
 
     tirc::tui::Tui::install_panic_hook();
 
@@ -165,7 +168,7 @@ fn main() -> Result<(), anyhow::Error> {
         .enable_all()
         .build()?;
 
-    rt.block_on(root_task(&lua, &config))
+    rt.block_on(root_task(&lua, &config, &config_path))
 }
 
 async fn create_irc_client(config: &TircConfig) -> Result<Client, anyhow::Error> {

@@ -203,7 +203,7 @@ impl Renderer {
 
                 // TODO: This is a hack to have the time | user separator included in the
                 // subsequent indent. It would be better to have a more explicit solution.
-                let subsequent_indent = if initial_indent.len() > 0 {
+                let subsequent_indent = if !initial_indent.is_empty() {
                     Box::new([
                         Span::raw(
                             " ".repeat(
@@ -255,9 +255,7 @@ impl Renderer {
         if let TircMessage::Irc(date_time, message, lua_message) = tirc_message {
             let mut time_spans = date_time_to_table(lua, date_time)
                 .ok()
-                .and_then(|date_time| {
-                    self.render_message_time(lua, &date_time, lua_message).ok()
-                })
+                .and_then(|date_time| self.render_message_time(lua, &date_time, lua_message).ok())
                 .unwrap_or_default();
 
             if time_spans.len() == 1 {

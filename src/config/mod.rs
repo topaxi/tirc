@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use indoc::indoc;
@@ -77,18 +77,32 @@ fn register_event(lua: &Lua, (name, func): (String, mlua::Function)) -> mlua::Re
             let tbl = lua.create_table()?;
             tbl.set(1, func)?;
             lua.set_named_registry_value(&decorated_name, tbl)?;
-            Ok(())
         }
         mlua::Value::Table(tbl) => {
             let len = tbl.raw_len();
             tbl.set(len + 1, func)?;
-            Ok(())
         }
-        _ => Err(mlua::Error::external(anyhow!(
-            "registry key for {} has invalid type",
-            decorated_name
-        ))),
+        _ => {
+            return Err(mlua::Error::external(anyhow!(
+                "registry key for {} has invalid type",
+                decorated_name
+            )));
+        }
     }
+
+    // Track event name so reload_lua_theme can clear it
+    let tracked: mlua::Value = lua.named_registry_value("tirc-registered-events")?;
+    let tracked = match tracked {
+        mlua::Value::Table(t) => t,
+        _ => {
+            let t = lua.create_table()?;
+            lua.set_named_registry_value("tirc-registered-events", &t)?;
+            t
+        }
+    };
+    tracked.set(name, true)?;
+
+    Ok(())
 }
 
 /// Dispatches a fire-and-forget event to every handler registered via
@@ -166,11 +180,7 @@ fn set_ui(lua: &Lua, value: Table) -> mlua::Result<()> {
 /// Returns `None` when no formatter is registered for `name`, otherwise the
 /// formatter's `mlua::Result` (an `Err` if the Lua callback raised). The caller
 /// is responsible for rendering errors.
-pub fn call_formatter<Args>(
-    lua: &Lua,
-    name: &str,
-    args: Args,
-) -> Option<mlua::Result<mlua::Value>>
+pub fn call_formatter<Args>(lua: &Lua, name: &str, args: Args) -> Option<mlua::Result<mlua::Value>>
 where
     Args: IntoLuaMulti,
 {
@@ -273,7 +283,72 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn load_config(lua: &Lua) -> Result<TircConfig, anyhow::Error> {
+/// Registers builtins, sets config_dir, reads and evaluates the config file.
+///
+/// Does NOT touch package.path - that is set once in load_config and must
+/// not be prepended again on reload (it would grow unbounded).
+fn eval_config_file(lua: &Lua, config_path: &Path, config_dirname: &Path) -> anyhow::Result<Value> {
+    register_builtin_modules(lua)?;
+
+    let tirc_mod = get_or_create_module(lua, "_tirc")?;
+    tirc_mod.set("config_dir", config_dirname.display().to_string())?;
+
+    let config_lua_code = std::fs::read_to_string(config_path)?;
+    let value: Value = lua
+        .load(&config_lua_code)
+        .set_name(config_path.display().to_string())
+        .call(())?;
+
+    Ok(value)
+}
+
+/// Reloads the Lua theme and non-server config from disk without restarting.
+///
+/// Clears the UI formatter table, all registered event handlers, and the
+/// module cache, then re-evaluates the config file. Server config (the
+/// returned TircConfig) is not re-read - only the Lua side is reset.
+pub fn reload_lua_theme(lua: &Lua, config_path: &Path) -> anyhow::Result<()> {
+    let config_dirname = config_path
+        .parent()
+        .ok_or_else(|| anyhow!("config path has no parent directory"))?;
+
+    // Clear the UI formatter table so tirc.use(theme) starts from scratch
+    lua.set_named_registry_value("tirc-ui", mlua::Value::Nil)?;
+
+    // Clear all event handlers registered via tirc.on(name, fn)
+    let tracked: mlua::Value = lua.named_registry_value("tirc-registered-events")?;
+    if let mlua::Value::Table(tracked) = tracked {
+        let names: Vec<String> = tracked
+            .pairs::<String, mlua::Value>()
+            .map(|r| r.map(|(k, _)| k))
+            .collect::<mlua::Result<_>>()?;
+        for name in names {
+            let decorated = format!("tirc-event-{}", name);
+            lua.set_named_registry_value(&decorated, mlua::Value::Nil)?;
+        }
+    }
+    lua.set_named_registry_value("tirc-registered-events", mlua::Value::Nil)?;
+
+    // Clear package.loaded in-place so user modules are re-required from disk.
+    // In-place iteration-and-nil is used rather than table replacement because
+    // LuaJIT's require resolves against the internal table object.
+    {
+        let loaded = crate::lua::get_loaded_modules(lua)?;
+        let keys: Vec<mlua::Value> = loaded
+            .pairs::<mlua::Value, mlua::Value>()
+            .map(|r| r.map(|(k, _)| k))
+            .collect::<mlua::Result<_>>()?;
+        for key in keys {
+            loaded.set(key, mlua::Value::Nil)?;
+        }
+    }
+
+    eval_config_file(lua, config_path, config_dirname)?;
+
+    Ok(())
+}
+
+pub fn load_config(lua: &Lua) -> Result<(TircConfig, PathBuf), anyhow::Error> {
     let config_filename =
         xdg::BaseDirectories::with_prefix("tirc").place_config_file("init.lua")?;
     let config_dirname = config_filename
@@ -282,18 +357,13 @@ pub fn load_config(lua: &Lua) -> Result<TircConfig, anyhow::Error> {
 
     if !config_filename.exists() {
         std::fs::create_dir_all(config_dirname)?;
-
         std::fs::write(&config_filename, get_default_config())?;
     }
 
-    let config_lua_code = std::fs::read_to_string(&config_filename)?;
-
-    let config = {
+    // Prepend the config directory to package.path exactly once. reload_lua_theme
+    // does not touch package.path so the entry is never duplicated.
+    {
         let globals = lua.globals();
-        let tirc_mod = get_or_create_module(lua, "_tirc")?;
-
-        tirc_mod.set("config_dir", config_dirname.display().to_string())?;
-
         let package: Table = globals.get("package")?;
         let package_path: String = package.get("path")?;
         let mut path_array: Vec<String> = package_path.split(';').map(|s| s.to_owned()).collect();
@@ -304,22 +374,16 @@ pub fn load_config(lua: &Lua) -> Result<TircConfig, anyhow::Error> {
         }
 
         prefix_path(&mut path_array, config_dirname);
-
         package.set("path", path_array.join(";"))?;
+    }
 
-        register_builtin_modules(lua)?;
+    let value = eval_config_file(lua, &config_filename, config_dirname)?;
 
-        let value: Value = lua
-            .load(&config_lua_code)
-            .set_name(config_filename.display().to_string())
-            .call(())?;
+    lua.globals().set("config", &value)?;
 
-        globals.set("config", &value)?;
+    let config = lua.from_value(value)?;
 
-        lua.from_value(value)?
-    };
-
-    Ok(config)
+    Ok((config, config_filename))
 }
 
 #[cfg(test)]

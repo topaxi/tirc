@@ -116,7 +116,7 @@ impl State {
                 if let Some(label) = tags.iter().find(|tag| tag.0 == "label") {
                     // Find index of message with same tag label
                     let index = buffer.messages.iter().position(|m| match m {
-                        TircMessage::Irc(_, m, _) => m.tags.as_ref().map_or(false, |tags| {
+                        TircMessage::Irc(_, m, _) => m.tags.as_ref().is_some_and(|tags| {
                             tags.iter().any(|tag| tag.0 == "label" && tag.1 == label.1)
                         }),
                         _ => false,
@@ -204,7 +204,10 @@ mod tests {
 
     #[test]
     fn test_target_buffer_incoming_direct_message() {
-        assert_eq!(target_buffer("me", ":alice!u@h PRIVMSG me :hi\r\n"), "alice");
+        assert_eq!(
+            target_buffer("me", ":alice!u@h PRIVMSG me :hi\r\n"),
+            "alice"
+        );
     }
 
     #[test]
