@@ -306,8 +306,8 @@ fn apply_command(
         Command::ListChannels => client.send(IrcCommand::LIST(None, None))?,
         // Quit is handled before apply_command is called (in connect_once).
         Command::Quit { .. } => {}
-        // IRC has no native reactions or message deletion.
-        Command::React { .. } | Command::Redact { .. } => {}
+        // IRC has no native reactions, message deletion, or device verification.
+        Command::React { .. } | Command::Redact { .. } | Command::Verify(_) => {}
     }
 
     Ok(())

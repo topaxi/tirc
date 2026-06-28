@@ -386,9 +386,30 @@ pub enum Command {
         user: String,
     },
     ListChannels,
+    /// Drives interactive device verification (Matrix SAS). IRC has no analogue
+    /// and ignores it.
+    Verify(VerifyAction),
     Quit {
         reason: Option<String>,
     },
+}
+
+/// A step in an interactive device-verification (SAS) exchange. The backend keeps
+/// the in-flight verification; these actions advance it. Modelled as discrete
+/// commands because verification is driven by user input arriving over time
+/// (accept a request, then compare the short-auth-string, then confirm), not a
+/// single round-trip.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VerifyAction {
+    /// Start verifying another user, or our own other devices when `user` is
+    /// `None` (self-verification).
+    Request { user: Option<String> },
+    /// Accept the pending incoming verification request.
+    Accept,
+    /// Confirm that the displayed short-auth-string matches the other device.
+    Confirm,
+    /// Decline a pending request or abort the in-flight verification.
+    Cancel,
 }
 
 #[cfg(test)]

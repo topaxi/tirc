@@ -10,6 +10,7 @@ use crate::backends::BackendHandle;
 use crate::config::{collect_user_watched_paths, emit_event, reload_lua_theme, EventName};
 use crate::core::{
     BackendEvent, BackendId, BackendMessage, ChatEvent, Command, MsgKind, TargetId, TxnAllocator,
+    VerifyAction,
 };
 use crate::tui::lua::{create_lua_sender, to_lua_event};
 use crate::tui::Tui;
@@ -292,6 +293,11 @@ impl<'lua> InputHandler<'lua> {
                 },
             ),
             ["list"] => self.send_to(backend, Command::ListChannels),
+            ["verify"] => self.send_to(
+                backend,
+                Command::Verify(VerifyAction::Request { user: None }),
+            ),
+            ["verify", arg] => self.send_to(backend, Command::Verify(parse_verify(arg))),
             ["redraw"] => {
                 self.ui.redraw()?;
             }
@@ -520,6 +526,20 @@ impl<'lua> InputHandler<'lua> {
         let key = self.lua.create_registry_value(&table)?;
         self.senders.insert(backend, key);
         Ok(table)
+    }
+}
+
+/// Maps the argument of `:verify <arg>` to a [`VerifyAction`]. `accept`,
+/// `confirm` and `cancel` advance an in-flight verification; anything else is
+/// treated as a user id to start verifying.
+fn parse_verify(arg: &str) -> VerifyAction {
+    match arg.trim() {
+        "accept" => VerifyAction::Accept,
+        "confirm" => VerifyAction::Confirm,
+        "cancel" | "reject" => VerifyAction::Cancel,
+        user => VerifyAction::Request {
+            user: Some(user.to_string()),
+        },
     }
 }
 
