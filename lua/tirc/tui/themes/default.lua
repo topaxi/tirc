@@ -421,13 +421,24 @@ function Theme:user(user)
   }
 end
 
+---@param buffer TircBufferTab
+local function has_unique_name(buffer)
+  local count = 0
+  for _, b in ipairs(tirc.buffers) do
+    if b.name == buffer.name then
+      count = count + 1
+    end
+  end
+  return count <= 1
+end
+
 --- Renders one tab in the buffer bar. Focused tabs are styled brighter.
 ---@param buffer TircBufferTab
 function Theme:render_buffer_tab(buffer)
   local s = self.styles
   local meta = buffer.backend_metadata
   local backend_label = (meta and meta.label) or buffer.backend_name
-  local name = tirc.multi_backend and (backend_label .. '/' .. buffer.name)
+  local name = (not has_unique_name(buffer)) and (backend_label .. '/' .. buffer.name)
     or buffer.name
 
   return { { name, tirc.is_focused_buffer(buffer) and s.white or s.gray }, ' ' }

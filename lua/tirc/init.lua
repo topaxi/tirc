@@ -91,6 +91,7 @@
 ---@field focused_buffer? string opaque id of the currently focused buffer, or nil
 ---@field mode 'normal' | 'command' | 'insert' current editor mode
 ---@field multi_backend boolean whether more than one backend is connected
+---@field buffers TircBufferTab[] all open buffers
 ---@field is_focused_buffer fun(buffer: TircBufferTab): boolean
 ---@field on fun(event_name: EventName, callback: fun(event: TircEvent, sender: TircSender))
 local M = {}

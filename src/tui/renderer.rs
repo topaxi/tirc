@@ -24,33 +24,6 @@ pub struct RenderedMessage<'a> {
     pub message: Box<Line<'a>>,
 }
 
-fn update_render_context(lua: &mlua::Lua, view: &ViewState, state: &State) -> anyhow::Result<()> {
-    let tirc_mod: mlua::Table = lua
-        .globals()
-        .get::<mlua::Table>("package")?
-        .get::<mlua::Table>("loaded")?
-        .get::<mlua::Table>("_tirc")?;
-
-    tirc_mod.set(
-        "mode",
-        match view.mode {
-            Mode::Normal => "normal",
-            Mode::Command => "command",
-            Mode::Insert => "insert",
-        },
-    )?;
-    tirc_mod.set("multi_backend", state.backends.len() > 1)?;
-
-    match &view.focused {
-        Some(id) => {
-            let id_str = format!("{}:{}", id.backend.0, id.target.as_str());
-            tirc_mod.set("focused_buffer", id_str)?;
-        }
-        None => tirc_mod.set("focused_buffer", mlua::Value::Nil)?,
-    }
-
-    Ok(())
-}
 
 impl Default for Renderer {
     fn default() -> Self {
@@ -333,6 +306,40 @@ impl Renderer {
         Ok(tabs)
     }
 
+    fn update_render_context(
+        &self,
+        lua: &mlua::Lua,
+        view: &ViewState,
+        state: &State,
+    ) -> anyhow::Result<()> {
+        let tirc_mod: mlua::Table = lua
+            .globals()
+            .get::<mlua::Table>("package")?
+            .get::<mlua::Table>("loaded")?
+            .get::<mlua::Table>("_tirc")?;
+
+        tirc_mod.set(
+            "mode",
+            match view.mode {
+                Mode::Normal => "normal",
+                Mode::Command => "command",
+                Mode::Insert => "insert",
+            },
+        )?;
+        tirc_mod.set("multi_backend", state.backends.len() > 1)?;
+        tirc_mod.set("buffers", self.buffer_tabs(state, lua)?)?;
+
+        match &view.focused {
+            Some(id) => {
+                let id_str = format!("{}:{}", id.backend.0, id.target.as_str());
+                tirc_mod.set("focused_buffer", id_str)?;
+            }
+            None => tirc_mod.set("focused_buffer", mlua::Value::Nil)?,
+        }
+
+        Ok(())
+    }
+
     /// Converts a `render_buffer_bar` result into rendered lines. A table with a
     /// `rows` sequence yields one line per row; any other value is treated as a
     /// single row (the shorthand documented for `render_buffer_bar`).
@@ -455,8 +462,7 @@ impl Renderer {
             spans.push(Span::raw(title.to_string()));
         }
 
-        let list = List::new(users)
-            .block(Block::default().title(spans).borders(Borders::LEFT));
+        let list = List::new(users).block(Block::default().title(spans).borders(Borders::LEFT));
         f.render_widget(list, rect);
     }
 
@@ -487,7 +493,7 @@ impl Renderer {
     ) {
         // Populate the render context (multi_backend, focused_buffer, ...) before
         // building the bar, as the theme's render_buffer_bar reads those globals.
-        let _ = update_render_context(lua, view, state);
+        let _ = self.update_render_context(lua, view, state);
 
         // Build the bar first so the layout can size its region to fit the rows
         // the theme returned, capped so the message area never collapses.
@@ -498,9 +504,9 @@ impl Renderer {
         let layout = self.get_layout(bar_height);
         let chunks = layout.split(f.area());
 
-        let members = self.focused(state, view).map(|(id, buffer, _, _)| {
-            (buffer.label(&id.target).to_string(), &buffer.members)
-        });
+        let members = self
+            .focused(state, view)
+            .map(|(id, buffer, _, _)| (buffer.label(&id.target).to_string(), &buffer.members));
 
         let msg_rect = match members {
             Some((title, members)) if members.len() > 1 => {
