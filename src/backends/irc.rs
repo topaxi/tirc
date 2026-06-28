@@ -128,6 +128,11 @@ impl IrcBackend {
                             backend: id,
                             event: BackendEvent::Ready { nickname: nickname.clone() },
                         });
+                        // IRC has no history backfill: live messages start immediately.
+                        let _ = events.send(BackendMessage {
+                            backend: id,
+                            event: BackendEvent::Synced,
+                        });
                     }
 
                     for event in translate(&message, &nickname) {

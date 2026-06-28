@@ -85,6 +85,14 @@ pub struct ChatBuffer {
     /// Friendly name shown instead of the raw target (e.g. a Matrix room name).
     pub display_name: Option<String>,
     pub scroll_position: usize,
+    /// True when messages have arrived that the user has not yet seen.
+    pub has_unread: bool,
+    /// True when the user's nickname was mentioned in an unseen message.
+    pub has_mention: bool,
+    /// Timestamp of the newest message when the user last left or was actively
+    /// viewing this buffer. Messages newer than this marker are shown below a
+    /// visual "new messages" separator in the message list.
+    pub read_marker: Option<DateTime<Local>>,
 }
 
 impl ChatBuffer {
@@ -118,6 +126,22 @@ impl ChatBuffer {
     /// Return to the newest messages.
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_position = 0;
+    }
+
+    /// Clears the unread and mention indicators. Does not touch `read_marker`
+    /// so the separator remains visible while the user reads the new messages.
+    pub fn mark_read(&mut self) {
+        self.has_unread = false;
+        self.has_mention = false;
+    }
+
+    /// Advances `read_marker` to the newest message, establishing the boundary
+    /// for the next unread separator. Call when the user leaves a buffer or
+    /// when messages arrive while the buffer is focused (user is watching).
+    pub fn advance_read_marker(&mut self) {
+        if let Some(newest) = self.messages.last() {
+            self.read_marker = Some(newest.time);
+        }
     }
 
     /// Inserts a message keeping `messages` sorted by `time`. The scan runs from
@@ -192,6 +216,10 @@ impl ChatBuffer {
 pub struct BackendState {
     pub info: BackendInfo,
     pub nickname: String,
+    /// True once the backend has finished delivering initial history (Synced event).
+    /// Unread/mention flags are only set after this point so backfill doesn't
+    /// trigger activity indicators.
+    pub synced: bool,
 }
 
 /// Domain state: every backend and buffer, mutated purely by applying
@@ -218,8 +246,15 @@ impl State {
             BackendState {
                 info,
                 nickname: String::new(),
+                synced: false,
             },
         );
+    }
+
+    pub fn set_synced(&mut self, backend: BackendId) {
+        if let Some(state) = self.backends.get_mut(&backend) {
+            state.synced = true;
+        }
     }
 
     pub fn set_nickname(&mut self, backend: BackendId, nickname: String) {
@@ -291,16 +326,29 @@ impl State {
     }
 
     fn apply_message(&mut self, backend: BackendId, event: ChatEvent) {
-        let (target, echo_of, time, id) = match &event {
+        let (target, echo_of, time, id, sender_id, body_text) = match &event {
             ChatEvent::Message {
                 target,
                 echo_of,
                 time,
                 id,
+                sender,
+                body,
                 ..
-            } => (target.clone(), *echo_of, *time, id.clone()),
+            } => (
+                target.clone(),
+                *echo_of,
+                *time,
+                id.clone(),
+                sender.id.clone(),
+                body.text.clone(),
+            ),
             _ => return,
         };
+
+        // Extract before buffer_mut borrows self.
+        let own_nick = self.nickname(backend).to_string();
+        let is_synced = self.backends.get(&backend).map(|b| b.synced).unwrap_or(false);
 
         let has_id = id.is_some();
         let buffer = self.buffer_mut(backend, target);
@@ -349,6 +397,23 @@ impl State {
         // arriving out of delivery order sort correctly relative to live ones.
         // A pending echo carries `Local::now()`, so this still appends it.
         buffer.insert_message(stored);
+
+        // Set activity flags for real incoming live messages from others.
+        // - synced: false means we are still delivering initial history (Matrix backfill),
+        //   so skip - history should not trigger unread/mention indicators
+        // - pending: own optimistic echo, skip
+        // - echo_of.is_some(): confirmed own echo not matched above (rare fallthrough), skip
+        // - sender_id == own_nick: server reflection of own message, skip
+        if is_synced && !pending && echo_of.is_none() && sender_id != own_nick {
+            buffer.has_unread = true;
+            if !own_nick.is_empty() {
+                let lower_body = body_text.to_lowercase();
+                let lower_nick = own_nick.to_lowercase();
+                if lower_body.contains(&lower_nick) {
+                    buffer.has_mention = true;
+                }
+            }
+        }
     }
 
     fn apply_edit(&mut self, backend: BackendId, target: TargetId, id: EventId, body: MessageBody) {

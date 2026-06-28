@@ -409,8 +409,14 @@ impl<'lua> InputHandler<'lua> {
     ) -> TargetId {
         let target = TargetId::from(target);
         let buffer = crate::core::BufferId::new(backend, target.clone());
+        if let Some(b) = state.focused_buffer_mut(view) {
+            b.advance_read_marker();
+        }
         state.buffers.entry(buffer.clone()).or_default();
         view.focus(buffer);
+        if let Some(b) = state.focused_buffer_mut(view) {
+            b.mark_read();
+        }
         target
     }
 
@@ -493,11 +499,33 @@ impl<'lua> InputHandler<'lua> {
             (_, KeyCode::Char('l')) if event.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.ui.redraw()?;
             }
-            (Mode::Normal, KeyCode::Tab) => view.next_buffer(state),
-            (Mode::Normal, KeyCode::BackTab) => view.previous_buffer(state),
+            (Mode::Normal, KeyCode::Tab) => {
+                if let Some(b) = state.focused_buffer_mut(view) {
+                    b.advance_read_marker();
+                }
+                view.next_buffer(state);
+                if let Some(b) = state.focused_buffer_mut(view) {
+                    b.mark_read();
+                }
+            }
+            (Mode::Normal, KeyCode::BackTab) => {
+                if let Some(b) = state.focused_buffer_mut(view) {
+                    b.advance_read_marker();
+                }
+                view.previous_buffer(state);
+                if let Some(b) = state.focused_buffer_mut(view) {
+                    b.mark_read();
+                }
+            }
             (Mode::Normal, code) if Self::key_code_is_digit(code) => {
+                if let Some(b) = state.focused_buffer_mut(view) {
+                    b.advance_read_marker();
+                }
                 let index = Self::get_key_code_as_digit(code) as usize;
                 view.focus_buffer_index(state, index);
+                if let Some(b) = state.focused_buffer_mut(view) {
+                    b.mark_read();
+                }
             }
             (Mode::Normal, KeyCode::PageUp) => self.scroll_up(state, view, page),
             (Mode::Normal, KeyCode::PageDown) => self.scroll_down(state, view, page),
@@ -562,6 +590,7 @@ impl<'lua> InputHandler<'lua> {
 
         match message.event {
             BackendEvent::Ready { nickname } => state.set_nickname(backend, nickname),
+            BackendEvent::Synced => state.set_synced(backend),
             BackendEvent::Disconnected { reason } => {
                 let text = match reason {
                     Some(reason) => format!("Disconnected: {reason}"),
@@ -589,6 +618,12 @@ impl<'lua> InputHandler<'lua> {
                             }
                         }
                     }
+                }
+                // The user is actively viewing the focused buffer: advance the
+                // read marker and clear activity flags so no indicator fires.
+                if let Some(b) = state.focused_buffer_mut(view) {
+                    b.advance_read_marker();
+                    b.mark_read();
                 }
             }
         }

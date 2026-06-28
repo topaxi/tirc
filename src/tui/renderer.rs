@@ -175,7 +175,10 @@ impl Renderer {
         let total = buffer.messages.len();
         // Clamp scroll so we always render at least the oldest message when any exist.
         let scroll = buffer.scroll_position.min(total.saturating_sub(1));
-        let messages = buffer
+
+        // Collect (RenderedMessage, message_time) pairs so we can detect the
+        // read boundary and inject a separator between read and unread messages.
+        let rendered: Vec<(RenderedMessage, chrono::DateTime<chrono::Local>)> = buffer
             .messages
             .iter()
             .rev()
@@ -185,43 +188,62 @@ impl Renderer {
             .take((rect.height as usize) + (rect.height as usize) / 2)
             .filter_map(|message| {
                 self.render_message(lua, backend, &buffer_id.target, target_name, message)
+                    .map(|rm| (rm, message.time))
             })
-            .collect::<Vec<_>>();
+            .collect();
 
-        let messages = messages
-            .iter()
-            .filter(|message| message.message.width() > 0)
-            .map(|message| {
-                let initial_indent = message.time.clone();
+        let read_marker = buffer.read_marker;
+        let mut seen_unread = false;
+        let mut separator_inserted = false;
+        let mut messages: Vec<ListItem<'_>> = Vec::with_capacity(rendered.len() + 1);
 
-                let subsequent_indent = if !initial_indent.is_empty() {
-                    Box::new([
-                        Span::raw(
-                            " ".repeat(
-                                initial_indent
-                                    .iter()
-                                    .take(initial_indent.len() - 1)
-                                    .map(|span| span.width())
-                                    .sum(),
-                            ),
+        for (rm, msg_time) in &rendered {
+            if rm.message.width() == 0 {
+                continue;
+            }
+
+            if !separator_inserted {
+                if let Some(marker) = read_marker {
+                    if msg_time > &marker {
+                        // Still in unread territory; remember we've seen at least one.
+                        seen_unread = true;
+                    } else if seen_unread {
+                        // First read message after one or more unread ones: inject separator.
+                        messages.push(ListItem::new(self.render_unread_separator(lua)));
+                        separator_inserted = true;
+                    }
+                }
+            }
+
+            let initial_indent = rm.time.clone();
+
+            let subsequent_indent = if !initial_indent.is_empty() {
+                Box::new([
+                    Span::raw(
+                        " ".repeat(
+                            initial_indent
+                                .iter()
+                                .take(initial_indent.len() - 1)
+                                .map(|span| span.width())
+                                .sum(),
                         ),
-                        initial_indent.iter().last().unwrap().clone(),
-                    ])
-                } else {
-                    Box::new([Span::raw(""), Span::raw("")])
-                };
+                    ),
+                    initial_indent.iter().last().unwrap().clone(),
+                ])
+            } else {
+                Box::new([Span::raw(""), Span::raw("")])
+            };
 
-                wrap_line(
-                    &message.message,
-                    super::wrap::Options {
-                        width: rect.width as usize,
-                        initial_indent,
-                        subsequent_indent,
-                        break_words: true,
-                    },
-                )
-            })
-            .map(ListItem::new);
+            messages.push(ListItem::new(wrap_line(
+                &rm.message,
+                super::wrap::Options {
+                    width: rect.width as usize,
+                    initial_indent,
+                    subsequent_indent,
+                    break_words: true,
+                },
+            )));
+        }
 
         let title = self
             .render_buffer_title(lua, backend, nickname, buffer.label(&buffer_id.target))
@@ -232,6 +254,19 @@ impl Renderer {
             .direction(ListDirection::BottomToTop);
 
         f.render_widget(list, rect);
+    }
+
+    /// Renders the "new messages" separator line. The appearance is driven by
+    /// the theme's `render_unread_separator` formatter; falls back to a plain
+    /// styled line when the theme does not implement it.
+    fn render_unread_separator(&self, lua: &mlua::Lua) -> Line<'_> {
+        match self.format_spans(lua, "render_unread_separator", ()) {
+            Ok(spans) if !spans.is_empty() => Line::from(spans),
+            _ => Line::from(Span::styled(
+                "─── new messages ───",
+                Style::default().fg(Color::DarkGray),
+            )),
+        }
     }
 
     fn render_message(
@@ -294,6 +329,8 @@ impl Renderer {
         if let Some(metadata) = crate::config::get_backend_metadata(lua, id.backend) {
             t.set("backend_metadata", metadata)?;
         }
+        t.set("has_unread", buffer.has_unread)?;
+        t.set("has_mention", buffer.has_mention)?;
         Ok(t)
     }
 

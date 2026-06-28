@@ -332,6 +332,11 @@ pub enum BackendEvent {
     Ready {
         nickname: String,
     },
+    /// All initial history has been delivered. Events after this are live.
+    /// IRC sends this immediately after Ready (no backfill); Matrix sends it
+    /// after the populate_room loop so backfill messages don't trigger
+    /// unread/mention indicators.
+    Synced,
     Disconnected {
         reason: Option<String>,
     },

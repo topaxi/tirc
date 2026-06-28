@@ -30,11 +30,25 @@ local TAB_BG = '#303030'
 local TAB_BG_BACKEND = '#444444'
 local FOCUSED_BG = '#005f87'
 local FOCUSED_BG_BACKEND = '#0087af'
+local MENTION_BG = '#5f1f1f'
 local TAB_FG = '#9e9e9e'
 local FOCUSED_FG = '#ffffff'
+local UNREAD_FG = '#e0e0e0'
 
-local function tab_bg(focused)
-  return focused and FOCUSED_BG or TAB_BG
+---@param buffer TircBufferTab
+---@param focused boolean
+local function tab_bg(buffer, focused)
+  if focused then return FOCUSED_BG end
+  if buffer.has_mention then return MENTION_BG end
+  return TAB_BG
+end
+
+---@param buffer TircBufferTab
+---@param focused boolean
+local function tab_fg(buffer, focused)
+  if focused then return FOCUSED_FG end
+  if buffer.has_unread then return UNREAD_FG end
+  return TAB_FG
 end
 
 ---@param buffer TircBufferTab
@@ -54,14 +68,14 @@ local function tab_entry_bg(buffer, focused)
   if not has_unique_name(buffer) then
     return focused and FOCUSED_BG_BACKEND or TAB_BG_BACKEND
   end
-  return tab_bg(focused)
+  return tab_bg(buffer, focused)
 end
 
 ---@param buffer TircBufferTab
 ---@param focused boolean
 local function tab_spans(buffer, focused)
-  local bg = tab_bg(focused)
-  local fg = focused and FOCUSED_FG or TAB_FG
+  local bg = tab_bg(buffer, focused)
+  local fg = tab_fg(buffer, focused)
   local meta = buffer.backend_metadata
   local backend_label = (meta and meta.label) or buffer.backend_name
 
@@ -82,7 +96,7 @@ function Slanted:render_buffer_bar(buffers)
 
   for i, buffer in ipairs(buffers) do
     local focused = tirc.is_focused_buffer(buffer)
-    local bg = tab_bg(focused)
+    local bg = tab_bg(buffer, focused)
 
     if i > 1 then
       local entry_bg = tab_entry_bg(buffer, focused)

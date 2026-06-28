@@ -9,6 +9,8 @@
 ---@field backend_id integer id of the backend this buffer belongs to (for grouping)
 ---@field backend_name string human-readable backend name
 ---@field backend_metadata? table<string, any> per-server metadata from the config (e.g. `{ label = 'topaxi' }`)
+---@field has_unread boolean true when unseen messages are present
+---@field has_mention boolean true when the user's nick was mentioned in an unseen message
 
 --- The buffer bar layout returned by `render_buffer_bar`: one `TircSpans` per row.
 ---@class TircBufferBar
@@ -85,6 +87,7 @@
 ---@field user? fun(user: TircUser): TircSpans
 ---@field render_buffer_tab? fun(buffer: TircBufferTab): TircSpans
 ---@field render_buffer_bar? fun(buffers: TircBufferTab[]): TircBufferBar | TircSpans
+---@field render_unread_separator? fun(): TircSpans
 
 ---@class TircModule
 ---@field version string

@@ -163,6 +163,11 @@ impl ChatBackend for MatrixBackend {
             populate_room(&room, id, &events).await;
         }
 
+        let _ = events.send(BackendMessage {
+            backend: id,
+            event: BackendEvent::Synced,
+        });
+
         let verifications = Verifications::default();
         register_handlers(&client, id, events.clone(), verifications.clone());
 

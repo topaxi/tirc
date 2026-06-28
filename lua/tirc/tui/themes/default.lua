@@ -58,6 +58,7 @@ local Class = require('tirc.class')
 ---@field user? fun(self: TircTheme, user: TircUser): TircSpans
 ---@field render_buffer_tab? fun(self: TircTheme, buffer: TircBufferTab): TircSpans
 ---@field render_buffer_bar? fun(self: TircTheme, buffers: TircBufferTab[]): TircBufferBar | TircSpans
+---@field render_unread_separator? fun(self: TircTheme): TircSpans
 
 ---@class TircTheme: TircUi, TircClassDef<TircTheme, TircThemeOptions>
 ---@field styles table<string, TircThemeStyle>
@@ -101,6 +102,9 @@ function Theme:make_styles(overrides)
     darkgray = theme.style { fg = 'darkgray' },
     tab = theme.style { fg = 'gray', bg = 'darkgray' },
     tab_focused = theme.style { fg = 'white', bg = 'darkgray' },
+    tab_unread = theme.style { fg = 'white', bg = 'darkgray' },
+    tab_mention = theme.style { fg = 'red', bg = 'darkgray' },
+    unread_separator = theme.style { fg = 'darkgray' },
   }
 
   if overrides then
@@ -423,6 +427,14 @@ function Theme:user(user)
   }
 end
 
+--- Renders the separator injected between already-read messages and new unread
+--- ones. Return `nil` or an empty table to suppress the separator entirely.
+---@return TircSpans
+function Theme:render_unread_separator()
+  local s = self.styles
+  return { { '─── new messages ', s.unread_separator }, { '─', s.unread_separator } }
+end
+
 ---@param buffer TircBufferTab
 local function has_unique_name(buffer)
   local count = 0
@@ -434,7 +446,8 @@ local function has_unique_name(buffer)
   return count <= 1
 end
 
---- Renders one tab in the buffer bar. Focused tabs are styled brighter.
+--- Renders one tab in the buffer bar. Focused tabs are styled brighter;
+--- tabs with a mention use red, tabs with unread activity use white.
 ---@param buffer TircBufferTab
 function Theme:render_buffer_tab(buffer)
   local s = self.styles
@@ -442,7 +455,17 @@ function Theme:render_buffer_tab(buffer)
   local backend_label = (meta and meta.label) or buffer.backend_name
   local name = (not has_unique_name(buffer)) and (backend_label .. '/' .. buffer.name)
     or buffer.name
-  local style = tirc.is_focused_buffer(buffer) and s.tab_focused or s.tab
+
+  local style
+  if tirc.is_focused_buffer(buffer) then
+    style = s.tab_focused
+  elseif buffer.has_mention then
+    style = s.tab_mention
+  elseif buffer.has_unread then
+    style = s.tab_unread
+  else
+    style = s.tab
+  end
 
   return { { ' ' .. name .. ' ', style }, ' ' }
 end
