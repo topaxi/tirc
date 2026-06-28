@@ -24,7 +24,6 @@ pub struct RenderedMessage<'a> {
     pub message: Box<Line<'a>>,
 }
 
-
 impl Default for Renderer {
     fn default() -> Self {
         Self::new()

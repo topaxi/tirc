@@ -43,6 +43,10 @@ pub struct InputHandler<'lua> {
     /// Files being polled for mtime changes; rebuilt after each reload.
     watched_files: Vec<(PathBuf, SystemTime)>,
     history: History,
+    /// Set when something that affects the rendered frame changed; the main
+    /// loop renders only when this is set, so idle ticks and mouse moves do not
+    /// trigger a repaint.
+    dirty: bool,
 }
 
 impl<'lua> InputHandler<'lua> {
@@ -72,7 +76,18 @@ impl<'lua> InputHandler<'lua> {
             extra_watch_files,
             watched_files,
             history: History::default(),
+            dirty: true,
         }
+    }
+
+    /// Marks the frame as needing a repaint on the next loop iteration.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Returns whether a repaint is needed and clears the flag.
+    pub fn take_dirty(&mut self) -> bool {
+        std::mem::replace(&mut self.dirty, false)
     }
 
     fn build_watch_list_for(
@@ -82,8 +97,7 @@ impl<'lua> InputHandler<'lua> {
     ) -> Vec<(PathBuf, SystemTime)> {
         let config_dir = config_path.parent().unwrap_or(config_path);
         #[allow(unused_mut)]
-        let mut paths =
-            collect_user_watched_paths(lua, config_dir, config_path, extra_watch_files);
+        let mut paths = collect_user_watched_paths(lua, config_dir, config_path, extra_watch_files);
 
         #[cfg(all(debug_assertions, not(test)))]
         paths.extend(crate::config::builtin_lua_paths());
@@ -129,9 +143,11 @@ impl<'lua> InputHandler<'lua> {
         }
     }
 
-    fn handle_tick(&mut self, state: &mut State, view: &ViewState) {
+    /// Returns whether the tick reloaded the config/theme (and thus changed the
+    /// frame). The file polling itself runs every tick regardless.
+    fn handle_tick(&mut self, state: &mut State, view: &ViewState) -> bool {
         if !self.auto_reload || self.watched_files.is_empty() {
-            return;
+            return false;
         }
 
         let mut changed = false;
@@ -151,6 +167,8 @@ impl<'lua> InputHandler<'lua> {
             let backend = view.focused.as_ref().map(|b| b.backend);
             self.do_reload(state, backend);
         }
+
+        changed
     }
 
     pub fn ui(&self) -> &Tui {
@@ -178,31 +196,35 @@ impl<'lua> InputHandler<'lua> {
         }
     }
 
+    /// Returns whether the event scrolled the buffer (and thus changed the frame).
     fn handle_mouse(
         &mut self,
         state: &mut State,
         view: &mut ViewState,
         event: crossterm::event::MouseEvent,
-    ) {
+    ) -> bool {
         let delta = 3usize;
         match event.kind {
             MouseEventKind::ScrollUp => {
                 if let Some(buffer) = state.focused_buffer_mut(view) {
                     buffer.scroll_up(delta);
                 }
+                true
             }
             MouseEventKind::ScrollDown => {
                 if let Some(buffer) = state.focused_buffer_mut(view) {
                     buffer.scroll_down(delta);
                 }
+                true
             }
-            _ => {}
+            _ => false,
         }
     }
 
-    fn handle_paste(&mut self, view: &ViewState, text: String) {
+    /// Returns whether the paste was applied to the input line (Insert mode).
+    fn handle_paste(&mut self, view: &ViewState, text: String) -> bool {
         if view.mode != Mode::Insert {
-            return;
+            return false;
         }
         // Collapse CR/LF to a space - a multi-line paste must not send multiple messages.
         for ch in text.chars() {
@@ -212,6 +234,7 @@ impl<'lua> InputHandler<'lua> {
                 KeyModifiers::NONE,
             )));
         }
+        true
     }
 
     /// Returns `false` when the command requests application exit (`:q`).
@@ -452,21 +475,26 @@ impl<'lua> InputHandler<'lua> {
         event: Event,
     ) -> Result<bool, anyhow::Error> {
         match event {
-            Event::Input(key) => self.handle_key(state, view, key),
+            // Set dirty before the fallible call so an error path still repaints.
+            Event::Input(key) => {
+                self.dirty = true;
+                self.handle_key(state, view, key)
+            }
             Event::Mouse(mouse) => {
-                self.handle_mouse(state, view, mouse);
+                self.dirty |= self.handle_mouse(state, view, mouse);
                 Ok(true)
             }
             Event::Paste(text) => {
-                self.handle_paste(view, text);
+                self.dirty |= self.handle_paste(view, text);
                 Ok(true)
             }
             Event::Backend(message) => {
+                self.dirty = true;
                 self.handle_backend(state, view, message);
                 Ok(true)
             }
             Event::Tick => {
-                self.handle_tick(state, view);
+                self.dirty |= self.handle_tick(state, view);
                 Ok(true)
             }
         }
@@ -570,7 +598,12 @@ impl<'lua> InputHandler<'lua> {
                 let message = self.ui.input().value().to_string();
                 if !message.trim().is_empty() {
                     if let Some(buffer) = view.focused.clone() {
-                        self.send(buffer.backend, buffer.target, message.clone(), MsgKind::Text);
+                        self.send(
+                            buffer.backend,
+                            buffer.target,
+                            message.clone(),
+                            MsgKind::Text,
+                        );
                     }
                     self.history.push(message);
                 }

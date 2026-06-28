@@ -75,8 +75,10 @@ postponed during the protocol-abstraction work.
       `ChannelMODE +o/+v`). [irc]
 - [ ] **Jump to first-unread / read marker** per buffer. [read]
 - [ ] **Richer status line** (mode, current buffer, lag, activity). [render]
-- [ ] **Render only on state change** (dirty flag); avoids redraw on idle ticks
-      (CODE_REVIEW.md §3.5). [perf]
+- [x] **Render only on state change** (dirty flag); avoids redraw on idle ticks
+      (CODE_REVIEW.md §3.5). [perf] _(`InputHandler::dirty` set per event;
+      `main` renders only on `take_dirty`, with a ~5s heartbeat repaint as a
+      safety net.)_
 - [ ] **`log`/`tracing` to a file** under XDG state; never print to the TUI. See
       memory `logging-use-log-crate`. [infra]
 - [ ] **CI**: `cargo test` + `clippy -D warnings` + `stylua --check` + a dockerized

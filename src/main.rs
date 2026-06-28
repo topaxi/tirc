@@ -18,6 +18,12 @@ use tirc::ui::{Event, InputHandler, State, ViewState};
 
 const TICK_RATE: Duration = Duration::from_millis(1000);
 
+/// Force a repaint after this many idle ticks even if nothing marked the frame
+/// dirty. A safety net so any state change that forgets to set `dirty` self-heals
+/// within a few seconds; the counter resets on every real render, so active use
+/// never triggers a redundant heartbeat repaint.
+const RENDER_HEARTBEAT_TICKS: u32 = 5;
+
 /// Builds a backend from one server config entry, dispatching on its `protocol`
 /// and validating that the required fields for that protocol are present.
 fn build_backend(id: BackendId, server: &ServerConfig) -> anyhow::Result<Box<dyn ChatBackend>> {
@@ -119,19 +125,36 @@ async fn root_task(
     let terminate = terminate_signal();
     tokio::pin!(terminate);
 
+    let mut idle_ticks: u32 = 0;
+
     loop {
-        input_handler.render_ui(&state, &mut view)?;
+        // Render only when something changed; `dirty` starts set so the first
+        // frame always paints, and idle ticks / mouse moves no longer repaint.
+        if input_handler.take_dirty() {
+            input_handler.render_ui(&state, &mut view)?;
+            idle_ticks = 0;
+        }
 
         let event = tokio::select! {
             Some(event) = events.next() => match event {
                 Ok(CrosstermEvent::Key(key)) => Event::Input(key),
                 Ok(CrosstermEvent::Mouse(mouse)) => Event::Mouse(mouse),
                 Ok(CrosstermEvent::Paste(text)) => Event::Paste(text),
+                Ok(CrosstermEvent::Resize(_, _)) => {
+                    input_handler.mark_dirty();
+                    continue;
+                }
                 Ok(_) => continue,
                 Err(_) => continue,
             },
             Some(message) = event_rx.recv() => Event::Backend(message),
-            _ = tick.tick() => Event::Tick,
+            _ = tick.tick() => {
+                idle_ticks += 1;
+                if idle_ticks >= RENDER_HEARTBEAT_TICKS {
+                    input_handler.mark_dirty();
+                }
+                Event::Tick
+            }
             _ = &mut terminate => break,
         };
 
@@ -141,6 +164,7 @@ async fn root_task(
             Err(err) => {
                 // Surface handler errors to the focused buffer's status rather
                 // than exiting, so a transient Lua or IRC error is recoverable.
+                input_handler.mark_dirty();
                 if let Some(backend) = view.focused.as_ref().map(|b| b.backend) {
                     state.apply(
                         backend,

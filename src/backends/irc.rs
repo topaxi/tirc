@@ -308,12 +308,12 @@ fn apply_command(
         }
         Command::SetNick { nick } => client.send(IrcCommand::NICK(nick))?,
         Command::Whois { user } => client.send(IrcCommand::WHOIS(None, user))?,
-        Command::Kick { target, user, reason } => {
-            client.send(IrcCommand::KICK(target.0, user, reason))?
-        }
-        Command::Invite { user, target } => {
-            client.send(IrcCommand::INVITE(user, target.0))?
-        }
+        Command::Kick {
+            target,
+            user,
+            reason,
+        } => client.send(IrcCommand::KICK(target.0, user, reason))?,
+        Command::Invite { user, target } => client.send(IrcCommand::INVITE(user, target.0))?,
         Command::Away { message } => client.send(IrcCommand::AWAY(message))?,
         Command::ListChannels => client.send(IrcCommand::LIST(None, None))?,
         // Quit is handled before apply_command is called (in connect_once).
@@ -820,8 +820,7 @@ mod tests {
 
     #[test]
     fn kick_becomes_membership_kick() {
-        let event =
-            translate_raw("me", ":alice!u@h KICK #tirc bob :bad behaviour").unwrap();
+        let event = translate_raw("me", ":alice!u@h KICK #tirc bob :bad behaviour").unwrap();
         match event {
             ChatEvent::Membership {
                 target,

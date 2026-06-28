@@ -348,7 +348,11 @@ impl State {
 
         // Extract before buffer_mut borrows self.
         let own_nick = self.nickname(backend).to_string();
-        let is_synced = self.backends.get(&backend).map(|b| b.synced).unwrap_or(false);
+        let is_synced = self
+            .backends
+            .get(&backend)
+            .map(|b| b.synced)
+            .unwrap_or(false);
 
         let has_id = id.is_some();
         let buffer = self.buffer_mut(backend, target);
