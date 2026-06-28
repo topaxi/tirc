@@ -86,7 +86,6 @@ function Slanted:render_buffer_bar(buffers)
 
     if i > 1 then
       local entry_bg = tab_entry_bg(buffer, focused)
-      row[#row + 1] = { ' ', theme.style { bg = BAR_BG } }
       row[#row + 1] = { SEP_LEFT, theme.style { fg = BAR_BG, bg = entry_bg } }
     end
 
