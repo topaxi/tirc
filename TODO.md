@@ -13,10 +13,11 @@ postponed during the protocol-abstraction work.
 
 ## P0 - Necessary
 
-- [ ] **Selectable text / copy-paste.** [mouse] Mouse capture suppresses the
-      terminal's native selection. Add a copy/selection mode (release capture,
-      tmux-style) and/or app-level selection + clipboard yank. _(deferred: conflicts
-      with scroll mouse handling added in the scrollback work)_
+- [x] **Selectable text / copy-paste.** [mouse] Both mechanisms, switchable via
+      `config.selection_mode` (`'app'`/`'native'`): a `Ctrl-s` release-capture copy
+      mode (terminal-native selection, `-- COPY --` hint) and app-level mouse
+      selection with `y`/`Ctrl-c` clipboard yank (linewise, read back from the last
+      rendered cell buffer via `arboard`).
 
 ## P1 - Expected
 
@@ -58,15 +59,17 @@ postponed during the protocol-abstraction work.
 
 ## P2 - Convenience
 
-- [ ] **Clickable buffer bar.** [mouse] Click to switch; right-click menu (close,
-      mark read, leave).
-- [ ] **Clickable user list.** [mouse] Left-click to open a query/PM; right-click
-      menu (whois/profile, op/voice, ignore, mention).
+- [x] **Clickable buffer bar.** [mouse] Left-click switches; right-click menu
+      (mark read, leave, close buffer). Hit boxes are measured from the actual
+      rendered bar row so themes with separators (slanted) map correctly.
+- [x] **Clickable user list.** [mouse] Left-click opens a query/PM; right-click
+      menu (whois, open query, mention). _(op/voice and ignore omitted: no MODE
+      `Command` nor ignore list yet - see "Mid-session MODE role changes")_
 - [ ] **Clickable URLs** (OSC 8 hyperlinks or a follow-link keybind). [mouse]
 - [ ] **Scroll the buffer bar to the focused buffer** so long (Matrix) names aren't
       clipped (`renderer.rs::render_buffer_bar`). [layout]
-- [ ] **Resizable user-list sidebar** via keybinds / mouse drag (fixed 10% split in
-      `renderer.rs::render`). [layout]
+- [x] **Resizable user-list sidebar** via keybinds (`<`/`>`/`=`) and mouse drag on
+      the split boundary (`ViewState::sidebar_width` overrides the default 10%). [layout]
 - [ ] **Outbound reactions / redactions / edits** (`Command::React/Redact`). [matrix]
 - [ ] **Render Matrix HTML bodies** (`MessageBody.formatted`). [render]
 - [ ] **Broader IRC command parity**: ban, names, who. [irc] _(kick, invite,
