@@ -606,6 +606,155 @@ fn rect_contains(rect: &Rect, x: u16, y: u16) -> bool {
         && y < rect.y.saturating_add(rect.height)
 }
 
+/// What a right-click context menu acts on. Kept as plain data with no command
+/// coupling: the input handler translates a [`MenuAction`] plus the target into
+/// a backend [`Command`](crate::core::Command) or a local state mutation, so the
+/// view layer stays free of protocol concerns.
+#[derive(Debug, Clone)]
+pub enum MenuTarget {
+    /// A buffer-bar tab: the menu acts on this buffer.
+    Buffer(BufferId),
+    /// A user-list row: the menu acts on this member of the focused buffer.
+    User { backend: BackendId, nick: String },
+}
+
+/// The abstract action a menu item performs. Deliberately decoupled from
+/// [`Command`](crate::core::Command): the input handler owns the mapping from an
+/// action to its concrete effect, which keeps `ViewState` testable without a
+/// backend and lets the same action mean different things per target type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuAction {
+    /// Close (locally remove) a buffer without leaving the channel.
+    CloseBuffer,
+    /// Clear a buffer's unread/mention indicators.
+    MarkRead,
+    /// Leave a channel (sends a Part).
+    Leave,
+    /// Run a whois on a user.
+    Whois,
+    /// Open or focus a query buffer with a user.
+    OpenQuery,
+    /// Insert a `nick: ` mention into the input line.
+    Mention,
+}
+
+/// One selectable row in a [`ContextMenu`].
+#[derive(Debug, Clone)]
+pub struct MenuItem {
+    pub label: String,
+    pub action: MenuAction,
+}
+
+/// A floating right-click context menu, shared by the buffer bar and the user
+/// list. Holds only plain data; the renderer draws it last (on top of the frame)
+/// and writes back the resolved on-screen [`rect`](ContextMenu::rect) so the
+/// input handler can hit-test clicks against the same geometry that was drawn,
+/// rather than re-deriving the clamp.
+#[derive(Debug, Clone, Default)]
+pub struct ContextMenu {
+    /// Whether the menu is currently shown and capturing input modally.
+    pub open: bool,
+    /// Anchor column where the menu was opened (the click position). The renderer
+    /// clamps this so the menu stays fully on-screen.
+    pub x: u16,
+    /// Anchor row where the menu was opened. Clamped like [`Self::x`].
+    pub y: u16,
+    /// Index of the highlighted item.
+    pub selected: usize,
+    pub items: Vec<MenuItem>,
+    /// What the menu acts on, or `None` before it is opened.
+    pub target: Option<MenuTarget>,
+    /// Resolved on-screen rectangle from the most recent render, used by the
+    /// input handler to hit-test clicks. Written by the renderer each frame the
+    /// menu is open; meaningless while closed.
+    pub rect: Rect,
+}
+
+impl ContextMenu {
+    /// Opens the menu at `(x, y)` for `target` with `items`, resetting the
+    /// selection to the first row.
+    pub fn open_at(&mut self, x: u16, y: u16, target: MenuTarget, items: Vec<MenuItem>) {
+        self.open = true;
+        self.x = x;
+        self.y = y;
+        self.selected = 0;
+        self.items = items;
+        self.target = Some(target);
+    }
+
+    /// Closes the menu and drops its items/target so a stale target can never be
+    /// activated after the fact.
+    pub fn close(&mut self) {
+        self.open = false;
+        self.items.clear();
+        self.target = None;
+        self.selected = 0;
+    }
+
+    /// Moves the highlight up one row, clamped at the top (no wrap).
+    pub fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    /// Moves the highlight down one row, clamped at the last item (no wrap).
+    pub fn move_down(&mut self) {
+        let last = self.items.len().saturating_sub(1);
+        self.selected = (self.selected + 1).min(last);
+    }
+
+    /// The action of the highlighted item, or `None` when the menu is empty.
+    pub fn selected_action(&self) -> Option<MenuAction> {
+        self.items.get(self.selected).map(|item| item.action)
+    }
+
+    /// The on-screen rectangle the menu occupies within `area`, clamped so it is
+    /// always fully visible. One rule handles both the bottom bar and the
+    /// sidebar: anchoring near an edge pushes the box back inward (a bar menu near
+    /// `area.height` slides upward). The renderer uses this to draw the menu and
+    /// stores the result in [`Self::rect`] for the input handler to read back.
+    pub fn resolved_rect(&self, area: Rect) -> Rect {
+        let longest = self
+            .items
+            .iter()
+            .map(|item| item.label.chars().count())
+            .max()
+            .unwrap_or(0) as u16;
+        // Two columns of padding around the label plus two for the borders.
+        let menu_w = longest.saturating_add(4).min(area.width.max(1));
+        // One row per item plus the top and bottom borders.
+        let menu_h = (self.items.len() as u16)
+            .saturating_add(2)
+            .min(area.height.max(1));
+        let x = self.x.min(area.width.saturating_sub(menu_w));
+        let y = self.y.min(area.height.saturating_sub(menu_h));
+        Rect {
+            x,
+            y,
+            width: menu_w,
+            height: menu_h,
+        }
+    }
+
+    /// Whether `(x, y)` lands inside the menu's last-rendered rectangle.
+    pub fn contains(&self, x: u16, y: u16) -> bool {
+        self.open && rect_contains(&self.rect, x, y)
+    }
+
+    /// The item index for a click at `(x, y)`, accounting for the top border, or
+    /// `None` when the click is outside the menu or on its border.
+    pub fn item_at(&self, x: u16, y: u16) -> Option<usize> {
+        if !self.contains(x, y) {
+            return None;
+        }
+        let first_row = self.rect.y.checked_add(1)?;
+        if y < first_row {
+            return None;
+        }
+        let index = (y - first_row) as usize;
+        (index < self.items.len()).then_some(index)
+    }
+}
+
 /// View-layer state: which buffer is focused and the input mode. Kept separate
 /// from domain [`State`] so a future split-pane layout can track focus/scroll
 /// per pane without touching the domain model.
@@ -625,6 +774,9 @@ pub struct ViewState {
     /// drag; clamped to a usable range by [`ViewState::sidebar_constraint_width`]
     /// at render time so the stored value never has to be valid on its own.
     pub sidebar_width: Option<u16>,
+    /// The right-click context menu. Closed by default; opened by a right-click
+    /// on a buffer tab or user row and drawn on top of the frame by the renderer.
+    pub menu: ContextMenu,
 }
 
 /// Minimum sidebar width in columns. Narrow enough for short nicks while still
@@ -1307,6 +1459,139 @@ mod tests {
         };
         assert_eq!(layout.member_row_at(2, 1), Some(3));
         assert_eq!(layout.member_row_at(2, 2), Some(4));
+    }
+
+    fn menu_items() -> Vec<MenuItem> {
+        vec![
+            MenuItem {
+                label: "Mark read".to_string(),
+                action: MenuAction::MarkRead,
+            },
+            MenuItem {
+                label: "Leave".to_string(),
+                action: MenuAction::Leave,
+            },
+            MenuItem {
+                label: "Close buffer".to_string(),
+                action: MenuAction::CloseBuffer,
+            },
+        ]
+    }
+
+    #[test]
+    fn menu_open_populates_items_and_target() {
+        let mut menu = ContextMenu::default();
+        assert!(!menu.open);
+        let id = BufferId::new(backend(), "#a");
+        menu.open_at(4, 9, MenuTarget::Buffer(id.clone()), menu_items());
+
+        assert!(menu.open);
+        assert_eq!(menu.x, 4);
+        assert_eq!(menu.y, 9);
+        assert_eq!(menu.selected, 0);
+        assert_eq!(menu.items.len(), 3);
+        assert!(matches!(menu.target, Some(MenuTarget::Buffer(_))));
+        assert_eq!(menu.selected_action(), Some(MenuAction::MarkRead));
+    }
+
+    #[test]
+    fn menu_close_drops_items_and_target() {
+        let mut menu = ContextMenu::default();
+        menu.open_at(
+            0,
+            0,
+            MenuTarget::Buffer(BufferId::status(backend())),
+            menu_items(),
+        );
+        menu.close();
+        assert!(!menu.open);
+        assert!(menu.items.is_empty());
+        assert!(menu.target.is_none());
+        assert_eq!(menu.selected, 0);
+        assert_eq!(menu.selected_action(), None);
+    }
+
+    #[test]
+    fn menu_move_clamps_without_wrapping() {
+        let mut menu = ContextMenu::default();
+        menu.open_at(
+            0,
+            0,
+            MenuTarget::Buffer(BufferId::status(backend())),
+            menu_items(),
+        );
+
+        // Up at the top stays put.
+        menu.move_up();
+        assert_eq!(menu.selected, 0);
+
+        menu.move_down();
+        assert_eq!(menu.selected, 1);
+        assert_eq!(menu.selected_action(), Some(MenuAction::Leave));
+
+        menu.move_down();
+        assert_eq!(menu.selected, 2);
+        // Down at the last item stays put (no wrap to 0).
+        menu.move_down();
+        assert_eq!(menu.selected, 2);
+        assert_eq!(menu.selected_action(), Some(MenuAction::CloseBuffer));
+    }
+
+    #[test]
+    fn menu_resolved_rect_pushes_a_bottom_anchored_menu_fully_on_screen() {
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
+        let mut menu = ContextMenu::default();
+        // Anchored on the very last row, as a click on the bottom buffer bar
+        // would be: the menu must slide up so its whole height fits.
+        menu.open_at(
+            2,
+            23,
+            MenuTarget::Buffer(BufferId::status(backend())),
+            menu_items(),
+        );
+
+        let rect = menu.resolved_rect(area);
+        assert!(
+            rect.y + rect.height <= area.height,
+            "menu bottom {} must fit within {}",
+            rect.y + rect.height,
+            area.height
+        );
+        assert!(
+            rect.x + rect.width <= area.width,
+            "menu right edge must fit on screen"
+        );
+        // 3 items + 2 borders.
+        assert_eq!(rect.height, 5);
+    }
+
+    #[test]
+    fn menu_item_at_maps_clicks_below_the_top_border() {
+        let mut menu = ContextMenu::default();
+        menu.open_at(
+            0,
+            0,
+            MenuTarget::Buffer(BufferId::status(backend())),
+            menu_items(),
+        );
+        // Pin a known rect (the renderer would write this).
+        menu.rect = Rect {
+            x: 0,
+            y: 0,
+            width: 14,
+            height: 5,
+        };
+
+        assert_eq!(menu.item_at(2, 0), None, "top border is not an item");
+        assert_eq!(menu.item_at(2, 1), Some(0), "first item below the border");
+        assert_eq!(menu.item_at(2, 3), Some(2), "last item");
+        assert_eq!(menu.item_at(2, 4), None, "bottom border row past the items");
+        assert_eq!(menu.item_at(20, 1), None, "outside the menu");
     }
 
     #[test]

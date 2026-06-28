@@ -1,9 +1,9 @@
 use mlua::LuaSerdeExt;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListDirection, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListDirection, ListItem, ListState, Paragraph},
 };
 use tui_input::Input;
 
@@ -694,6 +694,40 @@ impl Renderer {
             userlist_first_member: 0,
             split_x,
         };
+
+        // The context menu is drawn last so it floats over everything. The full
+        // synchronized repaint each frame (see `ui.rs`) means a `Clear` plus the
+        // bordered list is all that is needed - there is no incremental diff to
+        // fight. The resolved rect is stored back on the menu so the input handler
+        // hit-tests clicks against the exact geometry that was drawn.
+        if view.menu.open {
+            self.render_context_menu(f, view);
+        }
+    }
+
+    /// Draws the floating context menu and records its on-screen rectangle on
+    /// `view.menu` for the input handler to read back. Plain styling: the
+    /// highlighted row is reversed; no theme formatter is involved in v1.
+    fn render_context_menu(&self, f: &mut ratatui::Frame, view: &mut ViewState) {
+        let rect = view.menu.resolved_rect(f.area());
+        view.menu.rect = rect;
+
+        let items: Vec<ListItem> = view
+            .menu
+            .items
+            .iter()
+            .map(|item| ListItem::new(item.label.clone()))
+            .collect();
+
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL))
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+        let mut list_state = ListState::default();
+        list_state.select(Some(view.menu.selected));
+
+        f.render_widget(Clear, rect);
+        f.render_stateful_widget(list, rect, &mut list_state);
     }
 }
 

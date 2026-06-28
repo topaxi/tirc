@@ -18,7 +18,7 @@ use crate::tui::lua::{create_lua_sender, to_lua_event};
 use crate::tui::Tui;
 
 use super::state::StoredMessage;
-use super::{Mode, State, ViewState};
+use super::{MenuAction, MenuItem, MenuTarget, Mode, State, ViewState};
 
 /// Events the main loop feeds to the input handler.
 #[derive(Debug)]
@@ -209,6 +209,13 @@ impl<'lua> InputHandler<'lua> {
         view: &mut ViewState,
         event: crossterm::event::MouseEvent,
     ) -> bool {
+        // While the context menu is open it is modal: every mouse path is handled
+        // by the menu and must not fall through to scroll/drag/click. Each menu
+        // path returns whether it changed the frame so `handle_event` repaints.
+        if view.menu.open {
+            return self.handle_menu_mouse(state, view, event);
+        }
+
         let delta = 3usize;
         match event.kind {
             MouseEventKind::ScrollUp => {
@@ -228,6 +235,9 @@ impl<'lua> InputHandler<'lua> {
                 // the click; otherwise fall through to tab/user-row handling.
                 self.try_start_split_drag(view, event.column, event.row)
                     || self.handle_left_click(state, view, event.column, event.row)
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                self.handle_right_click(state, view, event.column, event.row)
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_split => {
                 self.drag_split(view, event.column)
@@ -318,6 +328,155 @@ impl<'lua> InputHandler<'lua> {
         }
 
         false
+    }
+
+    /// Routes a mouse event while the context menu is open. A left-click inside
+    /// the menu selects and activates the clicked item; a left-click outside
+    /// dismisses it (click-to-dismiss). A right-click anywhere closes the menu.
+    /// Always returns `true` because every path changes the frame (an activation,
+    /// a dismiss, or - for a click on the border - a swallow that still needs the
+    /// menu repainted with its current state).
+    fn handle_menu_mouse(
+        &mut self,
+        state: &mut State,
+        view: &mut ViewState,
+        event: crossterm::event::MouseEvent,
+    ) -> bool {
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(index) = view.menu.item_at(event.column, event.row) {
+                    view.menu.selected = index;
+                    self.activate_menu(state, view);
+                } else if !view.menu.contains(event.column, event.row) {
+                    view.menu.close();
+                }
+                true
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                view.menu.close();
+                true
+            }
+            // Swallow every other event (scroll, drag, release) so it cannot
+            // reach the buffer underneath while the menu is up.
+            _ => true,
+        }
+    }
+
+    /// Opens a context menu for a right-click on a buffer tab or a user row.
+    /// Returns whether a menu was opened (and thus the frame changed). Buffer-tab
+    /// menus list the safe actions first; user menus need a focused buffer to
+    /// resolve the clicked member's nick.
+    fn handle_right_click(
+        &mut self,
+        state: &mut State,
+        view: &mut ViewState,
+        x: u16,
+        y: u16,
+    ) -> bool {
+        if let Some(id) = view.layout.tab_at(x, y) {
+            let target = MenuTarget::Buffer(id.clone());
+            let items = vec![
+                MenuItem {
+                    label: "Mark read".to_string(),
+                    action: MenuAction::MarkRead,
+                },
+                MenuItem {
+                    label: "Leave".to_string(),
+                    action: MenuAction::Leave,
+                },
+                MenuItem {
+                    label: "Close buffer".to_string(),
+                    action: MenuAction::CloseBuffer,
+                },
+            ];
+            view.menu.open_at(x, y, target, items);
+            return true;
+        }
+
+        if let Some(index) = view.layout.member_row_at(x, y) {
+            let Some(focused) = view.focused.clone() else {
+                return false;
+            };
+            let Some(nick) = state
+                .buffers
+                .get(&focused)
+                .and_then(|buffer| buffer.members.get(index))
+                .map(|member| member.user.name().to_string())
+            else {
+                return false;
+            };
+            let target = MenuTarget::User {
+                backend: focused.backend,
+                nick,
+            };
+            let items = vec![
+                MenuItem {
+                    label: "Whois".to_string(),
+                    action: MenuAction::Whois,
+                },
+                MenuItem {
+                    label: "Open query".to_string(),
+                    action: MenuAction::OpenQuery,
+                },
+                MenuItem {
+                    label: "Mention".to_string(),
+                    action: MenuAction::Mention,
+                },
+            ];
+            view.menu.open_at(x, y, target, items);
+            return true;
+        }
+
+        false
+    }
+
+    /// Performs the highlighted menu item, translating its [`MenuAction`] and
+    /// target into a backend [`Command`] or a local state mutation, then closes
+    /// the menu. Returns `true` since activation always changes the frame.
+    fn activate_menu(&mut self, state: &mut State, view: &mut ViewState) -> bool {
+        match (view.menu.selected_action(), view.menu.target.clone()) {
+            (Some(MenuAction::MarkRead), Some(MenuTarget::Buffer(id))) => {
+                if let Some(buffer) = state.buffers.get_mut(&id) {
+                    buffer.mark_read();
+                    buffer.advance_read_marker();
+                }
+            }
+            (Some(MenuAction::Leave), Some(MenuTarget::Buffer(id))) => {
+                self.send_to(
+                    Some(id.backend),
+                    Command::Part {
+                        target: id.target.clone(),
+                        reason: None,
+                    },
+                );
+            }
+            (Some(MenuAction::CloseBuffer), Some(MenuTarget::Buffer(id))) => {
+                close_buffer(state, view, &id);
+            }
+            (Some(MenuAction::Whois), Some(MenuTarget::User { backend, nick })) => {
+                self.send_to(Some(backend), Command::Whois { user: nick });
+            }
+            (Some(MenuAction::OpenQuery), Some(MenuTarget::User { backend, nick })) => {
+                self.focus_buffer(state, view, backend, &nick);
+            }
+            (Some(MenuAction::Mention), Some(MenuTarget::User { nick, .. })) => {
+                // Drop the mention into the input line and switch to Insert so the
+                // user can keep typing. Prefix a separator when the line is not
+                // empty so an existing draft is not run together with the nick.
+                let current = self.ui.input().value().to_string();
+                let line = if current.is_empty() {
+                    format!("{nick}: ")
+                } else {
+                    format!("{current} {nick}: ")
+                };
+                self.ui.set_input(&line);
+                view.mode = Mode::Insert;
+            }
+            _ => {}
+        }
+
+        view.menu.close();
+        true
     }
 
     /// Returns whether the paste was applied to the input line (Insert mode).
@@ -617,6 +776,24 @@ impl<'lua> InputHandler<'lua> {
         view: &mut ViewState,
         event: KeyEvent,
     ) -> Result<bool, anyhow::Error> {
+        // While the context menu is open it captures the keyboard modally: arrows
+        // move the highlight, Enter activates, Esc dismisses, and every other key
+        // is swallowed so it cannot reach the buffer or input line underneath.
+        // Key events already set `dirty` in `handle_event`, so returning here
+        // still repaints.
+        if view.menu.open {
+            match event.code {
+                KeyCode::Up => view.menu.move_up(),
+                KeyCode::Down => view.menu.move_down(),
+                KeyCode::Enter => {
+                    self.activate_menu(state, view);
+                }
+                KeyCode::Esc => view.menu.close(),
+                _ => {}
+            }
+            return Ok(true);
+        }
+
         let page = (view.viewport_height as usize).max(1);
 
         match (view.mode, event.code) {
@@ -875,6 +1052,39 @@ fn parse_verify(arg: &str) -> VerifyAction {
     }
 }
 
+/// Removes `id` from the buffer list and refocuses a neighbour if it was the
+/// focused buffer. A pure `(State, ViewState)` transition with no `InputHandler`
+/// or terminal, so it is unit-testable directly.
+///
+/// The status buffer is never closeable - it is the backend's home and there is
+/// always at least one. `shift_remove` preserves the order of the remaining
+/// buffers (unlike `swap_remove`), so the bar does not reshuffle on close. The
+/// neighbour is chosen from the removed buffer's former index clamped into the
+/// new (shorter) list, which lands on the next buffer to the right, or the new
+/// last buffer when the closed one was rightmost.
+fn close_buffer(state: &mut State, view: &mut ViewState, id: &crate::core::BufferId) {
+    if id.target.is_status() {
+        return;
+    }
+
+    let index = state.buffers.get_index_of(id);
+    let was_focused = view.focused.as_ref() == Some(id);
+    state.buffers.shift_remove(id);
+
+    if was_focused {
+        let len = state.buffers.len();
+        if len == 0 {
+            view.focused = None;
+            return;
+        }
+        let neighbour = index.map(|i| i.min(len - 1)).unwrap_or(0);
+        view.focus_buffer_index(state, neighbour);
+        if let Some(buffer) = state.focused_buffer_mut(view) {
+            buffer.mark_read();
+        }
+    }
+}
+
 fn server_info(text: String) -> ChatEvent {
     ChatEvent::ServerInfo {
         target: None,
@@ -888,6 +1098,86 @@ fn server_info(text: String) -> ChatEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backends::BackendInfo;
+    use crate::core::{BufferId, MessageBody, MsgKind, Protocol, TargetId, UserRef};
+
+    fn state_with_buffers(channels: &[&str]) -> (State, BackendId) {
+        let backend = BackendId(0);
+        let mut state = State::new();
+        state.register_backend(BackendInfo {
+            id: backend,
+            protocol: Protocol::Irc,
+            name: "test".to_string(),
+        });
+        for channel in channels {
+            state.apply(
+                backend,
+                ChatEvent::Message {
+                    target: TargetId::from(*channel),
+                    id: None,
+                    sender: UserRef::new("alice"),
+                    body: MessageBody::plain("hi"),
+                    kind: MsgKind::Text,
+                    echo_of: None,
+                    time: None,
+                },
+            );
+        }
+        (state, backend)
+    }
+
+    #[test]
+    fn close_buffer_refocuses_a_neighbour() {
+        let (mut state, backend) = state_with_buffers(&["#a", "#b"]);
+        // Buffers in order: (status), #a, #b.
+        let mut view = ViewState::new();
+        let a = BufferId::new(backend, "#a");
+        view.focus(a.clone());
+
+        close_buffer(&mut state, &mut view, &a);
+
+        assert!(!state.buffers.contains_key(&a), "closed buffer is removed");
+        // The former index (1) clamps into the shorter list and lands on #b.
+        assert_eq!(
+            view.focused.as_ref().unwrap().target.as_str(),
+            "#b",
+            "focus moves to the next buffer"
+        );
+    }
+
+    #[test]
+    fn close_buffer_refuses_the_status_buffer() {
+        let (mut state, backend) = state_with_buffers(&["#a"]);
+        let status = BufferId::status(backend);
+        let mut view = ViewState::new();
+        view.focus(status.clone());
+
+        close_buffer(&mut state, &mut view, &status);
+
+        assert!(
+            state.buffers.contains_key(&status),
+            "status buffer is never closeable"
+        );
+        assert_eq!(view.focused, Some(status));
+    }
+
+    #[test]
+    fn close_unfocused_buffer_leaves_focus_untouched() {
+        let (mut state, backend) = state_with_buffers(&["#a", "#b"]);
+        let mut view = ViewState::new();
+        let a = BufferId::new(backend, "#a");
+        let b = BufferId::new(backend, "#b");
+        view.focus(b.clone());
+
+        close_buffer(&mut state, &mut view, &a);
+
+        assert!(!state.buffers.contains_key(&a));
+        assert_eq!(
+            view.focused,
+            Some(b),
+            "focus stays on the still-open buffer"
+        );
+    }
 
     #[test]
     fn history_push_deduplicates_consecutive() {
