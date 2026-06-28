@@ -360,22 +360,47 @@ impl Renderer {
         Ok(vec![Line::from(self.lua_value_to_spans(lua, value)?)])
     }
 
-    /// Produces the buffer bar as a list of lines. Delegates the whole layout to
-    /// the theme's `render_buffer_bar`; when that formatter is absent, falls back
-    /// to a single line built from per-tab `render_buffer_tab` results so raw
-    /// `TircUi` themes keep working.
-    fn build_buffer_bar(&self, state: &State, lua: &mlua::Lua) -> Vec<Line<'_>> {
+    /// Extracts the optional `bg` colour from a `TircBufferBar` table, returning
+    /// a `Style` with that background set, or the default style if absent/invalid.
+    fn bar_bg_style(table: &mlua::Table) -> Style {
+        table
+            .get::<Option<String>>("bg")
+            .ok()
+            .flatten()
+            .and_then(|s| std::str::FromStr::from_str(&s).ok())
+            .map(|c: Color| Style::default().bg(c))
+            .unwrap_or_default()
+    }
+
+    /// Produces the buffer bar as a list of lines plus a base background style.
+    /// Delegates the whole layout to the theme's `render_buffer_bar`; when that
+    /// formatter is absent, falls back to a single line built from per-tab
+    /// `render_buffer_tab` results so raw `TircUi` themes keep working.
+    fn build_buffer_bar(&self, state: &State, lua: &mlua::Lua) -> (Vec<Line<'_>>, Style) {
         let tabs = match self.buffer_tabs(state, lua) {
             Ok(tabs) => tabs,
-            Err(_) => return vec![Line::default()],
+            Err(_) => return (vec![Line::default()], Style::default()),
         };
 
         match crate::config::call_formatter(lua, "render_buffer_bar", &tabs) {
-            Some(Ok(value)) => self.lua_value_to_rows(lua, value).unwrap_or_default(),
-            Some(Err(err)) => vec![Line::from(Self::string_to_span(
-                format!("ERR: {err}"),
-                Some(Style::default().fg(Color::Red)),
-            ))],
+            Some(Ok(mlua::Value::Table(table))) => {
+                let bg_style = Self::bar_bg_style(&table);
+                let lines = self
+                    .lua_value_to_rows(lua, mlua::Value::Table(table))
+                    .unwrap_or_default();
+                (lines, bg_style)
+            }
+            Some(Ok(value)) => {
+                let lines = self.lua_value_to_rows(lua, value).unwrap_or_default();
+                (lines, Style::default())
+            }
+            Some(Err(err)) => (
+                vec![Line::from(Self::string_to_span(
+                    format!("ERR: {err}"),
+                    Some(Style::default().fg(Color::Red)),
+                ))],
+                Style::default(),
+            ),
             None => {
                 let spans = tabs
                     .sequence_values::<mlua::Table>()
@@ -385,7 +410,7 @@ impl Renderer {
                             .unwrap_or_default()
                     })
                     .collect::<Vec<_>>();
-                vec![Line::from(spans)]
+                (vec![Line::from(spans)], Style::default())
             }
         }
     }
@@ -497,7 +522,7 @@ impl Renderer {
 
         // Build the bar first so the layout can size its region to fit the rows
         // the theme returned, capped so the message area never collapses.
-        let bar_lines = self.build_buffer_bar(state, lua);
+        let (bar_lines, bar_style) = self.build_buffer_bar(state, lua);
         let max_bar_height = f.area().height.saturating_sub(3);
         let bar_height = (bar_lines.len() as u16).clamp(1, max_bar_height.max(1));
 
@@ -525,7 +550,10 @@ impl Renderer {
 
         self.render_messages(f, state, view, lua, msg_rect);
 
-        f.render_widget(Paragraph::new(Text::from(bar_lines)), chunks[2]);
+        f.render_widget(
+            Paragraph::new(Text::from(bar_lines)).style(bar_style),
+            chunks[2],
+        );
         self.render_input(f, view, input, chunks[1]);
     }
 }
@@ -693,6 +721,15 @@ mod tests {
         tab.set("backend_id", 0)?;
         tab.set("backend_name", "irc.example.com")?;
         buffers.push(tab)?;
+
+        // Themes read _tirc.buffers in has_unique_name; seed it before calling
+        // the formatter so the context matches a real render cycle.
+        let tirc_mod: mlua::Table = lua
+            .globals()
+            .get::<mlua::Table>("package")?
+            .get::<mlua::Table>("loaded")?
+            .get::<mlua::Table>("_tirc")?;
+        tirc_mod.set("buffers", buffers.clone())?;
 
         let renderer = Renderer::new();
         let value = crate::config::call_formatter(&lua, "render_buffer_bar", &buffers)

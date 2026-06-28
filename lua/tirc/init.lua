@@ -13,6 +13,7 @@
 --- The buffer bar layout returned by `render_buffer_bar`: one `TircSpans` per row.
 ---@class TircBufferBar
 ---@field rows TircSpans[]
+---@field bg? string optional base background colour (hex or named) to fill empty bar space
 
 --- Styled span tree consumed by the renderer: a string, a `{ content, style }`
 --- pair, or a (possibly nested) list of either. Returning `nil` skips the line.
