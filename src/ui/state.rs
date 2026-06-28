@@ -1,3 +1,5 @@
+use std::ops::RangeInclusive;
+
 use chrono::{DateTime, Local};
 use indexmap::IndexMap;
 use ratatui::layout::Rect;
@@ -755,6 +757,39 @@ impl ContextMenu {
     }
 }
 
+/// An in-progress or completed text selection over the message area, in
+/// terminal cell coordinates. `anchor` is where the drag began (the fixed end);
+/// `cursor` is the moving end that follows the pointer. v1 is line-granular: the
+/// whole width of the message area is selected for every row the selection
+/// spans, so only the row of each end matters for what gets copied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    /// Where the drag started (fixed end). `(column, row)`.
+    pub anchor: (u16, u16),
+    /// Where the pointer currently is (moving end). `(column, row)`.
+    pub cursor: (u16, u16),
+}
+
+impl Selection {
+    /// A fresh zero-length selection anchored at `(x, y)`.
+    pub fn new(x: u16, y: u16) -> Self {
+        Selection {
+            anchor: (x, y),
+            cursor: (x, y),
+        }
+    }
+
+    /// The inclusive range of rows the selection covers, ordered low to high so
+    /// it is valid regardless of whether the drag went upward or downward. Used
+    /// both to highlight cells and to read the selected text back out of the
+    /// rendered frame.
+    pub fn selected_rows(&self) -> RangeInclusive<u16> {
+        let a = self.anchor.1;
+        let b = self.cursor.1;
+        a.min(b)..=a.max(b)
+    }
+}
+
 /// View-layer state: which buffer is focused and the input mode. Kept separate
 /// from domain [`State`] so a future split-pane layout can track focus/scroll
 /// per pane without touching the domain model.
@@ -777,6 +812,15 @@ pub struct ViewState {
     /// The right-click context menu. Closed by default; opened by a right-click
     /// on a buffer tab or user row and drawn on top of the frame by the renderer.
     pub menu: ContextMenu,
+    /// True while "copy mode" is active: the app has released mouse capture so
+    /// the terminal performs its own native selection. Read by the renderer to
+    /// show a `-- COPY --` hint; toggled by a keybind that flips terminal mouse
+    /// capture on the side.
+    pub copy_mode: bool,
+    /// The current app-level message-area selection, or `None` when nothing is
+    /// selected. Set on a left drag in the message area, highlighted by the
+    /// renderer, and read by the yank keybind to copy text to the clipboard.
+    pub selection: Option<Selection>,
 }
 
 /// Minimum sidebar width in columns. Narrow enough for short nicks while still
@@ -840,6 +884,25 @@ impl ViewState {
             .map(|rect| rect.width)
             .or(self.sidebar_width)
             .unwrap_or(SIDEBAR_MIN_WIDTH)
+    }
+
+    /// Flips copy mode and returns the new value. The caller pairs this with the
+    /// terminal mouse-capture toggle (which lives on the [`Tui`](crate::tui::Tui)
+    /// since it touches the backend), so the flag here only drives the renderer's
+    /// hint. Leaving copy mode also drops any app-level selection, which is
+    /// meaningless once native selection has taken over.
+    pub fn toggle_copy_mode(&mut self) -> bool {
+        self.copy_mode = !self.copy_mode;
+        if self.copy_mode {
+            self.selection = None;
+        }
+        self.copy_mode
+    }
+
+    /// Drops the current selection, if any. Used after a yank and when a click
+    /// starts somewhere that should not extend the previous selection.
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
     }
 
     /// Focuses `buffer` if nothing is focused yet (e.g. the first backend's
@@ -1592,6 +1655,44 @@ mod tests {
         assert_eq!(menu.item_at(2, 3), Some(2), "last item");
         assert_eq!(menu.item_at(2, 4), None, "bottom border row past the items");
         assert_eq!(menu.item_at(20, 1), None, "outside the menu");
+    }
+
+    #[test]
+    fn selection_rows_are_ordered_regardless_of_drag_direction() {
+        // Downward drag: anchor above cursor.
+        let down = Selection {
+            anchor: (3, 5),
+            cursor: (10, 9),
+        };
+        assert_eq!(down.selected_rows(), 5..=9);
+
+        // Upward drag: anchor below cursor. The range must still be low..=high.
+        let up = Selection {
+            anchor: (10, 9),
+            cursor: (3, 5),
+        };
+        assert_eq!(up.selected_rows(), 5..=9);
+
+        // A zero-length selection covers exactly its row.
+        let point = Selection::new(4, 7);
+        assert_eq!(point.selected_rows(), 7..=7);
+    }
+
+    #[test]
+    fn toggle_copy_mode_flips_and_drops_selection_on_enter() {
+        let mut view = ViewState::new();
+        assert!(!view.copy_mode);
+
+        view.selection = Some(Selection::new(1, 1));
+        // Entering copy mode hands selection to the terminal, so the app-level
+        // selection is cleared.
+        assert!(view.toggle_copy_mode());
+        assert!(view.copy_mode);
+        assert!(view.selection.is_none());
+
+        // Leaving copy mode flips back without re-creating a selection.
+        assert!(!view.toggle_copy_mode());
+        assert!(!view.copy_mode);
     }
 
     #[test]

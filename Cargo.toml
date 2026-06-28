@@ -31,6 +31,7 @@ textwrap = "0.16"
 itertools = "0.15"
 unicode-width = "0.2"
 async-trait = "0.1.89"
+arboard = "3"
 # rustls TLS is pulled in unconditionally by matrix-sdk, so dropping default
 # features keeps HTTPS working. `e2e-encryption` re-uses the same sqlite store
 # for the crypto state (Olm/Megolm keys); `automatic-room-key-forwarding` lets

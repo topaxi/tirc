@@ -55,6 +55,21 @@ pub struct ServerConfig {
     pub device_id: Option<String>,
 }
 
+/// How a left drag over the message area behaves. The release-capture copy-mode
+/// toggle (a keybind) is always available regardless of this setting; this only
+/// chooses the *default* drag behaviour.
+#[derive(Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SelectionMode {
+    /// A drag selects text inside the app and the yank keybind copies it to the
+    /// clipboard. The default.
+    #[default]
+    App,
+    /// The app does not select on drag; the user relies on the copy-mode toggle
+    /// to release mouse capture and let the terminal do native selection.
+    Native,
+}
+
 #[derive(Deserialize, Debug)]
 pub struct TircConfig {
     pub servers: Box<[ServerConfig]>,
@@ -64,6 +79,10 @@ pub struct TircConfig {
 
     #[serde(default)]
     pub watch_files: Vec<String>,
+
+    /// Default mouse-drag selection behaviour. See [`SelectionMode`].
+    #[serde(default)]
+    pub selection_mode: SelectionMode,
 }
 
 fn get_default_config() -> &'static str {
@@ -645,6 +664,22 @@ mod tests {
             protocol: Protocol::Irc,
             name: "test".to_string(),
         }
+    }
+
+    #[test]
+    fn selection_mode_defaults_to_app() {
+        assert_eq!(SelectionMode::default(), SelectionMode::App);
+    }
+
+    #[test]
+    fn selection_mode_deserializes_lowercase() {
+        let lua = Lua::new();
+        let app: SelectionMode = lua.from_value(lua.load("'app'").eval().unwrap()).unwrap();
+        let native: SelectionMode = lua
+            .from_value(lua.load("'native'").eval().unwrap())
+            .unwrap();
+        assert_eq!(app, SelectionMode::App);
+        assert_eq!(native, SelectionMode::Native);
     }
 
     fn stored(event: ChatEvent) -> StoredMessage {

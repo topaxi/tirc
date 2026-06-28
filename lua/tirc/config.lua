@@ -2,6 +2,7 @@
 ---@field servers TircConfigServer[]
 ---@field auto_reload_config? boolean reload config automatically when files change (default false)
 ---@field watch_files? string[] extra config-dir-relative paths to watch for auto-reload
+---@field selection_mode? 'app' | 'native' default mouse-drag selection: 'app' selects in-app for clipboard yank, 'native' relies on the copy-mode toggle (default 'app')
 
 --- A configured backend. `protocol` is required and selects the variant.
 ---@alias TircConfigServer TircIrcServer | TircMatrixServer
@@ -36,6 +37,7 @@ function M.create_config()
     servers = {},
     auto_reload_config = false,
     watch_files = {},
+    selection_mode = 'app',
   }
 end
 

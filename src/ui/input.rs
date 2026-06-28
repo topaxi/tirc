@@ -9,7 +9,9 @@ use crossterm::event::{
 use mlua::Lua;
 
 use crate::backends::BackendHandle;
-use crate::config::{collect_user_watched_paths, emit_event, reload_lua_theme, EventName};
+use crate::config::{
+    collect_user_watched_paths, emit_event, reload_lua_theme, EventName, SelectionMode,
+};
 use crate::core::{
     BackendEvent, BackendId, BackendMessage, ChatEvent, Command, MsgKind, TargetId, TxnAllocator,
     VerifyAction,
@@ -18,7 +20,7 @@ use crate::tui::lua::{create_lua_sender, to_lua_event};
 use crate::tui::Tui;
 
 use super::state::StoredMessage;
-use super::{MenuAction, MenuItem, MenuTarget, Mode, State, ViewState};
+use super::{MenuAction, MenuItem, MenuTarget, Mode, Selection, State, ViewState};
 
 /// Events the main loop feeds to the input handler.
 #[derive(Debug)]
@@ -52,9 +54,19 @@ pub struct InputHandler<'lua> {
     /// True while a left-button drag started on the sidebar split boundary, so
     /// subsequent `Drag` events resize the sidebar rather than being ignored.
     dragging_split: bool,
+    /// True while a left-button drag is extending a message-area text selection,
+    /// so subsequent `Drag` events update the selection cursor.
+    selecting: bool,
+    /// The configured default mouse-drag behaviour. In [`SelectionMode::Native`]
+    /// a drag does not select in-app; the user relies on the always-available
+    /// copy-mode toggle instead.
+    selection_mode: SelectionMode,
 }
 
 impl<'lua> InputHandler<'lua> {
+    // The handler genuinely owns this many collaborators; grouping them into a
+    // struct would only move the argument list to a builder for no clarity gain.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         lua: &'lua Lua,
         ui: Tui,
@@ -63,6 +75,7 @@ impl<'lua> InputHandler<'lua> {
         config_path: PathBuf,
         auto_reload: bool,
         extra_watch_files: Vec<String>,
+        selection_mode: SelectionMode,
     ) -> Self {
         let watched_files = if auto_reload {
             Self::build_watch_list_for(lua, &config_path, &extra_watch_files)
@@ -83,6 +96,8 @@ impl<'lua> InputHandler<'lua> {
             history: History::default(),
             dirty: true,
             dragging_split: false,
+            selecting: false,
+            selection_mode,
         }
     }
 
@@ -231,10 +246,19 @@ impl<'lua> InputHandler<'lua> {
                 true
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                // A press on the split boundary begins a resize drag and consumes
-                // the click; otherwise fall through to tab/user-row handling.
+                // A fresh press drops any prior selection; it is re-established
+                // below when the press starts a new one. Clearing here also
+                // repaints away a stale highlight when the click does something
+                // else (a tab switch, a split-drag, an empty click).
+                let had_selection = view.selection.take().is_some();
+                // A press on the split boundary begins a resize drag; a press in
+                // the message area begins a text selection; otherwise fall
+                // through to tab/user-row handling. `had_selection` keeps the
+                // frame repainting when only the cleared highlight changed.
                 self.try_start_split_drag(view, event.column, event.row)
+                    || self.try_start_selection(view, event.column, event.row)
                     || self.handle_left_click(state, view, event.column, event.row)
+                    || had_selection
             }
             MouseEventKind::Down(MouseButton::Right) => {
                 self.handle_right_click(state, view, event.column, event.row)
@@ -242,11 +266,101 @@ impl<'lua> InputHandler<'lua> {
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_split => {
                 self.drag_split(view, event.column)
             }
+            MouseEventKind::Drag(MouseButton::Left) if self.selecting => {
+                self.update_selection(view, event.column, event.row)
+            }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.dragging_split = false;
-                false
+                // Stop extending the selection but keep it visible so the user
+                // can yank it. Repaint only if a drag was actually in progress.
+                let was_selecting = self.selecting;
+                self.selecting = false;
+                was_selecting
             }
             _ => false,
+        }
+    }
+
+    /// Begins a message-area text selection when a left-press lands inside the
+    /// message rect and app selection is enabled (not [`SelectionMode::Native`]
+    /// and not in copy mode, where the terminal owns selection). Returns whether
+    /// the press started a selection (and thus consumed the click).
+    fn try_start_selection(&mut self, view: &mut ViewState, x: u16, y: u16) -> bool {
+        if view.copy_mode || self.selection_mode == SelectionMode::Native {
+            return false;
+        }
+        if !rect_contains(view.layout.message_rect, x, y) {
+            return false;
+        }
+        view.selection = Some(Selection::new(x, y));
+        self.selecting = true;
+        true
+    }
+
+    /// Updates the moving end of the in-progress selection, clamping it into the
+    /// message area so the highlight and copied rows never leave the
+    /// conversation. Returns whether the frame changed.
+    fn update_selection(&mut self, view: &mut ViewState, x: u16, y: u16) -> bool {
+        let rect = view.layout.message_rect;
+        let Some(selection) = view.selection.as_mut() else {
+            self.selecting = false;
+            return false;
+        };
+        let cx = x.clamp(rect.x, rect.right().saturating_sub(1));
+        let cy = y.clamp(rect.y, rect.bottom().saturating_sub(1));
+        selection.cursor = (cx, cy);
+        true
+    }
+
+    /// Toggles the release-capture copy mode, flipping terminal mouse capture to
+    /// match: entering releases capture so the terminal selects natively;
+    /// leaving re-enables app-level mouse handling.
+    fn toggle_copy_mode(&mut self, view: &mut ViewState) -> Result<(), anyhow::Error> {
+        if view.toggle_copy_mode() {
+            self.ui.disable_mouse_capture()?;
+        } else {
+            self.ui.enable_mouse_capture()?;
+        }
+        Ok(())
+    }
+
+    /// Copies the current selection's text to the system clipboard and clears the
+    /// selection. Reads the text from the last rendered frame (see
+    /// [`Tui::selection_text`](crate::tui::Tui::selection_text)). Clipboard
+    /// failures (e.g. a headless box with no display) are logged and surfaced as
+    /// a one-line status notice rather than crashing.
+    fn yank_selection(&mut self, state: &mut State, view: &mut ViewState) {
+        let Some(selection) = view.selection else {
+            return;
+        };
+
+        let rect = view.layout.message_rect;
+        let text = self.ui.selection_text(
+            selection.selected_rows(),
+            rect.x,
+            rect.right().saturating_sub(1),
+        );
+        let backend = view.focused.as_ref().map(|b| b.backend);
+        view.clear_selection();
+
+        if text.is_empty() {
+            return;
+        }
+
+        let line_count = text.lines().count();
+        let notice = match copy_to_clipboard(&text) {
+            Ok(()) => {
+                let plural = if line_count == 1 { "" } else { "s" };
+                format!("Copied {line_count} line{plural} to clipboard")
+            }
+            Err(err) => {
+                log::warn!("clipboard copy failed: {err}");
+                format!("Clipboard error: {err}").replace(['\r', '\n'], " ")
+            }
+        };
+
+        if let Some(backend) = backend {
+            state.apply(backend, server_info(notice));
         }
     }
 
@@ -859,6 +973,30 @@ impl<'lua> InputHandler<'lua> {
             (Mode::Normal, KeyCode::Char('=')) => view.reset_sidebar_width(),
             (Mode::Normal, KeyCode::Char('i')) => view.mode = Mode::Insert,
             (Mode::Normal, KeyCode::Char(':')) => view.mode = Mode::Command,
+            // Ctrl-s: toggle release-capture copy mode (mnemonic: select). Hands
+            // text selection to the terminal and back; available in both
+            // selection modes as the escape hatch.
+            (Mode::Normal, KeyCode::Char('s'))
+                if event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.toggle_copy_mode(view)?;
+            }
+            // Yank the app-level selection to the clipboard: `y`, or Ctrl-c. A
+            // no-op when nothing is selected.
+            (Mode::Normal, KeyCode::Char('y')) => self.yank_selection(state, view),
+            (Mode::Normal, KeyCode::Char('c'))
+                if event.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.yank_selection(state, view)
+            }
+            // Esc in Normal mode leaves copy mode, else clears a selection.
+            (Mode::Normal, KeyCode::Esc) => {
+                if view.copy_mode {
+                    self.toggle_copy_mode(view)?;
+                } else {
+                    view.clear_selection();
+                }
+            }
             (Mode::Command | Mode::Insert, KeyCode::Esc) => {
                 view.mode = Mode::Normal;
                 self.ui.reset_input();
@@ -1093,6 +1231,27 @@ fn server_info(text: String) -> ChatEvent {
         text,
         raw: None,
     }
+}
+
+/// Whether `(x, y)` falls inside `rect`. Mirrors the helper in `state.rs`; kept
+/// local so the mouse paths read terse.
+fn rect_contains(rect: ratatui::layout::Rect, x: u16, y: u16) -> bool {
+    x >= rect.x
+        && x < rect.x.saturating_add(rect.width)
+        && y >= rect.y
+        && y < rect.y.saturating_add(rect.height)
+}
+
+/// Copies `text` to the system clipboard, mapping every failure to a string so
+/// the caller can surface it without an `arboard`-specific type. The
+/// [`arboard::Clipboard`] is created per call (cheap, and avoids holding an
+/// X11/Wayland connection open for the process lifetime); construction itself
+/// can fail on a headless/no-display box, which is why this returns a `Result`.
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|err| err.to_string())?;
+    clipboard
+        .set_text(text.to_string())
+        .map_err(|err| err.to_string())
 }
 
 #[cfg(test)]

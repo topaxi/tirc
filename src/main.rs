@@ -117,6 +117,7 @@ async fn root_task(
         config_path.to_owned(),
         config.auto_reload_config,
         config.watch_files.clone(),
+        config.selection_mode,
     );
 
     let mut events = EventStream::new();

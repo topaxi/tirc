@@ -552,6 +552,22 @@ impl Renderer {
             .block(Block::default().borders(Borders::TOP));
         f.render_widget(p, rect);
 
+        // While copy mode is active, terminal-native selection is live and the
+        // app ignores the mouse; surface a right-aligned hint on the input row so
+        // the state is visible. Drawn over the same rect after the input so it
+        // sits on the text row (the block's top border is row `rect.y`).
+        if view.copy_mode {
+            let hint = Paragraph::new(Line::from(Span::styled(
+                "-- COPY --",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .alignment(ratatui::layout::Alignment::Right)
+            .block(Block::default().borders(Borders::TOP));
+            f.render_widget(hint, rect);
+        }
+
         match view.mode {
             Mode::Normal => {}
             Mode::Command | Mode::Insert => f.set_cursor_position((
@@ -695,6 +711,12 @@ impl Renderer {
             split_x,
         };
 
+        // Highlight the app-level selection by reversing the covered cells of the
+        // message area, drawn after the messages but before the menu so the menu
+        // stays on top. Line-granular for v1: the whole message-area width of
+        // every selected row is reversed.
+        self.render_selection_highlight(f, view);
+
         // The context menu is drawn last so it floats over everything. The full
         // synchronized repaint each frame (see `ui.rs`) means a `Clear` plus the
         // bordered list is all that is needed - there is no incremental diff to
@@ -702,6 +724,36 @@ impl Renderer {
         // hit-tests clicks against the exact geometry that was drawn.
         if view.menu.open {
             self.render_context_menu(f, view);
+        }
+    }
+
+    /// Reverses the cells of every row the selection covers, clamped to the
+    /// message area so the highlight never bleeds into the bar, input line, or
+    /// user list. A no-op when there is no selection. Cell coordinates are
+    /// validated against the frame buffer (`cell_mut` returns `Option`) so a
+    /// selection captured from a larger earlier frame cannot panic after a
+    /// resize.
+    fn render_selection_highlight(&self, f: &mut ratatui::Frame, view: &ViewState) {
+        let Some(selection) = view.selection else {
+            return;
+        };
+
+        let rect = view.layout.message_rect;
+        let reversed = Style::default().add_modifier(Modifier::REVERSED);
+        let rows = selection.selected_rows();
+        let top = rect.y;
+        let bottom = rect.y.saturating_add(rect.height);
+        let buf = f.buffer_mut();
+
+        for y in rows {
+            if y < top || y >= bottom {
+                continue;
+            }
+            for x in rect.x..rect.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_style(reversed);
+                }
+            }
         }
     }
 
