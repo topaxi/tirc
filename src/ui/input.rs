@@ -42,6 +42,7 @@ pub struct InputHandler<'lua> {
     extra_watch_files: Vec<String>,
     /// Files being polled for mtime changes; rebuilt after each reload.
     watched_files: Vec<(PathBuf, SystemTime)>,
+    history: History,
 }
 
 impl<'lua> InputHandler<'lua> {
@@ -70,6 +71,7 @@ impl<'lua> InputHandler<'lua> {
             auto_reload,
             extra_watch_files,
             watched_files,
+            history: History::default(),
         }
     }
 
@@ -299,6 +301,79 @@ impl<'lua> InputHandler<'lua> {
                     user: nickname.to_string(),
                 },
             ),
+            ["topic", text] => {
+                if let Some(target) = target {
+                    self.send_to(
+                        backend,
+                        Command::SetTopic {
+                            target,
+                            topic: text.to_string(),
+                        },
+                    );
+                }
+            }
+            ["away"] => self.send_to(backend, Command::Away { message: None }),
+            ["away", message] => self.send_to(
+                backend,
+                Command::Away {
+                    message: Some(message.to_string()),
+                },
+            ),
+            ["kick", rest] => {
+                if let Some(backend) = backend {
+                    // :kick [#channel] <nick> [reason...]
+                    let (kick_target, nick_and_rest) = if rest.starts_with('#') {
+                        let mut it = rest.splitn(2, ' ');
+                        let chan = it.next().unwrap_or("");
+                        (Some(TargetId::from(chan)), it.next().unwrap_or(""))
+                    } else {
+                        (target, rest)
+                    };
+                    if let Some(t) = kick_target {
+                        let mut it = nick_and_rest.splitn(2, ' ');
+                        let nick = it.next().unwrap_or("");
+                        let reason = it.next().map(str::to_string);
+                        if !nick.is_empty() {
+                            self.send_to(
+                                Some(backend),
+                                Command::Kick {
+                                    target: t,
+                                    user: nick.to_string(),
+                                    reason,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            ["invite", rest] => {
+                if let Some(backend) = backend {
+                    let parts: Box<[&str]> = rest.splitn(2, ' ').collect();
+                    match *parts {
+                        [user, channel] => {
+                            self.send_to(
+                                Some(backend),
+                                Command::Invite {
+                                    user: user.to_string(),
+                                    target: TargetId::from(channel),
+                                },
+                            );
+                        }
+                        [user] => {
+                            if let Some(t) = target {
+                                self.send_to(
+                                    Some(backend),
+                                    Command::Invite {
+                                        user: user.to_string(),
+                                        target: t,
+                                    },
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             ["list"] => self.send_to(backend, Command::ListChannels),
             ["verify"] => self.send_to(
                 backend,
@@ -337,6 +412,19 @@ impl<'lua> InputHandler<'lua> {
         state.buffers.entry(buffer.clone()).or_default();
         view.focus(buffer);
         target
+    }
+
+    fn history_up(&mut self) {
+        let draft = self.ui.input().value().to_string();
+        if let Some(entry) = self.history.step_up(draft) {
+            self.ui.set_input(&entry);
+        }
+    }
+
+    fn history_down(&mut self) {
+        if let Some(entry) = self.history.step_down() {
+            self.ui.set_input(&entry);
+        }
     }
 
     fn key_code_is_digit(key_code: KeyCode) -> bool {
@@ -444,12 +532,19 @@ impl<'lua> InputHandler<'lua> {
                 self.ui.reset_input();
                 return Ok(proceed);
             }
+            (Mode::Insert, KeyCode::Up) => {
+                self.history_up();
+            }
+            (Mode::Insert, KeyCode::Down) => {
+                self.history_down();
+            }
             (Mode::Insert, KeyCode::Enter) => {
                 let message = self.ui.input().value().to_string();
                 if !message.trim().is_empty() {
                     if let Some(buffer) = view.focused.clone() {
-                        self.send(buffer.backend, buffer.target, message, MsgKind::Text);
+                        self.send(buffer.backend, buffer.target, message.clone(), MsgKind::Text);
                     }
+                    self.history.push(message);
                 }
                 self.ui.reset_input();
             }
@@ -536,6 +631,65 @@ impl<'lua> InputHandler<'lua> {
     }
 }
 
+/// Input history for the Insert-mode line editor.
+///
+/// `entries` holds sent messages newest-last. `index` is `Some(i)` while the
+/// user is browsing; `None` means "at the live input". `draft` saves the
+/// in-progress text when the user first presses Up, so Down past the last entry
+/// restores exactly what they had typed.
+#[derive(Debug, Default)]
+struct History {
+    entries: Vec<String>,
+    index: Option<usize>,
+    draft: String,
+}
+
+impl History {
+    /// Adds a sent message. Consecutive duplicates are collapsed.
+    /// Resets the browsing position.
+    fn push(&mut self, message: String) {
+        if self.entries.last().map(String::as_str) != Some(message.as_str()) {
+            self.entries.push(message);
+        }
+        self.index = None;
+        self.draft = String::new();
+    }
+
+    /// Move to the previous (older) history entry, saving `current_draft` when
+    /// entering history for the first time. Returns the entry to load, or `None`
+    /// when there is nothing to recall.
+    fn step_up(&mut self, current_draft: String) -> Option<String> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let new_index = match self.index {
+            None => {
+                self.draft = current_draft;
+                self.entries.len() - 1
+            }
+            Some(0) => 0,
+            Some(i) => i - 1,
+        };
+        self.index = Some(new_index);
+        Some(self.entries[new_index].clone())
+    }
+
+    /// Move to the next (newer) history entry, or back to the live draft when
+    /// already at the most recent entry. Returns the text to load, or `None`
+    /// when not currently browsing history.
+    fn step_down(&mut self) -> Option<String> {
+        let index = self.index?;
+        if index + 1 < self.entries.len() {
+            let new_index = index + 1;
+            self.index = Some(new_index);
+            Some(self.entries[new_index].clone())
+        } else {
+            self.index = None;
+            Some(self.draft.clone())
+        }
+    }
+}
+
 /// Maps the argument of `:verify <arg>` to a [`VerifyAction`]. `accept`,
 /// `confirm` and `cancel` advance an in-flight verification; anything else is
 /// treated as a user id to start verifying.
@@ -557,5 +711,85 @@ fn server_info(text: String) -> ChatEvent {
         code: None,
         text,
         raw: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_push_deduplicates_consecutive() {
+        let mut h = History::default();
+        h.push("hello".to_string());
+        h.push("hello".to_string());
+        assert_eq!(h.entries.len(), 1);
+        h.push("world".to_string());
+        assert_eq!(h.entries.len(), 2);
+    }
+
+    #[test]
+    fn history_push_resets_index() {
+        let mut h = History::default();
+        h.push("a".to_string());
+        h.push("b".to_string());
+        h.step_up(String::new());
+        assert!(h.index.is_some());
+        h.push("c".to_string());
+        assert!(h.index.is_none());
+    }
+
+    #[test]
+    fn history_up_returns_most_recent_first() {
+        let mut h = History::default();
+        h.push("first".to_string());
+        h.push("second".to_string());
+        assert_eq!(h.step_up(String::new()).as_deref(), Some("second"));
+        assert_eq!(h.step_up(String::new()).as_deref(), Some("first"));
+        // Clamped at oldest entry.
+        assert_eq!(h.step_up(String::new()).as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn history_down_restores_draft() {
+        let mut h = History::default();
+        h.push("msg".to_string());
+        h.step_up("draft".to_string());
+        assert_eq!(h.step_down().as_deref(), Some("draft"));
+        assert!(h.index.is_none());
+    }
+
+    #[test]
+    fn history_down_returns_none_when_not_browsing() {
+        let mut h = History::default();
+        h.push("msg".to_string());
+        assert_eq!(h.step_down(), None);
+    }
+
+    #[test]
+    fn history_up_returns_none_when_empty() {
+        let mut h = History::default();
+        assert_eq!(h.step_up(String::new()), None);
+    }
+
+    #[test]
+    fn history_cycles_through_all_entries_then_back() {
+        let mut h = History::default();
+        for msg in ["a", "b", "c"] {
+            h.push(msg.to_string());
+        }
+        // Navigate to oldest.
+        h.step_up(String::new());
+        h.step_up(String::new());
+        h.step_up(String::new());
+        assert_eq!(h.index, Some(0));
+        // Navigate back to newest.
+        h.step_down();
+        h.step_down();
+        assert_eq!(h.index, Some(2));
+        // One more Down returns the draft.
+        let result = h.step_down();
+        assert!(result.is_some());
+        assert!(h.index.is_none());
     }
 }

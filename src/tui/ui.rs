@@ -64,6 +64,10 @@ impl Tui {
         self.input.reset();
     }
 
+    pub fn set_input(&mut self, value: &str) {
+        self.input = value.into();
+    }
+
     pub fn handle_event(&mut self, event: &crossterm::event::Event) {
         self.input.handle_event(event);
     }

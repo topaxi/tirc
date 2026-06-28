@@ -39,7 +39,7 @@ postponed during the protocol-abstraction work.
       surfaced to the status buffer for now.
 - [ ] **Nick / room completion.** [input] Tab-complete nicknames, `#channels`, room
       aliases.
-- [ ] **Input history.** [input] Up/Down to recall previously sent messages.
+- [x] **Input history.** [input] Up/Down to recall previously sent messages.
 - [ ] **Multiline input composing.** [input] Input scrolls horizontally only
       (`renderer.rs::render_input`); support soft-wrap / multiline.
 - [ ] **SASL authentication.** [irc] Many networks require it (currently plain
@@ -69,8 +69,8 @@ postponed during the protocol-abstraction work.
       `renderer.rs::render`). [layout]
 - [ ] **Outbound reactions / redactions / edits** (`Command::React/Redact`). [matrix]
 - [ ] **Render Matrix HTML bodies** (`MessageBody.formatted`). [render]
-- [ ] **Broader IRC command parity**: kick, ban, invite, topic set, names, who,
-      `/away`. [irc]
+- [ ] **Broader IRC command parity**: ban, names, who. [irc] _(kick, invite,
+      topic, /away done)_
 - [ ] **Mid-session MODE role changes** (op/voice without a rejoin; parse
       `ChannelMODE +o/+v`). [irc]
 - [ ] **Jump to first-unread / read marker** per buffer. [read]

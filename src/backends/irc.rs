@@ -303,6 +303,13 @@ fn apply_command(
         }
         Command::SetNick { nick } => client.send(IrcCommand::NICK(nick))?,
         Command::Whois { user } => client.send(IrcCommand::WHOIS(None, user))?,
+        Command::Kick { target, user, reason } => {
+            client.send(IrcCommand::KICK(target.0, user, reason))?
+        }
+        Command::Invite { user, target } => {
+            client.send(IrcCommand::INVITE(user, target.0))?
+        }
+        Command::Away { message } => client.send(IrcCommand::AWAY(message))?,
         Command::ListChannels => client.send(IrcCommand::LIST(None, None))?,
         // Quit is handled before apply_command is called (in connect_once).
         Command::Quit { .. } => {}
@@ -533,6 +540,23 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
             who: UserRef::new(message.source_nickname()?.to_string()),
             change: MembershipChange::Part {
                 reason: reason.clone(),
+            },
+            time: server_time(message),
+        }),
+        IrcCommand::KICK(channel, user, reason) => Some(ChatEvent::Membership {
+            target: TargetId(channel.clone()),
+            who: UserRef::new(user.clone()),
+            change: MembershipChange::Kick {
+                by: UserRef::new(message.source_nickname()?.to_string()),
+                reason: reason.clone(),
+            },
+            time: server_time(message),
+        }),
+        IrcCommand::INVITE(nick, channel) => Some(ChatEvent::Membership {
+            target: TargetId(channel.clone()),
+            who: UserRef::new(nick.clone()),
+            change: MembershipChange::Invite {
+                by: UserRef::new(message.source_nickname()?.to_string()),
             },
             time: server_time(message),
         }),
@@ -786,6 +810,44 @@ mod tests {
                 assert_eq!(text, "Welcome");
             }
             other => panic!("expected server info, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kick_becomes_membership_kick() {
+        let event =
+            translate_raw("me", ":alice!u@h KICK #tirc bob :bad behaviour").unwrap();
+        match event {
+            ChatEvent::Membership {
+                target,
+                who,
+                change: MembershipChange::Kick { by, reason },
+                ..
+            } => {
+                assert_eq!(target.as_str(), "#tirc");
+                assert_eq!(who.id, "bob");
+                assert_eq!(by.id, "alice");
+                assert_eq!(reason.as_deref(), Some("bad behaviour"));
+            }
+            other => panic!("expected kick membership, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invite_becomes_membership_invite() {
+        let event = translate_raw("me", ":alice!u@h INVITE bob #tirc").unwrap();
+        match event {
+            ChatEvent::Membership {
+                target,
+                who,
+                change: MembershipChange::Invite { by },
+                ..
+            } => {
+                assert_eq!(target.as_str(), "#tirc");
+                assert_eq!(who.id, "bob");
+                assert_eq!(by.id, "alice");
+            }
+            other => panic!("expected invite membership, got {other:?}"),
         }
     }
 }

@@ -385,6 +385,18 @@ pub enum Command {
     Whois {
         user: String,
     },
+    Kick {
+        target: TargetId,
+        user: String,
+        reason: Option<String>,
+    },
+    Invite {
+        user: String,
+        target: TargetId,
+    },
+    Away {
+        message: Option<String>,
+    },
     ListChannels,
     /// Drives interactive device verification (Matrix SAS). IRC has no analogue
     /// and ignores it.
