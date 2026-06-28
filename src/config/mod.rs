@@ -319,6 +319,7 @@ const TIRC_UTILS_LUA: &str = include_str!("../../lua/tirc/utils.lua");
 const TIRC_CLASS_LUA: &str = include_str!("../../lua/tirc/class.lua");
 const TIRC_THEME_LUA: &str = include_str!("../../lua/tirc/tui/theme.lua");
 const TIRC_DEFAULT_THEME_LUA: &str = include_str!("../../lua/tirc/tui/themes/default.lua");
+const TIRC_SLANTED_THEME_LUA: &str = include_str!("../../lua/tirc/tui/themes/slanted.lua");
 
 /// Bundled Lua sources written to the config `types/` directory so an editor's
 /// Lua language server can resolve `require('tirc.*')` and the `---@class` types
@@ -331,6 +332,7 @@ const TYPE_DEFINITIONS: &[(&str, &str)] = &[
     ("tirc/class.lua", TIRC_CLASS_LUA),
     ("tirc/tui/theme.lua", TIRC_THEME_LUA),
     ("tirc/tui/themes/default.lua", TIRC_DEFAULT_THEME_LUA),
+    ("tirc/tui/themes/slanted.lua", TIRC_SLANTED_THEME_LUA),
 ];
 
 /// `.luarc.json` pointing the Lua language server at the exported definitions.
@@ -375,10 +377,59 @@ fn write_type_definitions(config_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// In debug (non-test) builds, reads a builtin Lua file from the source tree so
+/// edits are picked up without recompiling. Falls back to the embedded string if
+/// the file cannot be read (e.g. the binary has moved off the build machine).
+/// In test and release builds the embedded string is always used so tests are
+/// not affected by local WIP edits to the Lua files.
+///
+/// Returns `(chunk_name, source)` where `chunk_name` is the real path in debug
+/// builds and the `{builtin}/...` sentinel in release/test builds.
+fn load_builtin(
+    relative: &str,
+    embedded: &'static str,
+) -> (String, std::borrow::Cow<'static, str>) {
+    #[cfg(all(debug_assertions, not(test)))]
+    {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        if let Ok(content) = std::fs::read_to_string(&src) {
+            return (src.display().to_string(), std::borrow::Cow::Owned(content));
+        }
+    }
+    (
+        format!("{{builtin}}/{relative}"),
+        std::borrow::Cow::Borrowed(embedded),
+    )
+}
+
+/// Returns the absolute paths to all builtin Lua source files in the repo.
+///
+/// Only available in debug (non-test) builds where `CARGO_MANIFEST_DIR` points
+/// at the live source tree. Used to include builtins in the file-watch list so
+/// that edits trigger a hot reload without recompiling.
+#[cfg(all(debug_assertions, not(test)))]
+pub fn builtin_lua_paths() -> Vec<std::path::PathBuf> {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    [
+        "lua/tirc/init.lua",
+        "lua/tirc/config.lua",
+        "lua/tirc/utils.lua",
+        "lua/tirc/class.lua",
+        "lua/tirc/tui/theme.lua",
+        "lua/tirc/tui/themes/default.lua",
+        "lua/tirc/tui/themes/slanted.lua",
+    ]
+    .iter()
+    .map(|p| base.join(p))
+    .filter(|p| p.exists())
+    .collect()
+}
+
 /// Registers the `_tirc` runtime module and all builtin `tirc.*` Lua modules.
 ///
-/// This is everything needed to evaluate a user config or a theme, without
-/// touching the filesystem, which also makes it usable from tests.
+/// In release builds this is filesystem-free (embedded strings only), which
+/// makes it safe to call from tests. In debug builds the sources are read from
+/// the repo so edits are hot-reloadable without recompiling.
 pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
     let tirc_mod = get_or_create_module(lua, "_tirc")?;
 
@@ -390,40 +441,29 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
     create_date_time_module(lua)?;
     create_tirc_theme_lua_module(lua)?;
 
-    let public_tirc_module: Table = lua
-        .load(TIRC_INIT_LUA)
-        .set_name("{builtin}/lua/tirc/init.lua")
-        .call(())?;
-
+    let (name, src) = load_builtin("lua/tirc/init.lua", TIRC_INIT_LUA);
+    let public_tirc_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
     set_loaded_modules(lua, "tirc", public_tirc_module)?;
 
-    let config_module: Table = lua
-        .load(TIRC_CONFIG_LUA)
-        .set_name("{builtin}/lua/tirc/config.lua")
-        .call(())?;
-
+    let (name, src) = load_builtin("lua/tirc/config.lua", TIRC_CONFIG_LUA);
+    let config_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
     set_loaded_modules(lua, "tirc.config", config_module)?;
 
-    let utils_module: Table = lua
-        .load(TIRC_UTILS_LUA)
-        .set_name("{builtin}/lua/tirc/utils.lua")
-        .call(())?;
-
+    let (name, src) = load_builtin("lua/tirc/utils.lua", TIRC_UTILS_LUA);
+    let utils_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
     set_loaded_modules(lua, "tirc.utils", utils_module)?;
 
-    let class_module: Table = lua
-        .load(TIRC_CLASS_LUA)
-        .set_name("{builtin}/lua/tirc/class.lua")
-        .call(())?;
-
+    let (name, src) = load_builtin("lua/tirc/class.lua", TIRC_CLASS_LUA);
+    let class_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
     set_loaded_modules(lua, "tirc.class", class_module)?;
 
-    let default_theme_module: Table = lua
-        .load(TIRC_DEFAULT_THEME_LUA)
-        .set_name("{builtin}/lua/tirc/tui/themes/default.lua")
-        .call(())?;
-
+    let (name, src) = load_builtin("lua/tirc/tui/themes/default.lua", TIRC_DEFAULT_THEME_LUA);
+    let default_theme_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
     set_loaded_modules(lua, "tirc.tui.themes.default", default_theme_module)?;
+
+    let (name, src) = load_builtin("lua/tirc/tui/themes/slanted.lua", TIRC_SLANTED_THEME_LUA);
+    let slanted_theme_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
+    set_loaded_modules(lua, "tirc.tui.themes.slanted", slanted_theme_module)?;
 
     Ok(())
 }

@@ -79,7 +79,14 @@ impl<'lua> InputHandler<'lua> {
         extra_watch_files: &[String],
     ) -> Vec<(PathBuf, SystemTime)> {
         let config_dir = config_path.parent().unwrap_or(config_path);
-        collect_user_watched_paths(lua, config_dir, config_path, extra_watch_files)
+        #[allow(unused_mut)]
+        let mut paths =
+            collect_user_watched_paths(lua, config_dir, config_path, extra_watch_files);
+
+        #[cfg(all(debug_assertions, not(test)))]
+        paths.extend(crate::config::builtin_lua_paths());
+
+        paths
             .into_iter()
             .filter_map(|p| {
                 let mtime = std::fs::metadata(&p).ok()?.modified().ok()?;

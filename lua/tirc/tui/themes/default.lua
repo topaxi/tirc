@@ -99,6 +99,8 @@ function Theme:make_styles(overrides)
     red = theme.style { fg = 'red' },
     gray = theme.style { fg = 'gray' },
     darkgray = theme.style { fg = 'darkgray' },
+    tab = theme.style { fg = 'gray', bg = 'darkgray' },
+    tab_focused = theme.style { fg = 'white', bg = 'darkgray' },
   }
 
   if overrides then
@@ -440,8 +442,9 @@ function Theme:render_buffer_tab(buffer)
   local backend_label = (meta and meta.label) or buffer.backend_name
   local name = (not has_unique_name(buffer)) and (backend_label .. '/' .. buffer.name)
     or buffer.name
+  local style = tirc.is_focused_buffer(buffer) and s.tab_focused or s.tab
 
-  return { { name, tirc.is_focused_buffer(buffer) and s.white or s.gray }, ' ' }
+  return { { ' ' .. name .. ' ', style }, ' ' }
 end
 
 --- Lays out the whole buffer bar. Returns `{ rows = { <TircSpans>, ... } }`, one
