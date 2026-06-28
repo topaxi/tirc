@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind,
+};
 use mlua::Lua;
 
 use crate::backends::BackendHandle;
@@ -217,8 +219,60 @@ impl<'lua> InputHandler<'lua> {
                 }
                 true
             }
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.handle_left_click(state, view, event.column, event.row)
+            }
             _ => false,
         }
+    }
+
+    /// Resolves a left-click against the most recent render's hit regions.
+    /// Returns whether the click changed the frame (and thus needs a repaint).
+    fn handle_left_click(
+        &mut self,
+        state: &mut State,
+        view: &mut ViewState,
+        x: u16,
+        y: u16,
+    ) -> bool {
+        // A click on a buffer tab switches focus, mirroring the Tab key handler's
+        // read-marker dance: advance the marker on the buffer we are leaving, then
+        // clear the activity flags on the one we land on.
+        if let Some(id) = view.layout.tab_at(x, y) {
+            let id = id.clone();
+            if let Some(buffer) = state.focused_buffer_mut(view) {
+                buffer.advance_read_marker();
+            }
+            view.focus(id);
+            if let Some(buffer) = state.focused_buffer_mut(view) {
+                buffer.mark_read();
+            }
+            return true;
+        }
+
+        // A click on a user row opens (or focuses) a query buffer for that member
+        // on the focused buffer's backend.
+        if let Some(index) = view.layout.member_row_at(x, y) {
+            let Some(focused) = view.focused.clone() else {
+                return false;
+            };
+            let Some(nick) = state
+                .buffers
+                .get(&focused)
+                .and_then(|buffer| buffer.members.get(index))
+                .map(|member| member.user.name().to_string())
+            else {
+                return false;
+            };
+            // Never open a query to ourselves.
+            if nick == state.nickname(focused.backend) {
+                return false;
+            }
+            self.focus_buffer(state, view, focused.backend, &nick);
+            return true;
+        }
+
+        false
     }
 
     /// Returns whether the paste was applied to the input line (Insert mode).

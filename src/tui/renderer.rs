@@ -10,7 +10,7 @@ use tui_input::Input;
 use crate::backends::BackendInfo;
 use crate::core::{BufferId, TargetId};
 use crate::lua::date_time::date_time_to_table;
-use crate::ui::{ChatBuffer, Member, Mode, State, StoredMessage, ViewState};
+use crate::ui::{ChatBuffer, LayoutMap, Member, Mode, State, StoredMessage, ViewState};
 
 use super::lua::{to_lua_event, to_lua_user, STYLE_MARKER};
 use super::wrap::wrap_line;
@@ -342,6 +342,51 @@ impl Renderer {
         Ok(tabs)
     }
 
+    /// Measures each buffer's rendered tab and accumulates left-to-right hit
+    /// boxes along the first row of the bar. Tabs are measured in `state.buffers`
+    /// order using the same per-buffer `render_buffer_tab` formatter the default
+    /// theme concatenates, so the boxes line up with the drawn bar exactly. This
+    /// must run after `update_render_context`, because a tab's width can depend
+    /// on the `_tirc` globals that context populates (e.g. `has_unique_name`).
+    ///
+    /// The trailing separator a theme appends to a tab is attributed to that
+    /// tab, leaving the bar contiguous with no dead zones between tabs.
+    fn build_bar_tabs(
+        &self,
+        state: &State,
+        lua: &mlua::Lua,
+        bar_rect: Rect,
+    ) -> Vec<(Rect, BufferId)> {
+        let mut tabs = Vec::with_capacity(state.buffers.len());
+        let mut x = bar_rect.x;
+
+        for (id, buffer) in state.buffers.iter() {
+            let width: u16 = self
+                .buffer_tab_table(state, lua, id, buffer)
+                .ok()
+                .and_then(|tab| self.format_spans(lua, "render_buffer_tab", tab).ok())
+                .map(|spans| spans.iter().map(|span| span.width() as u16).sum())
+                .unwrap_or(0);
+
+            if width == 0 {
+                continue;
+            }
+
+            tabs.push((
+                Rect {
+                    x,
+                    y: bar_rect.y,
+                    width,
+                    height: 1,
+                },
+                id.clone(),
+            ));
+            x = x.saturating_add(width);
+        }
+
+        tabs
+    }
+
     fn update_render_context(
         &self,
         lua: &mlua::Lua,
@@ -569,6 +614,9 @@ impl Renderer {
             .focused(state, view)
             .map(|(id, buffer, _, _)| (buffer.label(&id.target).to_string(), &buffer.members));
 
+        let mut userlist_rect = None;
+        let mut split_x = None;
+
         let msg_rect = match members {
             Some((title, members)) if members.len() > 1 => {
                 let split = Layout::default()
@@ -577,6 +625,8 @@ impl Renderer {
                     .split(chunks[0]);
 
                 self.render_users(f, members, lua, &title, split[1]);
+                userlist_rect = Some(split[1]);
+                split_x = Some(split[1].x);
                 split[0]
             }
             _ => chunks[0],
@@ -591,6 +641,19 @@ impl Renderer {
             chunks[2],
         );
         self.render_input(f, view, input, chunks[1]);
+
+        // Record this frame's hit regions so the input handler can resolve mouse
+        // clicks without re-deriving the layout. Built last, after the bar's Lua
+        // context is in place, so the tab widths match what was drawn.
+        let bar_tabs = self.build_bar_tabs(state, lua, chunks[2]);
+        view.layout = LayoutMap {
+            message_rect: msg_rect,
+            bar_rect: chunks[2],
+            bar_tabs,
+            userlist_rect,
+            userlist_first_member: 0,
+            split_x,
+        };
     }
 }
 
@@ -739,6 +802,72 @@ mod tests {
         let value = run_lua_code(&lua, "{ 'x', 'y' }")?;
         let rows = renderer.lua_value_to_rows(&lua, value)?;
         assert_eq!(rows.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn build_bar_tabs_produces_contiguous_hit_boxes() -> anyhow::Result<(), anyhow::Error> {
+        use crate::backends::BackendInfo;
+        use crate::core::{
+            BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef,
+        };
+        use crate::ui::{State, ViewState};
+
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default'):setup({})")
+            .exec()?;
+
+        let backend = BackendId(0);
+        let mut state = State::new();
+        state.register_backend(BackendInfo {
+            id: backend,
+            protocol: Protocol::Irc,
+            name: "irc.example.com".to_string(),
+        });
+        // Create two channel buffers in addition to the status buffer.
+        for channel in ["#a", "#bb"] {
+            state.apply(
+                backend,
+                ChatEvent::Message {
+                    target: TargetId::from(channel),
+                    id: None,
+                    sender: UserRef::new("alice"),
+                    body: MessageBody::plain("hi"),
+                    kind: MsgKind::Text,
+                    echo_of: None,
+                    time: None,
+                },
+            );
+        }
+
+        let mut view = ViewState::new();
+        view.focus(BufferId::status(backend));
+
+        let renderer = Renderer::new();
+        // Populate the _tirc globals the tab formatter reads before measuring.
+        renderer.update_render_context(&lua, &view, &state)?;
+
+        let bar_rect = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 1,
+        };
+        let tabs = renderer.build_bar_tabs(&state, &lua, bar_rect);
+
+        assert_eq!(tabs.len(), state.buffers.len(), "one hit box per buffer");
+        assert_eq!(tabs[0].0.x, bar_rect.x, "first tab starts at the bar's x");
+        for pair in tabs.windows(2) {
+            let (prev, _) = &pair[0];
+            let (next, _) = &pair[1];
+            assert_eq!(
+                next.x,
+                prev.x + prev.width,
+                "tabs are contiguous with no gaps or overlaps"
+            );
+            assert!(prev.width > 0, "each tab has a measurable width");
+        }
         Ok(())
     }
 

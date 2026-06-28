@@ -1,5 +1,6 @@
 use chrono::{DateTime, Local};
 use indexmap::IndexMap;
+use ratatui::layout::Rect;
 
 use crate::backends::BackendInfo;
 use crate::core::{
@@ -539,6 +540,72 @@ impl State {
     }
 }
 
+/// A map of on-screen hit regions the renderer fills in each frame and the
+/// input handler reads to turn mouse coordinates into actions. It mirrors the
+/// existing precedent where the renderer writes [`ViewState::viewport_height`]:
+/// geometry is recomputed per frame and the latest copy lives here so input
+/// handling does not need to re-derive the layout.
+///
+/// Only the first row of the buffer bar is mapped (`bar_tabs`), which matches
+/// the default theme's single-row layout exactly. Multi-row or separator-heavy
+/// custom themes (e.g. `slanted`) degrade to approximate boxes, where a misclick
+/// lands on an adjacent buffer - low harm.
+#[derive(Debug, Default, Clone)]
+pub struct LayoutMap {
+    /// The message area (excludes the user list when a sidebar is shown).
+    pub message_rect: Rect,
+    /// The whole buffer bar region.
+    pub bar_rect: Rect,
+    /// Per-tab hit boxes paired with the buffer they select, left to right in
+    /// buffer order. Built by measuring each tab's rendered display width.
+    pub bar_tabs: Vec<(Rect, BufferId)>,
+    /// The user list region, or `None` when the sidebar is hidden.
+    pub userlist_rect: Option<Rect>,
+    /// Index of the first member rendered in the user list. Always 0 today;
+    /// reserved for a future scrollable user list so `member_row_at` can map a
+    /// screen row back to the correct roster index.
+    pub userlist_first_member: usize,
+    /// Column of the sidebar split boundary, or `None` when there is no sidebar.
+    /// Reserved for the resizable-sidebar drag handling in a later commit.
+    pub split_x: Option<u16>,
+}
+
+impl LayoutMap {
+    /// Returns the buffer whose tab hit box contains `(x, y)`, if any. Used to
+    /// turn a left-click on the buffer bar into a focus switch.
+    pub fn tab_at(&self, x: u16, y: u16) -> Option<&BufferId> {
+        self.bar_tabs
+            .iter()
+            .find_map(|(rect, id)| rect_contains(rect, x, y).then_some(id))
+    }
+
+    /// Returns the member index (relative to `userlist_first_member`) for a
+    /// click at `(x, y)` within the user list. The list is drawn in a `Block`
+    /// with a title, which ratatui places on the block's first row, so the first
+    /// member sits at `rect.y + 1`. Returns `None` when there is no user list,
+    /// the click falls outside it, or it lands on the title row.
+    pub fn member_row_at(&self, x: u16, y: u16) -> Option<usize> {
+        let rect = self.userlist_rect?;
+        if !rect_contains(&rect, x, y) {
+            return None;
+        }
+        let first_member_row = rect.y.checked_add(1)?;
+        if y < first_member_row {
+            return None;
+        }
+        Some(self.userlist_first_member + (y - first_member_row) as usize)
+    }
+}
+
+/// Whether `(x, y)` falls inside `rect`. ratatui exposes `Rect::contains` only
+/// via a `Position`, so this small helper keeps the hit-test call sites terse.
+fn rect_contains(rect: &Rect, x: u16, y: u16) -> bool {
+    x >= rect.x
+        && x < rect.x.saturating_add(rect.width)
+        && y >= rect.y
+        && y < rect.y.saturating_add(rect.height)
+}
+
 /// View-layer state: which buffer is focused and the input mode. Kept separate
 /// from domain [`State`] so a future split-pane layout can track focus/scroll
 /// per pane without touching the domain model.
@@ -550,6 +617,9 @@ pub struct ViewState {
     /// Updated by the renderer after each draw; used by scroll key handlers to
     /// compute page-height steps without a second terminal size query.
     pub viewport_height: u16,
+    /// Hit-region map from the most recent render, read by the input handler to
+    /// resolve mouse clicks to buffers and user-list members.
+    pub layout: LayoutMap,
 }
 
 impl ViewState {
@@ -1028,6 +1098,93 @@ mod tests {
         );
         assert_eq!(buf.messages[0].time.timestamp(), 1000);
         assert_eq!(buf.messages[1].time.timestamp(), 2000);
+    }
+
+    #[test]
+    fn tab_at_resolves_clicks_to_contiguous_hit_boxes() {
+        let a = BufferId::new(backend(), "#a");
+        let b = BufferId::new(backend(), "#b");
+        let layout = LayoutMap {
+            bar_tabs: vec![
+                (
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: 5,
+                        height: 1,
+                    },
+                    a.clone(),
+                ),
+                (
+                    Rect {
+                        x: 5,
+                        y: 0,
+                        width: 4,
+                        height: 1,
+                    },
+                    b.clone(),
+                ),
+            ],
+            ..LayoutMap::default()
+        };
+
+        assert_eq!(layout.tab_at(0, 0), Some(&a));
+        assert_eq!(layout.tab_at(4, 0), Some(&a));
+        assert_eq!(
+            layout.tab_at(5, 0),
+            Some(&b),
+            "boundary belongs to next tab"
+        );
+        assert_eq!(layout.tab_at(8, 0), Some(&b));
+        assert_eq!(layout.tab_at(9, 0), None, "past the last tab");
+        assert_eq!(layout.tab_at(0, 1), None, "wrong row");
+    }
+
+    #[test]
+    fn member_row_at_accounts_for_title_offset() {
+        let layout = LayoutMap {
+            userlist_rect: Some(Rect {
+                x: 80,
+                y: 0,
+                width: 10,
+                height: 5,
+            }),
+            ..LayoutMap::default()
+        };
+
+        assert_eq!(
+            layout.member_row_at(85, 0),
+            None,
+            "title row is not a member"
+        );
+        assert_eq!(layout.member_row_at(85, 1), Some(0), "first member row");
+        assert_eq!(layout.member_row_at(85, 2), Some(1));
+        assert_eq!(layout.member_row_at(85, 4), Some(3), "last visible row");
+        assert_eq!(layout.member_row_at(79, 1), None, "left of the list");
+        assert_eq!(layout.member_row_at(90, 1), None, "right of the list");
+        assert_eq!(layout.member_row_at(85, 5), None, "below the list");
+    }
+
+    #[test]
+    fn member_row_at_without_userlist_is_none() {
+        let layout = LayoutMap::default();
+        assert_eq!(layout.member_row_at(0, 0), None);
+    }
+
+    #[test]
+    fn member_row_at_applies_first_member_offset() {
+        let layout = LayoutMap {
+            userlist_rect: Some(Rect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 5,
+            }),
+            userlist_first_member: 3,
+            ..LayoutMap::default()
+        };
+        assert_eq!(layout.member_row_at(2, 1), Some(3));
+        assert_eq!(layout.member_row_at(2, 2), Some(4));
     }
 
     #[test]
