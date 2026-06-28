@@ -619,9 +619,13 @@ impl Renderer {
 
         let msg_rect = match members {
             Some((title, members)) if members.len() > 1 => {
+                // The sidebar takes a fixed column width (user-resizable) and the
+                // message area gets the rest; `sidebar_constraint_width` clamps so
+                // the message area can never collapse.
+                let sidebar = view.sidebar_constraint_width(chunks[0].width);
                 let split = Layout::default()
                     .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(90), Constraint::Percentage(10)].as_ref())
+                    .constraints([Constraint::Min(0), Constraint::Length(sidebar)].as_ref())
                     .split(chunks[0]);
 
                 self.render_users(f, members, lua, &title, split[1]);

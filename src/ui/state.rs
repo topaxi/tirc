@@ -620,11 +620,74 @@ pub struct ViewState {
     /// Hit-region map from the most recent render, read by the input handler to
     /// resolve mouse clicks to buffers and user-list members.
     pub layout: LayoutMap,
+    /// User-set width of the user-list sidebar in columns, or `None` to use the
+    /// default proportional width. Driven by the resize keybinds and the split
+    /// drag; clamped to a usable range by [`ViewState::sidebar_constraint_width`]
+    /// at render time so the stored value never has to be valid on its own.
+    pub sidebar_width: Option<u16>,
 }
+
+/// Minimum sidebar width in columns. Narrow enough for short nicks while still
+/// leaving room for the list border.
+const SIDEBAR_MIN_WIDTH: u16 = 8;
+/// Columns reserved for the message area, so a wide sidebar can never collapse
+/// the conversation it sits beside.
+const SIDEBAR_MESSAGE_RESERVE: u16 = 20;
 
 impl ViewState {
     pub fn new() -> Self {
         ViewState::default()
+    }
+
+    /// The sidebar width to use for a horizontal split of `total_width` columns.
+    ///
+    /// With an explicit [`ViewState::sidebar_width`] the value is clamped to
+    /// `[SIDEBAR_MIN_WIDTH, total_width - SIDEBAR_MESSAGE_RESERVE]` so the message
+    /// area keeps a usable minimum. On a terminal too narrow to honour both
+    /// reservations the message reserve wins and whatever is left goes to the
+    /// sidebar - clamping here (rather than via `u16::clamp`, which panics when
+    /// `min > max`) keeps that degenerate case from crashing. Without an explicit
+    /// width it falls back to the historical 10% proportional split.
+    pub fn sidebar_constraint_width(&self, total_width: u16) -> u16 {
+        match self.sidebar_width {
+            Some(width) => {
+                let max = total_width.saturating_sub(SIDEBAR_MESSAGE_RESERVE);
+                if max < SIDEBAR_MIN_WIDTH {
+                    return max;
+                }
+                width.clamp(SIDEBAR_MIN_WIDTH, max)
+            }
+            None => total_width * 10 / 100,
+        }
+    }
+
+    /// Widens the sidebar by `step` columns, seeding from the width actually
+    /// rendered last frame so the change stays responsive even when the stored
+    /// value would otherwise run past the clamp. The renderer re-clamps on draw.
+    pub fn grow_sidebar(&mut self, step: u16) {
+        self.sidebar_width = Some(self.current_sidebar_width().saturating_add(step));
+    }
+
+    /// Narrows the sidebar by `step` columns. Symmetric with [`Self::grow_sidebar`].
+    pub fn shrink_sidebar(&mut self, step: u16) {
+        self.sidebar_width = Some(self.current_sidebar_width().saturating_sub(step));
+    }
+
+    /// Clears the override so the sidebar returns to its default proportional width.
+    pub fn reset_sidebar_width(&mut self) {
+        self.sidebar_width = None;
+    }
+
+    /// The sidebar width to grow/shrink from: the last rendered width (already
+    /// clamped) when a sidebar was shown, else the stored override, else the
+    /// minimum. Using the rendered width keeps the keybinds responsive at the
+    /// clamp boundaries.
+    fn current_sidebar_width(&self) -> u16 {
+        self.layout
+            .userlist_rect
+            .map(|rect| rect.width)
+            .or(self.sidebar_width)
+            .unwrap_or(SIDEBAR_MIN_WIDTH)
     }
 
     /// Focuses `buffer` if nothing is focused yet (e.g. the first backend's
@@ -1163,6 +1226,65 @@ mod tests {
         assert_eq!(layout.member_row_at(79, 1), None, "left of the list");
         assert_eq!(layout.member_row_at(90, 1), None, "right of the list");
         assert_eq!(layout.member_row_at(85, 5), None, "below the list");
+    }
+
+    #[test]
+    fn sidebar_width_defaults_to_ten_percent() {
+        let view = ViewState::new();
+        assert_eq!(view.sidebar_constraint_width(100), 10);
+        assert_eq!(view.sidebar_constraint_width(80), 8);
+    }
+
+    #[test]
+    fn sidebar_width_override_is_clamped_to_min_and_max() {
+        let mut view = ViewState::new();
+
+        // Below the minimum is raised to the floor.
+        view.sidebar_width = Some(1);
+        assert_eq!(view.sidebar_constraint_width(100), SIDEBAR_MIN_WIDTH);
+
+        // Above the max (total - message reserve) is capped.
+        view.sidebar_width = Some(200);
+        assert_eq!(
+            view.sidebar_constraint_width(100),
+            100 - SIDEBAR_MESSAGE_RESERVE
+        );
+
+        // A value in range passes through unchanged.
+        view.sidebar_width = Some(30);
+        assert_eq!(view.sidebar_constraint_width(100), 30);
+    }
+
+    #[test]
+    fn sidebar_width_on_narrow_terminal_does_not_panic() {
+        let mut view = ViewState::new();
+        view.sidebar_width = Some(50);
+        // total_width - reserve (20) is below the min (8), so the message reserve
+        // wins and the sidebar gets whatever is left rather than panicking on a
+        // `min > max` clamp.
+        assert_eq!(view.sidebar_constraint_width(20), 0);
+        assert_eq!(view.sidebar_constraint_width(25), 5);
+    }
+
+    #[test]
+    fn grow_and_shrink_seed_from_rendered_width() {
+        let mut view = ViewState::new();
+        view.layout.userlist_rect = Some(Rect {
+            x: 90,
+            y: 0,
+            width: 10,
+            height: 5,
+        });
+
+        view.grow_sidebar(2);
+        assert_eq!(view.sidebar_width, Some(12));
+
+        view.shrink_sidebar(4);
+        // Seeds from the rendered width (10) again, not the stored 12.
+        assert_eq!(view.sidebar_width, Some(6));
+
+        view.reset_sidebar_width();
+        assert_eq!(view.sidebar_width, None);
     }
 
     #[test]

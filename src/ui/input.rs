@@ -49,6 +49,9 @@ pub struct InputHandler<'lua> {
     /// loop renders only when this is set, so idle ticks and mouse moves do not
     /// trigger a repaint.
     dirty: bool,
+    /// True while a left-button drag started on the sidebar split boundary, so
+    /// subsequent `Drag` events resize the sidebar rather than being ignored.
+    dragging_split: bool,
 }
 
 impl<'lua> InputHandler<'lua> {
@@ -79,6 +82,7 @@ impl<'lua> InputHandler<'lua> {
             watched_files,
             history: History::default(),
             dirty: true,
+            dragging_split: false,
         }
     }
 
@@ -220,10 +224,51 @@ impl<'lua> InputHandler<'lua> {
                 true
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                self.handle_left_click(state, view, event.column, event.row)
+                // A press on the split boundary begins a resize drag and consumes
+                // the click; otherwise fall through to tab/user-row handling.
+                self.try_start_split_drag(view, event.column, event.row)
+                    || self.handle_left_click(state, view, event.column, event.row)
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.dragging_split => {
+                self.drag_split(view, event.column)
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.dragging_split = false;
+                false
             }
             _ => false,
         }
+    }
+
+    /// Starts a sidebar resize drag when a left-press lands within +/-1 column of
+    /// the split boundary and inside the message area's vertical band. Returns
+    /// whether the press was consumed as a drag start. A no-op when no sidebar is
+    /// shown (`split_x` is `None`).
+    fn try_start_split_drag(&mut self, view: &ViewState, x: u16, y: u16) -> bool {
+        let Some(split_x) = view.layout.split_x else {
+            return false;
+        };
+        let msg = view.layout.message_rect;
+        let in_band = y >= msg.y && y < msg.y.saturating_add(msg.height);
+        let on_boundary = x.abs_diff(split_x) <= 1;
+        if in_band && on_boundary {
+            self.dragging_split = true;
+            return true;
+        }
+        false
+    }
+
+    /// Resizes the sidebar so its left edge follows the cursor: the new width is
+    /// the distance from the cursor to the sidebar's right edge, so dragging the
+    /// boundary left widens the list and dragging right narrows it. The renderer
+    /// clamps the stored value, so unbounded saturating math here is fine.
+    fn drag_split(&mut self, view: &mut ViewState, x: u16) -> bool {
+        let Some(rect) = view.layout.userlist_rect else {
+            return false;
+        };
+        let right_edge = rect.x.saturating_add(rect.width);
+        view.sidebar_width = Some(right_edge.saturating_sub(x));
+        true
     }
 
     /// Resolves a left-click against the most recent render's hit regions.
@@ -631,6 +676,10 @@ impl<'lua> InputHandler<'lua> {
                     buffer.scroll_to_bottom();
                 }
             }
+            // Resize the user-list sidebar: shrink, grow, or reset to default.
+            (Mode::Normal, KeyCode::Char('<')) => view.shrink_sidebar(2),
+            (Mode::Normal, KeyCode::Char('>')) => view.grow_sidebar(2),
+            (Mode::Normal, KeyCode::Char('=')) => view.reset_sidebar_width(),
             (Mode::Normal, KeyCode::Char('i')) => view.mode = Mode::Insert,
             (Mode::Normal, KeyCode::Char(':')) => view.mode = Mode::Command,
             (Mode::Command | Mode::Insert, KeyCode::Esc) => {
