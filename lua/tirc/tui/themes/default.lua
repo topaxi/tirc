@@ -432,7 +432,10 @@ end
 ---@return TircSpans
 function Theme:render_unread_separator()
   local s = self.styles
-  return { { '─── new messages ', s.unread_separator }, { '─', s.unread_separator } }
+  return {
+    { '─── new messages ', s.unread_separator },
+    { '─', s.unread_separator },
+  }
 end
 
 ---@param buffer TircBufferTab
@@ -453,7 +456,8 @@ function Theme:render_buffer_tab(buffer)
   local s = self.styles
   local meta = buffer.backend_metadata
   local backend_label = (meta and meta.label) or buffer.backend_name
-  local name = (not has_unique_name(buffer)) and (backend_label .. '/' .. buffer.name)
+  local name = (not has_unique_name(buffer))
+      and (backend_label .. '/' .. buffer.name)
     or buffer.name
 
   local style
@@ -473,6 +477,11 @@ end
 --- Lays out the whole buffer bar. Returns `{ rows = { <TircSpans>, ... } }`, one
 --- entry per rendered line. The default is a single row of tabs; override this to
 --- group by `buffer.backend_id`, render multiple rows, or filter the buffers.
+---
+--- Each top-level element of a row is treated as one buffer tab, in `buffers`
+--- order, for mouse click hit-testing. Keep one element per buffer (wrap a tab's
+--- separators inside its own element rather than appending them to the row) so a
+--- click maps to the right buffer; the first row is the one made clickable.
 ---@param buffers TircBufferTab[]
 ---@return TircBufferBar
 function Theme:render_buffer_bar(buffers)

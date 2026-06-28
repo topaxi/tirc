@@ -342,33 +342,24 @@ impl Renderer {
         Ok(tabs)
     }
 
-    /// Measures each buffer's rendered tab and accumulates left-to-right hit
-    /// boxes along the first row of the bar. Tabs are measured in `state.buffers`
-    /// order using the same per-buffer `render_buffer_tab` formatter the default
-    /// theme concatenates, so the boxes line up with the drawn bar exactly. This
-    /// must run after `update_render_context`, because a tab's width can depend
-    /// on the `_tirc` globals that context populates (e.g. `has_unique_name`).
-    ///
-    /// The trailing separator a theme appends to a tab is attributed to that
-    /// tab, leaving the bar contiguous with no dead zones between tabs.
-    fn build_bar_tabs(
+    /// Accumulates left-to-right hit boxes along the first row of the bar from
+    /// the per-tab `widths` measured while the bar was built (see
+    /// [`Self::build_buffer_bar`]), pairing each with its buffer in
+    /// `state.buffers` order. Because the widths come from the same flatten that
+    /// produced the drawn spans, the boxes line up with the bar exactly even when
+    /// a tab includes separators. Any separator a tab carries is attributed to
+    /// that tab, leaving the bar contiguous with no dead zones between tabs.
+    fn bar_tabs_from_widths(
         &self,
         state: &State,
-        lua: &mlua::Lua,
         bar_rect: Rect,
+        widths: &[u16],
     ) -> Vec<(Rect, BufferId)> {
-        let mut tabs = Vec::with_capacity(state.buffers.len());
+        let mut tabs = Vec::with_capacity(widths.len());
         let mut x = bar_rect.x;
 
-        for (id, buffer) in state.buffers.iter() {
-            let width: u16 = self
-                .buffer_tab_table(state, lua, id, buffer)
-                .ok()
-                .and_then(|tab| self.format_spans(lua, "render_buffer_tab", tab).ok())
-                .map(|spans| spans.iter().map(|span| span.width() as u16).sum())
-                .unwrap_or(0);
-
-            if width == 0 {
+        for (width, id) in widths.iter().zip(state.buffers.keys()) {
+            if *width == 0 {
                 continue;
             }
 
@@ -376,12 +367,12 @@ impl Renderer {
                 Rect {
                     x,
                     y: bar_rect.y,
-                    width,
+                    width: *width,
                     height: 1,
                 },
                 id.clone(),
             ));
-            x = x.saturating_add(width);
+            x = x.saturating_add(*width);
         }
 
         tabs
@@ -421,24 +412,61 @@ impl Renderer {
         Ok(())
     }
 
-    /// Converts a `render_buffer_bar` result into rendered lines. A table with a
-    /// `rows` sequence yields one line per row; any other value is treated as a
-    /// single row (the shorthand documented for `render_buffer_bar`).
-    fn lua_value_to_rows(
+    /// Converts a `render_buffer_bar` result into rendered lines plus the display
+    /// width of each top-level element of the *first* row. A table with a `rows`
+    /// sequence yields one line per row; any other value is treated as a single
+    /// row (the shorthand documented for `render_buffer_bar`).
+    ///
+    /// Each first-row element is one buffer tab, in buffer order (the
+    /// `render_buffer_bar` contract), so these widths drive click hit-testing:
+    /// measuring the same structure that is rendered keeps the hit boxes exact
+    /// even for themes whose tabs include separators (e.g. `slanted`), which a
+    /// separate per-tab re-measure could not match.
+    fn rows_to_lines_and_widths(
         &self,
         lua: &mlua::Lua,
         value: mlua::Value,
-    ) -> Result<Vec<Line<'_>>, anyhow::Error> {
+    ) -> Result<(Vec<Line<'_>>, Vec<u16>), anyhow::Error> {
         if let mlua::Value::Table(table) = &value {
             if let mlua::Value::Table(rows) = table.get::<mlua::Value>("rows")? {
-                return rows
-                    .sequence_values::<mlua::Value>()
-                    .map(|row| Ok(Line::from(self.lua_value_to_spans(lua, row?)?)))
-                    .collect();
+                let mut lines = Vec::new();
+                let mut first_row_widths = Vec::new();
+                for (i, row) in rows.sequence_values::<mlua::Value>().enumerate() {
+                    let (line, widths) = self.row_line_and_widths(lua, row?)?;
+                    if i == 0 {
+                        first_row_widths = widths;
+                    }
+                    lines.push(line);
+                }
+                return Ok((lines, first_row_widths));
             }
         }
 
-        Ok(vec![Line::from(self.lua_value_to_spans(lua, value)?)])
+        let (line, widths) = self.row_line_and_widths(lua, value)?;
+        Ok((vec![line], widths))
+    }
+
+    /// Flattens one bar row into a [`Line`] and returns the display width of each
+    /// of the row's top-level elements (one per tab). A non-table row has no
+    /// per-tab structure, so it yields a single line and empty widths.
+    fn row_line_and_widths(
+        &self,
+        lua: &mlua::Lua,
+        row: mlua::Value,
+    ) -> Result<(Line<'_>, Vec<u16>), anyhow::Error> {
+        match row {
+            mlua::Value::Table(table) => {
+                let mut spans = Vec::new();
+                let mut widths = Vec::new();
+                for element in table.sequence_values::<mlua::Value>() {
+                    let element_spans = self.lua_value_to_spans(lua, element?)?;
+                    widths.push(element_spans.iter().map(|s| s.width() as u16).sum());
+                    spans.extend(element_spans);
+                }
+                Ok((Line::from(spans), widths))
+            }
+            other => Ok((Line::from(self.lua_value_to_spans(lua, other)?), Vec::new())),
+        }
     }
 
     /// Extracts the optional `bg` colour from a `TircBufferBar` table, returning
@@ -453,27 +481,31 @@ impl Renderer {
             .unwrap_or_default()
     }
 
-    /// Produces the buffer bar as a list of lines plus a base background style.
-    /// Delegates the whole layout to the theme's `render_buffer_bar`; when that
-    /// formatter is absent, falls back to a single line built from per-tab
-    /// `render_buffer_tab` results so raw `TircUi` themes keep working.
-    fn build_buffer_bar(&self, state: &State, lua: &mlua::Lua) -> (Vec<Line<'_>>, Style) {
+    /// Produces the buffer bar as a list of lines, a base background style, and
+    /// the per-tab column widths of the first row (in buffer order) used for
+    /// click hit-testing. Delegates the whole layout to the theme's
+    /// `render_buffer_bar`; when that formatter is absent, falls back to a single
+    /// line built from per-tab `render_buffer_tab` results so raw `TircUi` themes
+    /// keep working.
+    fn build_buffer_bar(&self, state: &State, lua: &mlua::Lua) -> (Vec<Line<'_>>, Style, Vec<u16>) {
         let tabs = match self.buffer_tabs(state, lua) {
             Ok(tabs) => tabs,
-            Err(_) => return (vec![Line::default()], Style::default()),
+            Err(_) => return (vec![Line::default()], Style::default(), Vec::new()),
         };
 
         match crate::config::call_formatter(lua, "render_buffer_bar", &tabs) {
             Some(Ok(mlua::Value::Table(table))) => {
                 let bg_style = Self::bar_bg_style(&table);
-                let lines = self
-                    .lua_value_to_rows(lua, mlua::Value::Table(table))
+                let (lines, widths) = self
+                    .rows_to_lines_and_widths(lua, mlua::Value::Table(table))
                     .unwrap_or_default();
-                (lines, bg_style)
+                (lines, bg_style, widths)
             }
             Some(Ok(value)) => {
-                let lines = self.lua_value_to_rows(lua, value).unwrap_or_default();
-                (lines, Style::default())
+                let (lines, widths) = self
+                    .rows_to_lines_and_widths(lua, value)
+                    .unwrap_or_default();
+                (lines, Style::default(), widths)
             }
             Some(Err(err)) => (
                 vec![Line::from(Self::string_to_span(
@@ -481,17 +513,21 @@ impl Renderer {
                     Some(Style::default().fg(Color::Red)),
                 ))],
                 Style::default(),
+                Vec::new(),
             ),
             None => {
-                let spans = tabs
-                    .sequence_values::<mlua::Table>()
-                    .filter_map(Result::ok)
-                    .flat_map(|tab| {
-                        self.format_spans(lua, "render_buffer_tab", tab)
-                            .unwrap_or_default()
-                    })
-                    .collect::<Vec<_>>();
-                (vec![Line::from(spans)], Style::default())
+                // No `render_buffer_bar`: build a single row from per-tab spans and
+                // measure each tab so hit-testing still works.
+                let mut spans = Vec::new();
+                let mut widths = Vec::new();
+                for tab in tabs.sequence_values::<mlua::Table>().filter_map(Result::ok) {
+                    let tab_spans = self
+                        .format_spans(lua, "render_buffer_tab", tab)
+                        .unwrap_or_default();
+                    widths.push(tab_spans.iter().map(|s| s.width() as u16).sum());
+                    spans.extend(tab_spans);
+                }
+                (vec![Line::from(spans)], Style::default(), widths)
             }
         }
     }
@@ -603,7 +639,7 @@ impl Renderer {
 
         // Build the bar first so the layout can size its region to fit the rows
         // the theme returned, capped so the message area never collapses.
-        let (bar_lines, bar_style) = self.build_buffer_bar(state, lua);
+        let (bar_lines, bar_style, bar_tab_widths) = self.build_buffer_bar(state, lua);
         let max_bar_height = f.area().height.saturating_sub(3);
         let bar_height = (bar_lines.len() as u16).clamp(1, max_bar_height.max(1));
 
@@ -649,7 +685,7 @@ impl Renderer {
         // Record this frame's hit regions so the input handler can resolve mouse
         // clicks without re-deriving the layout. Built last, after the bar's Lua
         // context is in place, so the tab widths match what was drawn.
-        let bar_tabs = self.build_bar_tabs(state, lua, chunks[2]);
+        let bar_tabs = self.bar_tabs_from_widths(state, chunks[2], &bar_tab_widths);
         view.layout = LayoutMap {
             message_rect: msg_rect,
             bar_rect: chunks[2],
@@ -794,7 +830,7 @@ mod tests {
         let renderer = Renderer::new();
         let lua = mlua::Lua::new();
         let value = run_lua_code(&lua, "{ rows = { { 'a' }, { 'b', 'c' } } }")?;
-        let rows = renderer.lua_value_to_rows(&lua, value)?;
+        let rows = renderer.rows_to_lines_and_widths(&lua, value)?.0;
         assert_eq!(rows.len(), 2);
         Ok(())
     }
@@ -804,7 +840,7 @@ mod tests {
         let renderer = Renderer::new();
         let lua = mlua::Lua::new();
         let value = run_lua_code(&lua, "{ 'x', 'y' }")?;
-        let rows = renderer.lua_value_to_rows(&lua, value)?;
+        let rows = renderer.rows_to_lines_and_widths(&lua, value)?.0;
         assert_eq!(rows.len(), 1);
         Ok(())
     }
@@ -858,7 +894,8 @@ mod tests {
             width: 80,
             height: 1,
         };
-        let tabs = renderer.build_bar_tabs(&state, &lua, bar_rect);
+        let (_, _, widths) = renderer.build_buffer_bar(&state, &lua);
+        let tabs = renderer.bar_tabs_from_widths(&state, bar_rect, &widths);
 
         assert_eq!(tabs.len(), state.buffers.len(), "one hit box per buffer");
         assert_eq!(tabs[0].0.x, bar_rect.x, "first tab starts at the bar's x");
@@ -871,6 +908,75 @@ mod tests {
                 "tabs are contiguous with no gaps or overlaps"
             );
             assert!(prev.width > 0, "each tab has a measurable width");
+        }
+        Ok(())
+    }
+
+    /// The slanted theme inserts separator spans around each tab. Its hit boxes
+    /// must still total the full rendered bar width: measuring the actual row
+    /// elements (not a separate per-tab re-measure) is what makes this hold.
+    #[test]
+    fn slanted_theme_hit_boxes_cover_full_bar_width() -> anyhow::Result<(), anyhow::Error> {
+        use crate::backends::BackendInfo;
+        use crate::core::BackendId;
+        use crate::core::{ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef};
+        use crate::ui::{State, ViewState};
+
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.slanted'):setup({})")
+            .exec()?;
+
+        let backend = BackendId(0);
+        let mut state = State::new();
+        state.register_backend(BackendInfo {
+            id: backend,
+            protocol: Protocol::Irc,
+            name: "irc.example.com".to_string(),
+        });
+        for channel in ["#a", "#bb"] {
+            state.apply(
+                backend,
+                ChatEvent::Message {
+                    target: TargetId::from(channel),
+                    id: None,
+                    sender: UserRef::new("alice"),
+                    body: MessageBody::plain("hi"),
+                    kind: MsgKind::Text,
+                    echo_of: None,
+                    time: None,
+                },
+            );
+        }
+
+        let mut view = ViewState::new();
+        view.focus(BufferId::status(backend));
+
+        let renderer = Renderer::new();
+        renderer.update_render_context(&lua, &view, &state)?;
+
+        let (lines, _, widths) = renderer.build_buffer_bar(&state, &lua);
+        let bar_rect = Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 1,
+        };
+        let tabs = renderer.bar_tabs_from_widths(&state, bar_rect, &widths);
+
+        assert_eq!(tabs.len(), state.buffers.len(), "one hit box per buffer");
+
+        // The hit boxes must span exactly the drawn bar: the right edge of the
+        // last tab equals the rendered line width, separators included.
+        let drawn_width: u16 = lines[0].spans.iter().map(|s| s.width() as u16).sum();
+        let last = tabs.last().expect("at least one tab");
+        assert_eq!(
+            last.0.x + last.0.width,
+            bar_rect.x + drawn_width,
+            "hit boxes cover the full rendered bar (separators attributed to tabs)"
+        );
+        for pair in tabs.windows(2) {
+            assert_eq!(pair[1].0.x, pair[0].0.x + pair[0].0.width, "contiguous");
         }
         Ok(())
     }
@@ -904,7 +1010,7 @@ mod tests {
         let value = crate::config::call_formatter(&lua, "render_buffer_bar", &buffers)
             .expect("render_buffer_bar registered")
             .expect("render_buffer_bar callback");
-        let rows = renderer.lua_value_to_rows(&lua, value)?;
+        let rows = renderer.rows_to_lines_and_widths(&lua, value)?.0;
 
         assert_eq!(rows.len(), 1);
         let text: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();

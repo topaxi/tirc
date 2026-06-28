@@ -38,16 +38,24 @@ local UNREAD_FG = '#e0e0e0'
 ---@param buffer TircBufferTab
 ---@param focused boolean
 local function tab_bg(buffer, focused)
-  if focused then return FOCUSED_BG end
-  if buffer.has_mention then return MENTION_BG end
+  if focused then
+    return FOCUSED_BG
+  end
+  if buffer.has_mention then
+    return MENTION_BG
+  end
   return TAB_BG
 end
 
 ---@param buffer TircBufferTab
 ---@param focused boolean
 local function tab_fg(buffer, focused)
-  if focused then return FOCUSED_FG end
-  if buffer.has_unread then return UNREAD_FG end
+  if focused then
+    return FOCUSED_FG
+  end
+  if buffer.has_unread then
+    return UNREAD_FG
+  end
   return TAB_FG
 end
 
@@ -98,17 +106,24 @@ function Slanted:render_buffer_bar(buffers)
     local focused = tirc.is_focused_buffer(buffer)
     local bg = tab_bg(buffer, focused)
 
+    -- Group each tab (leading separator, content, trailing separator) into one
+    -- element of the row. The renderer measures each top-level row element as a
+    -- single buffer tab for click hit-testing, so a tab's separators must live
+    -- inside its own element rather than being flattened into the row.
+    local tab = {}
+
     if i > 1 then
       local entry_bg = tab_entry_bg(buffer, focused)
-      row[#row + 1] = { SEP_LEFT, theme.style { fg = BAR_BG, bg = entry_bg } }
+      tab[#tab + 1] = { SEP_LEFT, theme.style { fg = BAR_BG, bg = entry_bg } }
     end
 
-    local spans = tab_spans(buffer, focused)
-    for _, span in ipairs(spans) do
-      row[#row + 1] = span
+    for _, span in ipairs(tab_spans(buffer, focused)) do
+      tab[#tab + 1] = span
     end
 
-    row[#row + 1] = { SEP_LEFT, theme.style { fg = bg, bg = BAR_BG } }
+    tab[#tab + 1] = { SEP_LEFT, theme.style { fg = bg, bg = BAR_BG } }
+
+    row[#row + 1] = tab
   end
 
   return { rows = { row }, bg = BAR_BG }
