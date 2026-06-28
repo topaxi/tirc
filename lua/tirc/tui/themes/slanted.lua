@@ -48,6 +48,15 @@ local function has_unique_name(buffer)
   return count <= 1
 end
 
+-- Returns the background of the first visible segment of a tab (backend label
+-- when shown, otherwise the room segment).
+local function tab_entry_bg(buffer, focused)
+  if not has_unique_name(buffer) then
+    return focused and FOCUSED_BG_BACKEND or TAB_BG_BACKEND
+  end
+  return tab_bg(focused)
+end
+
 ---@param buffer TircBufferTab
 ---@param focused boolean
 local function tab_spans(buffer, focused)
@@ -76,8 +85,9 @@ function Slanted:render_buffer_bar(buffers)
     local bg = tab_bg(focused)
 
     if i > 1 then
+      local entry_bg = tab_entry_bg(buffer, focused)
       row[#row + 1] = { ' ', theme.style { bg = BAR_BG } }
-      row[#row + 1] = { SEP_LEFT, theme.style { fg = BAR_BG, bg = bg } }
+      row[#row + 1] = { SEP_LEFT, theme.style { fg = BAR_BG, bg = entry_bg } }
     end
 
     local spans = tab_spans(buffer, focused)
