@@ -52,6 +52,7 @@ local Class = require('tirc.class')
 ---@class TircThemeOptions
 ---@field palette? table<string, TircThemeStyle> override individual colours
 ---@field buffer_title? fun(self: TircTheme, server: string, nickname: string, buffer: string): TircSpans
+---@field userlist_title? fun(self: TircTheme, buffer: string): TircSpans
 ---@field message_time? fun(self: TircTheme, date_time: TircDateTime, event: TircEvent): TircSpans
 ---@field message_text? fun(self: TircTheme, event: TircEvent, nickname: string): TircSpans?
 ---@field user? fun(self: TircTheme, user: TircUser): TircSpans
@@ -60,7 +61,7 @@ local Class = require('tirc.class')
 
 ---@class TircTheme: TircUi, TircClassDef<TircTheme, TircThemeOptions>
 ---@field styles table<string, TircThemeStyle>
----@field setup fun(opts?: TircThemeOptions) plugin entry point for `tirc.use`
+---@field setup fun(self: TircTheme, opts?: TircThemeOptions) plugin entry point for `tirc.use`
 local Theme = Class.new()
 
 --- Initialises an instance: builds the palette and applies any formatter
@@ -79,9 +80,12 @@ function Theme:init(opts)
   end
 end
 
---- Plugin entry point used by `tirc.use(theme)`.
-function Theme.setup(opts)
-  require('tirc').ui = Theme.new(opts)
+--- Plugin entry point used by `tirc.use(theme)`. Called method-style, so `self`
+--- is the theme class: a subclass (`Theme.extend()`) instantiates itself and its
+--- formatter overrides take effect.
+---@param opts? TircThemeOptions
+function Theme:setup(opts)
+  require('tirc').ui = self.new(opts)
 end
 
 --- The colour palette. Override this method (or pass `opts.palette`) to re-theme.
@@ -356,6 +360,11 @@ function Theme:buffer_title(server, nickname, buffer_name)
     { ' in ', s.twhite },
     { buffer_name, s.green },
   }
+end
+
+---@param buffer_name string
+function Theme:userlist_title(buffer_name)
+  return { buffer_name, self.styles.green }
 end
 
 ---@param dt TircDateTime

@@ -633,7 +633,7 @@ mod tests {
         let lua = Lua::new();
         register_builtin_modules(&lua).expect("builtin modules");
 
-        lua.load("require('tirc.tui.themes.default').setup({})")
+        lua.load("require('tirc.tui.themes.default'):setup({})")
             .exec()
             .expect("theme setup");
 
@@ -778,8 +778,8 @@ mod tests {
 
         // A subclass overriding `format_message` must take effect even though
         // `message_text` (which dispatches to it) lives on the base class.
-        // Subclasses use tirc.ui = Sub.new() directly; Sub.setup() is not
-        // auto-generated and inherited Theme.setup() would instantiate Theme.
+        // `tirc.use` calls `setup` method-style, so the inherited `setup`
+        // instantiates the subclass (not the base Theme) and the override sticks.
         lua.load(indoc! {"
             local tirc = require('tirc')
             local Default = require('tirc.tui.themes.default')
@@ -787,7 +787,7 @@ mod tests {
             function Sub:format_message(_event)
               return { 'OVERRIDDEN' }
             end
-            tirc.ui = Sub.new()
+            tirc.use(Sub)
         "})
             .exec()
             .expect("subclass setup");

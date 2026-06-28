@@ -425,7 +425,7 @@ impl Renderer {
         f: &mut ratatui::Frame,
         members: &[Member],
         lua: &mlua::Lua,
-        target: &TargetId,
+        title: &str,
         rect: Rect,
     ) {
         let users = members
@@ -446,11 +446,17 @@ impl Renderer {
                 }
             });
 
-        let list = List::new(users).block(
-            Block::default()
-                .title(target.as_str().to_string())
-                .borders(Borders::LEFT),
-        );
+        // The theme owns the userlist title; default to the plain buffer name
+        // when no `userlist_title` formatter is set (or it yields nothing).
+        let mut spans = self
+            .format_spans(lua, "userlist_title", title.to_string())
+            .unwrap_or_default();
+        if spans.is_empty() {
+            spans.push(Span::raw(title.to_string()));
+        }
+
+        let list = List::new(users)
+            .block(Block::default().title(spans).borders(Borders::LEFT));
         f.render_widget(list, rect);
     }
 
@@ -492,18 +498,18 @@ impl Renderer {
         let layout = self.get_layout(bar_height);
         let chunks = layout.split(f.area());
 
-        let members = self
-            .focused(state, view)
-            .map(|(id, buffer, _, _)| (id.target.clone(), &buffer.members));
+        let members = self.focused(state, view).map(|(id, buffer, _, _)| {
+            (buffer.label(&id.target).to_string(), &buffer.members)
+        });
 
         let msg_rect = match members {
-            Some((target, members)) if members.len() > 1 => {
+            Some((title, members)) if members.len() > 1 => {
                 let split = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Percentage(90), Constraint::Percentage(10)].as_ref())
                     .split(chunks[0]);
 
-                self.render_users(f, members, lua, &target, split[1]);
+                self.render_users(f, members, lua, &title, split[1]);
                 split[0]
             }
             _ => chunks[0],
@@ -670,7 +676,7 @@ mod tests {
     fn default_theme_render_buffer_bar_returns_single_row() -> anyhow::Result<(), anyhow::Error> {
         let lua = mlua::Lua::new();
         crate::config::register_builtin_modules(&lua)?;
-        lua.load("require('tirc.tui.themes.default').setup({})")
+        lua.load("require('tirc.tui.themes.default'):setup({})")
             .exec()?;
 
         let buffers = lua.create_table()?;

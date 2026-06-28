@@ -1,5 +1,5 @@
 ---@alias EventName 'event'
----@alias FormatterName 'buffer_title' | 'message_time' | 'message_text' | 'user' | 'render_buffer_tab'
+---@alias FormatterName 'buffer_title' | 'userlist_title' | 'message_time' | 'message_text' | 'user' | 'render_buffer_tab'
 
 --- A buffer entry passed to the `render_buffer_tab` formatter.
 ---@class TircBufferTab
@@ -78,6 +78,7 @@
 
 ---@class TircUi
 ---@field buffer_title? fun(server: string, nickname: string, buffer: string): TircSpans
+---@field userlist_title? fun(buffer: string): TircSpans
 ---@field message_time? fun(date_time: TircDateTime, event: TircEvent): TircSpans
 ---@field message_text? fun(event: TircEvent, nickname: string): TircSpans?
 ---@field user? fun(user: TircUser): TircSpans
@@ -101,13 +102,16 @@ function M.create_config()
   return require('tirc.config').create_config()
 end
 
----@class TircPlugin<Args>: { setup: fun(...: Args) }
+---@class TircPlugin<Args>: { setup: fun(self: TircPlugin, ...: Args) }
 
+--- Calls the plugin's `setup` method-style, passing the plugin itself as the
+--- receiver. This lets a subclass (e.g. a theme created via `extend`) construct
+--- itself rather than the base class whose `setup` it inherited.
 ---@generic Args
 ---@param plugin TircPlugin<Args>
 ---@param ... Args
 function M.use(plugin, ...)
-  plugin.setup(...)
+  plugin:setup(...)
 end
 
 ---@param buffer TircBufferTab
