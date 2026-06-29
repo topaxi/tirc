@@ -144,6 +144,7 @@ pub fn to_lua_event(
     table.set("target_name", target_name)?;
     table.set("pending", message.pending)?;
     table.set("redacted", message.redacted)?;
+    table.set("edited", message.edited)?;
 
     if !message.reactions.is_empty() {
         let reactions = lua.create_table()?;
@@ -336,6 +337,7 @@ mod tests {
             event,
             pending: false,
             redacted: false,
+            edited: false,
             reactions: Default::default(),
         }
     }

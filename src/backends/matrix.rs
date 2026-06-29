@@ -33,14 +33,17 @@ use matrix_sdk::encryption::verification::{
 };
 use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::ruma::events::key::verification::request::ToDeviceKeyVerificationRequestEvent;
+use matrix_sdk::ruma::events::reaction::ReactionEventContent;
 use matrix_sdk::ruma::events::room::encrypted::{
     OriginalSyncRoomEncryptedEvent, SyncRoomEncryptedEvent,
 };
 use matrix_sdk::ruma::events::room::member::MembershipState;
 use matrix_sdk::ruma::events::room::member::SyncRoomMemberEvent;
 use matrix_sdk::ruma::events::room::message::{
-    MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent, SyncRoomMessageEvent,
+    MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
+    SyncRoomMessageEvent,
 };
+use matrix_sdk::ruma::events::room::redaction::SyncRoomRedactionEvent;
 use matrix_sdk::ruma::events::room::topic::SyncRoomTopicEvent;
 use matrix_sdk::ruma::events::{
     AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
@@ -299,6 +302,54 @@ fn register_handlers(
             }
         }
     });
+
+    let redaction_events = events.clone();
+    client.add_event_handler(move |event: SyncRoomRedactionEvent, room: Room| {
+        let events = redaction_events.clone();
+        async move {
+            if let SyncRoomRedactionEvent::Original(event) = event {
+                // `redacts` is at the event level in old room versions, inside
+                // `content` in room version 11+. Try both.
+                let redacted_id = event
+                    .redacts
+                    .as_deref()
+                    .or(event.content.redacts.as_deref());
+                if let Some(redacted_id) = redacted_id {
+                    emit(
+                        &events,
+                        id,
+                        ChatEvent::Redaction {
+                            target: room_target(&room),
+                            id: EventId(redacted_id.to_string()),
+                            by: Some(sender_ref(&room, &event.sender).await),
+                        },
+                    );
+                }
+            }
+        }
+    });
+
+    let reaction_events = events.clone();
+    client.add_event_handler(
+        move |event: SyncMessageLikeEvent<ReactionEventContent>, room: Room| {
+            let events = reaction_events.clone();
+            async move {
+                if let SyncMessageLikeEvent::Original(event) = event {
+                    emit(
+                        &events,
+                        id,
+                        ChatEvent::Reaction {
+                            target: room_target(&room),
+                            id: EventId(event.content.relates_to.event_id.to_string()),
+                            sender: sender_ref(&room, &event.sender).await,
+                            key: event.content.relates_to.key,
+                            add: true,
+                        },
+                    );
+                }
+            }
+        },
+    );
 
     // Events the SDK successfully decrypts are re-dispatched under their inner
     // type (e.g. `m.room.message`), so they reach the message handler above. An
@@ -945,6 +996,29 @@ async fn message_event_to_chat(
     event: OriginalSyncRoomMessageEvent,
     room: &Room,
 ) -> Option<ChatEvent> {
+    // An m.replace relation means this is an edit of an earlier event.
+    if let Some(Relation::Replacement(replacement)) = event.content.relates_to {
+        let (_, body) = match replacement.new_content.msgtype {
+            MessageType::Text(content) => {
+                (MsgKind::Text, message_body(content.body, content.formatted))
+            }
+            MessageType::Emote(content) => (
+                MsgKind::Action,
+                message_body(content.body, content.formatted),
+            ),
+            MessageType::Notice(content) => (
+                MsgKind::Notice,
+                message_body(content.body, content.formatted),
+            ),
+            _ => return None,
+        };
+        return Some(ChatEvent::Edit {
+            target: room_target(room),
+            id: EventId(replacement.event_id.to_string()),
+            body,
+        });
+    }
+
     let (kind, body) = match event.content.msgtype {
         MessageType::Text(content) => {
             (MsgKind::Text, message_body(content.body, content.formatted))
@@ -1016,6 +1090,28 @@ async fn backfill_event_to_chat(timeline_event: TimelineEvent, room: &Room) -> O
         Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomEncrypted(
             SyncMessageLikeEvent::Original(event),
         ))) => Some(decrypt_backfill_event(event, raw, room).await),
+        Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomRedaction(
+            SyncRoomRedactionEvent::Original(event),
+        ))) => {
+            let redacted_id = event
+                .redacts
+                .as_deref()
+                .or(event.content.redacts.as_deref())?;
+            Some(ChatEvent::Redaction {
+                target: room_target(room),
+                id: EventId(redacted_id.to_string()),
+                by: Some(sender_ref(room, &event.sender).await),
+            })
+        }
+        Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Reaction(
+            SyncMessageLikeEvent::Original(event),
+        ))) => Some(ChatEvent::Reaction {
+            target: room_target(room),
+            id: EventId(event.content.relates_to.event_id.to_string()),
+            sender: sender_ref(room, &event.sender).await,
+            key: event.content.relates_to.key,
+            add: true,
+        }),
         _ => None,
     }
 }

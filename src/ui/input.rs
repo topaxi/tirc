@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -113,7 +113,7 @@ impl<'lua> InputHandler<'lua> {
 
     fn build_watch_list_for(
         lua: &Lua,
-        config_path: &PathBuf,
+        config_path: &Path,
         extra_watch_files: &[String],
     ) -> Vec<(PathBuf, SystemTime)> {
         let config_dir = config_path.parent().unwrap_or(config_path);

@@ -688,6 +688,7 @@ mod tests {
             event,
             pending: false,
             redacted: false,
+            edited: false,
             reactions: Default::default(),
         }
     }
@@ -695,13 +696,35 @@ mod tests {
     /// Renders a normalized event through the active theme's `message_text`
     /// formatter and returns the raw Lua result.
     fn render_message_text(lua: &Lua, event: ChatEvent) -> mlua::Value {
-        let message = stored(event);
+        render_stored_message_text(lua, stored(event))
+    }
+
+    fn render_stored_message_text(lua: &Lua, message: StoredMessage) -> mlua::Value {
         let table = to_lua_event(lua, &message, &backend(), &TargetId::from("#tirc"), "#tirc")
             .expect("event table");
 
         call_formatter(lua, "message_text", (table, "me".to_string()))
             .expect("message_text formatter registered")
             .expect("message_text formatter callback")
+    }
+
+    /// Recursively collects every string from a nested Lua spans table.
+    fn collect_text(value: &mlua::Value) -> String {
+        match value {
+            mlua::Value::String(s) => s.to_str().map(|s| s.to_owned()).unwrap_or_default(),
+            mlua::Value::Table(table) => {
+                let mut out = String::new();
+                for i in 1.. {
+                    match table.get::<mlua::Value>(i) {
+                        Ok(mlua::Value::Nil) => break,
+                        Ok(v) => out.push_str(&collect_text(&v)),
+                        Err(_) => break,
+                    }
+                }
+                out
+            }
+            _ => String::new(),
+        }
     }
 
     fn setup_theme() -> Lua {
@@ -950,5 +973,56 @@ mod tests {
         assert!(paths.contains(&extra));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_appends_edited_marker_to_message() {
+        let lua = setup_theme();
+
+        let mut message = stored(ChatEvent::Message {
+            target: TargetId::from("#tirc"),
+            id: None,
+            sender: UserRef::new("alice"),
+            body: MessageBody::plain("hello"),
+            kind: MsgKind::Text,
+            echo_of: None,
+            time: None,
+        });
+        message.edited = true;
+
+        let value = render_stored_message_text(&lua, message);
+        let text = collect_text(&value);
+        assert!(
+            text.contains("(edited)"),
+            "expected '(edited)' in rendered spans, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn theme_appends_reaction_counts_to_message() {
+        let lua = setup_theme();
+
+        let mut message = stored(ChatEvent::Message {
+            target: TargetId::from("#tirc"),
+            id: None,
+            sender: UserRef::new("alice"),
+            body: MessageBody::plain("hello"),
+            kind: MsgKind::Text,
+            echo_of: None,
+            time: None,
+        });
+        message.reactions.insert("👍".to_string(), 2);
+        message.reactions.insert("❤️".to_string(), 1);
+
+        let value = render_stored_message_text(&lua, message);
+        let text = collect_text(&value);
+        assert!(
+            text.contains("[👍 2]"),
+            "expected '[👍 2]' in rendered spans, got: {text:?}"
+        );
+        assert!(
+            text.contains("[❤️ 1]"),
+            "expected '[❤️ 1]' in rendered spans, got: {text:?}"
+        );
     }
 }

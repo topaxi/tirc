@@ -36,6 +36,8 @@ pub struct StoredMessage {
     /// Optimistic local echo not yet confirmed by the server.
     pub pending: bool,
     pub redacted: bool,
+    /// True when the message body was replaced by an incoming edit event.
+    pub edited: bool,
     /// Reaction key -> count. Populated by Matrix; unused by IRC.
     pub reactions: IndexMap<String, u32>,
 }
@@ -47,6 +49,7 @@ impl StoredMessage {
             event,
             pending,
             redacted: false,
+            edited: false,
             reactions: IndexMap::new(),
         }
     }
@@ -428,6 +431,7 @@ impl State {
         if let Some(slot) = buffer.messages.iter_mut().find(|m| m.has_event_id(&id)) {
             if let ChatEvent::Message { body: existing, .. } = &mut slot.event {
                 *existing = body;
+                slot.edited = true;
             }
         }
     }
@@ -1727,5 +1731,121 @@ mod tests {
             "join line (now) sorts before the future-dated message"
         );
         assert!(matches!(buf.messages[1].event, ChatEvent::Message { .. }));
+    }
+
+    #[test]
+    fn edit_updates_body_and_marks_edited() {
+        let mut state = test_state();
+
+        state.apply(
+            backend(),
+            ChatEvent::Message {
+                target: TargetId::from("#tirc"),
+                id: Some(crate::core::EventId("$1".to_string())),
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain("original"),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+
+        state.apply(
+            backend(),
+            ChatEvent::Edit {
+                target: TargetId::from("#tirc"),
+                id: crate::core::EventId("$1".to_string()),
+                body: MessageBody::plain("updated"),
+            },
+        );
+
+        let buf = buffer(&state, "#tirc");
+        assert_eq!(buf.messages.len(), 1, "edit does not add a new message");
+        assert!(buf.messages[0].edited, "edited flag is set");
+        match &buf.messages[0].event {
+            ChatEvent::Message { body, .. } => {
+                assert_eq!(body.text, "updated", "body was replaced in place");
+            }
+            other => panic!("unexpected event type: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn redaction_marks_message_as_redacted() {
+        let mut state = test_state();
+
+        state.apply(
+            backend(),
+            ChatEvent::Message {
+                target: TargetId::from("#tirc"),
+                id: Some(crate::core::EventId("$1".to_string())),
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain("hi"),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+
+        state.apply(
+            backend(),
+            ChatEvent::Redaction {
+                target: TargetId::from("#tirc"),
+                id: crate::core::EventId("$1".to_string()),
+                by: None,
+            },
+        );
+
+        let buf = buffer(&state, "#tirc");
+        assert_eq!(
+            buf.messages.len(),
+            1,
+            "redaction does not add a new message"
+        );
+        assert!(buf.messages[0].redacted, "message is marked redacted");
+    }
+
+    #[test]
+    fn reaction_increments_count_for_target_message() {
+        let mut state = test_state();
+
+        state.apply(
+            backend(),
+            ChatEvent::Message {
+                target: TargetId::from("#tirc"),
+                id: Some(crate::core::EventId("$1".to_string())),
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain("hi"),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+
+        state.apply(
+            backend(),
+            ChatEvent::Reaction {
+                target: TargetId::from("#tirc"),
+                id: crate::core::EventId("$1".to_string()),
+                sender: UserRef::new("bob"),
+                key: "👍".to_string(),
+                add: true,
+            },
+        );
+
+        state.apply(
+            backend(),
+            ChatEvent::Reaction {
+                target: TargetId::from("#tirc"),
+                id: crate::core::EventId("$1".to_string()),
+                sender: UserRef::new("carol"),
+                key: "👍".to_string(),
+                add: true,
+            },
+        );
+
+        let buf = buffer(&state, "#tirc");
+        assert_eq!(buf.messages.len(), 1, "reactions do not add new messages");
+        assert_eq!(buf.messages[0].reactions.get("👍"), Some(&2));
     }
 }

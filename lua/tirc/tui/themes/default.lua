@@ -388,6 +388,30 @@ function Theme:message_time(dt, _event)
   }
 end
 
+--- Appends `(edited)` and reaction counts to a spans table in place.
+---@param spans table
+---@param event TircEvent
+function Theme:append_message_meta(spans, event)
+  local s = self.styles
+  if event.edited then
+    spans[#spans + 1] = { ' (edited)', s.darkgray }
+  end
+  if event.reactions then
+    local keys = {}
+    for key in pairs(event.reactions) do
+      keys[#keys + 1] = key
+    end
+    table.sort(keys)
+    for _, key in ipairs(keys) do
+      local count = event.reactions[key]
+      if count > 0 then
+        spans[#spans + 1] =
+          { ' [' .. key .. ' ' .. tostring(count) .. ']', s.darkgray }
+      end
+    end
+  end
+end
+
 ---@param event TircEvent
 ---@param _nickname string
 function Theme:message_text(event, _nickname)
@@ -398,7 +422,9 @@ function Theme:message_text(event, _nickname)
   end
 
   if kind == 'message' then
-    return self:format_message(event)
+    local spans = self:format_message(event)
+    self:append_message_meta(spans, event)
+    return spans
   elseif kind == 'membership' then
     return self:format_membership(event)
   elseif kind == 'topic' then

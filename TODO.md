@@ -28,9 +28,13 @@ postponed during the protocol-abstraction work.
 - [ ] **Matrix history pagination on scroll.** [matrix] Backfill is a one-shot ~30
       (`backfill_room`); paginate older history near the top (`room.messages` `end`
       token).
-- [ ] **Matrix inbound edits / redactions / reactions.** [matrix] `State` already
-      handles `ChatEvent::Edit/Redaction/Reaction`; the adapter doesn't emit them,
-      and reactions aren't rendered (`[message deleted]`/`(edited)` are).
+- [x] **Matrix inbound edits / redactions / reactions.** [matrix] The adapter
+      now emits all three: edits via `m.replace` relation detection (body replaced
+      in-place, `StoredMessage.edited` flag triggers `(edited)` marker in the theme),
+      redactions via `SyncRoomRedactionEvent` handler (live + backfill), reactions
+      via `SyncMessageLikeEvent<ReactionEventContent>` handler (live + backfill,
+      counts shown as `[emoji N]` sorted by key). Reaction removal (redaction of
+      a reaction event) is not yet tracked - counts only increment.
 - [x] **Matrix E2E encryption.** [matrix] `e2e-encryption` is enabled (the async
       `Send` overflow is resolved with `#![recursion_limit = "256"]`); the crypto
       store rides the per-account sqlite store, sends auto-encrypt, sync
