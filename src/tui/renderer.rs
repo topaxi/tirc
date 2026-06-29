@@ -194,7 +194,9 @@ impl Renderer {
         let read_marker = buffer.read_marker;
         let mut seen_unread = false;
         let mut separator_inserted = false;
-        let mut messages: Vec<ListItem<'_>> = Vec::with_capacity(rendered.len() + 1);
+        let mut prev_date: Option<chrono::NaiveDate> = None;
+        let mut prev_msg_time: Option<chrono::DateTime<chrono::Local>> = None;
+        let mut messages: Vec<ListItem<'_>> = Vec::with_capacity(rendered.len() + 2);
 
         for (rm, msg_time) in &rendered {
             if rm.message.width() == 0 {
@@ -213,6 +215,19 @@ impl Renderer {
                     }
                 }
             }
+
+            // Date separator: inject when the calendar day changes between messages.
+            // We iterate newest-first, so when the date decreases we push a separator
+            // labelled with the newer date (prev_msg_time), which visually appears at
+            // the top of that day's block when the list is rendered bottom-to-top.
+            let current_date = msg_time.date_naive();
+            if let (Some(prev), Some(sep_time)) = (prev_date, prev_msg_time) {
+                if current_date != prev {
+                    messages.push(ListItem::new(self.render_date_separator(lua, &sep_time)));
+                }
+            }
+            prev_date = Some(current_date);
+            prev_msg_time = Some(*msg_time);
 
             let initial_indent = rm.time.clone();
 
@@ -265,6 +280,25 @@ impl Renderer {
                 "─── new messages ───",
                 Style::default().fg(Color::DarkGray),
             )),
+        }
+    }
+
+    /// Renders the date-change separator. `date` is the newer day's representative
+    /// timestamp (the first message of that day in chronological order, i.e. the
+    /// messages rendered below the separator). Appearance is driven by the theme's
+    /// `render_date_separator` formatter; falls back to a plain `Month D, YYYY` line.
+    fn render_date_separator(
+        &self,
+        lua: &mlua::Lua,
+        date: &chrono::DateTime<chrono::Local>,
+    ) -> Line<'_> {
+        let fallback = date.format("─── %-d %B %Y ───").to_string();
+        match date_time_to_table(lua, date)
+            .ok()
+            .and_then(|dt| self.format_spans(lua, "render_date_separator", dt).ok())
+        {
+            Some(spans) if !spans.is_empty() => Line::from(spans),
+            _ => Line::from(Span::styled(fallback, Style::default().fg(Color::DarkGray))),
         }
     }
 
@@ -1101,6 +1135,29 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let text: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("#tirc"), "row text was {text:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn date_separator_contains_date() -> anyhow::Result<(), anyhow::Error> {
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default'):setup({})")
+            .exec()?;
+
+        use chrono::TimeZone;
+        // June 30, 2026 at noon local time.
+        let date = chrono::Local
+            .with_ymd_and_hms(2026, 6, 30, 12, 0, 0)
+            .unwrap();
+
+        let renderer = Renderer::new();
+        let line = renderer.render_date_separator(&lua, &date);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains("30 Jun 2026"),
+            "expected '30 Jun 2026' in separator, got: {text:?}"
+        );
         Ok(())
     }
 }

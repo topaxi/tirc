@@ -59,6 +59,7 @@ local Class = require('tirc.class')
 ---@field render_buffer_tab? fun(self: TircTheme, buffer: TircBufferTab): TircSpans
 ---@field render_buffer_bar? fun(self: TircTheme, buffers: TircBufferTab[]): TircBufferBar | TircSpans
 ---@field render_unread_separator? fun(self: TircTheme): TircSpans
+---@field render_date_separator? fun(self: TircTheme, date: TircDateTime): TircSpans
 
 ---@class TircTheme: TircUi, TircClassDef<TircTheme, TircThemeOptions>
 ---@field styles table<string, TircThemeStyle>
@@ -461,6 +462,37 @@ function Theme:render_unread_separator()
   return {
     { '─── new messages ', s.unread_separator },
     { '─', s.unread_separator },
+  }
+end
+
+local MONTH_ABBR = {
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+}
+
+--- Renders the separator injected between messages from different calendar days.
+--- `date` carries year, month, day (and hour/minute/second, unused here).
+--- Return `nil` or an empty table to suppress.
+---@param date TircDateTime
+---@return TircSpans
+function Theme:render_date_separator(date)
+  local s = self.styles
+  local month = MONTH_ABBR[date.month] or tostring(date.month)
+  local label = string.format('%d %s %d', date.day, month, date.year)
+  return {
+    { '─── ', s.darkgray },
+    { label, s.twhite },
+    { ' ───', s.darkgray },
   }
 end
 
