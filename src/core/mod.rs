@@ -291,6 +291,10 @@ pub enum ChatEvent {
     /// without rendering a line. Creates the buffer if it does not exist yet, so
     /// backends can surface joined rooms proactively.
     BufferName { target: TargetId, name: String },
+    /// Sets the topic on a buffer without rendering a chat line. Used during
+    /// startup to restore already-known state from the backend's local store;
+    /// actual topic changes use [`Topic`](ChatEvent::Topic) which does render a line.
+    BufferTopic { target: TargetId, topic: String },
     /// Server-originated or otherwise un-normalized line. `target` of `None`
     /// routes to the backend's status buffer. `from` is the originating server
     /// or nick, when known. `code` is a protocol-specific classifier (IRC numeric
@@ -318,7 +322,8 @@ impl ChatEvent {
             | ChatEvent::Reaction { target, .. }
             | ChatEvent::Membership { target, .. }
             | ChatEvent::Topic { target, .. }
-            | ChatEvent::BufferName { target, .. } => Some(target),
+            | ChatEvent::BufferName { target, .. }
+            | ChatEvent::BufferTopic { target, .. } => Some(target),
             ChatEvent::ServerInfo { target, .. } => target.as_ref(),
             ChatEvent::Rename { .. } | ChatEvent::Quit { .. } => None,
         }

@@ -10,6 +10,7 @@
 --- An IRC server.
 ---@class TircIrcServer
 ---@field protocol 'irc'
+---@field enabled? boolean connect to this server on startup (default true); set to false to skip without removing the entry
 ---@field host string
 ---@field nickname string[]
 ---@field port? number defaults to 6697
@@ -22,6 +23,7 @@
 --- A Matrix homeserver.
 ---@class TircMatrixServer
 ---@field protocol 'matrix'
+---@field enabled? boolean connect to this server on startup (default true); set to false to skip without removing the entry
 ---@field homeserver string base URL, e.g. 'https://matrix.org'
 ---@field user_id string e.g. '@me:matrix.org'
 ---@field password string

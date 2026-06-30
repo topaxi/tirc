@@ -1096,6 +1096,11 @@ impl<'lua> InputHandler<'lua> {
     /// table and a backend-bound sender. Best-effort: rendering does not depend
     /// on it, so failures are ignored.
     fn emit_lua_event(&mut self, state: &State, backend: BackendId, event: &ChatEvent) {
+        // Silent state-only events have no Lua representation and no chat line.
+        if matches!(event, ChatEvent::BufferTopic { .. }) {
+            return;
+        }
+
         let Some(info) = state.backends.get(&backend).map(|b| b.info.clone()) else {
             return;
         };

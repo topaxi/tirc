@@ -20,6 +20,8 @@
 //! translate Matrix timeline/state events into normalized [`ChatEvent`]s;
 //! outgoing [`Command`]s are applied directly to the client.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -162,17 +164,29 @@ impl ChatBackend for MatrixBackend {
             id,
             status_line(format!("Synced; {} joined room(s)", joined.len())),
         );
+
+        let known_topics_path = store_path.join("known_topics.json");
+        let mut known_topics = load_known_topics(&known_topics_path);
         for room in joined {
-            populate_room(&room, id, &events).await;
+            populate_room(&room, id, &events, &mut known_topics).await;
         }
+        save_known_topics(&known_topics_path, &known_topics);
 
         let _ = events.send(BackendMessage {
             backend: id,
             event: BackendEvent::Synced,
         });
 
+        let known_topics = Arc::new(Mutex::new(known_topics));
         let verifications = Verifications::default();
-        register_handlers(&client, id, events.clone(), verifications.clone());
+        register_handlers(
+            &client,
+            id,
+            events.clone(),
+            verifications.clone(),
+            known_topics,
+            known_topics_path,
+        );
 
         // Drive the SDK sync loop in the background; it resumes from the store's
         // token (set by sync_once) so it delivers only new events.
@@ -255,6 +269,8 @@ fn register_handlers(
     id: BackendId,
     events: EventSender,
     verifications: Verifications,
+    known_topics: Arc<Mutex<HashMap<String, String>>>,
+    known_topics_path: PathBuf,
 ) {
     let message_events = events.clone();
     client.add_event_handler(move |event: SyncRoomMessageEvent, room: Room| {
@@ -320,18 +336,24 @@ fn register_handlers(
     let topic_events = events.clone();
     client.add_event_handler(move |event: SyncRoomTopicEvent, room: Room| {
         let events = topic_events.clone();
+        let known_topics = known_topics.clone();
+        let known_topics_path = known_topics_path.clone();
         async move {
             if let SyncRoomTopicEvent::Original(event) = event {
+                let topic = event.content.topic.clone();
                 emit(
                     &events,
                     id,
                     ChatEvent::Topic {
                         target: room_target(&room),
                         who: Some(UserRef::new(event.sender.to_string())),
-                        topic: event.content.topic,
+                        topic: topic.clone(),
                         time: server_ts(event.origin_server_ts),
                     },
                 );
+                let mut map = known_topics.lock().await;
+                map.insert(room.room_id().to_string(), topic);
+                save_known_topics(&known_topics_path, &map);
             }
         }
     });
@@ -903,7 +925,12 @@ fn status_line(text: String) -> ChatEvent {
 
 /// Surfaces an already-joined room as a named buffer with its topic and roster,
 /// so joined rooms are visible on startup without waiting for new activity.
-async fn populate_room(room: &Room, id: BackendId, events: &EventSender) {
+async fn populate_room(
+    room: &Room,
+    id: BackendId,
+    events: &EventSender,
+    known_topics: &mut HashMap<String, String>,
+) {
     let target = room_target(room);
 
     let name = room
@@ -921,16 +948,29 @@ async fn populate_room(room: &Room, id: BackendId, events: &EventSender) {
     );
 
     if let Some(topic) = room.topic() {
-        emit(
-            events,
-            id,
-            ChatEvent::Topic {
-                target: target.clone(),
-                who: None,
-                topic,
-                time: None,
-            },
-        );
+        let room_id = room.room_id().to_string();
+        if known_topics.get(&room_id).map(String::as_str) == Some(topic.as_str()) {
+            emit(
+                events,
+                id,
+                ChatEvent::BufferTopic {
+                    target: target.clone(),
+                    topic,
+                },
+            );
+        } else {
+            known_topics.insert(room_id, topic.clone());
+            emit(
+                events,
+                id,
+                ChatEvent::Topic {
+                    target: target.clone(),
+                    who: None,
+                    topic,
+                    time: None,
+                },
+            );
+        }
     }
 
     if let Ok(members) = room.members(matrix_sdk::RoomMemberships::JOIN).await {
@@ -1290,6 +1330,36 @@ async fn authenticate(
     }
 
     Ok(client)
+}
+
+/// Reads the persisted map of room-id -> last-shown topic. Returns an empty map
+/// when the file is absent (first run) or unreadable.
+fn load_known_topics(path: &std::path::Path) -> HashMap<String, String> {
+    let data = match std::fs::read_to_string(path) {
+        Ok(d) => d,
+        Err(_) => return HashMap::new(),
+    };
+    match serde_json::from_str(&data) {
+        Ok(map) => map,
+        Err(err) => {
+            log::warn!("ignoring unreadable known-topics file at {path:?}: {err}");
+            HashMap::new()
+        }
+    }
+}
+
+/// Persists the known-topics map so the next run can compare and suppress
+/// unchanged topics. Best-effort: a write failure only causes one extra
+/// topic line on the next startup.
+fn save_known_topics(path: &std::path::Path, topics: &HashMap<String, String>) {
+    match serde_json::to_string(topics) {
+        Ok(data) => {
+            if let Err(err) = std::fs::write(path, data) {
+                log::warn!("failed to persist known topics to {path:?}: {err}");
+            }
+        }
+        Err(err) => log::warn!("failed to serialize known topics: {err}"),
+    }
 }
 
 /// Reads a previously persisted [`MatrixSession`], returning `None` when there is

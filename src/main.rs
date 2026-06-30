@@ -97,6 +97,9 @@ async fn root_task(
     let mut handles = Vec::new();
 
     for (index, server) in config.servers.iter().enumerate() {
+        if !server.enabled {
+            continue;
+        }
         let id = BackendId(index);
         tirc::config::register_backend_metadata(lua, id)?;
         let backend = build_backend(id, server)?;

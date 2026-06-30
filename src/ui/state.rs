@@ -350,6 +350,13 @@ impl State {
                 let name = name.clone();
                 self.buffer_mut(backend, target.clone()).display_name = Some(name);
             }
+            ChatEvent::BufferTopic {
+                ref target,
+                ref topic,
+            } => {
+                let topic = topic.clone();
+                self.buffer_mut(backend, target.clone()).topic = Some(topic);
+            }
             ChatEvent::Rename { .. } => self.apply_rename(backend, event),
             ChatEvent::Quit { .. } => self.apply_quit(backend, event),
             ChatEvent::ServerInfo { ref target, .. } => {

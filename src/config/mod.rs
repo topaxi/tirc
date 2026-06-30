@@ -28,6 +28,11 @@ fn default_port() -> u16 {
 pub struct ServerConfig {
     pub protocol: Protocol,
 
+    /// When `false` the server is skipped at startup. Defaults to `true`;
+    /// omit from the Lua config to keep a server enabled.
+    #[serde(default = "bool_true")]
+    pub enabled: bool,
+
     // IRC fields.
     pub host: Option<String>,
 
