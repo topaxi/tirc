@@ -454,14 +454,32 @@ function Theme:user(user)
   }
 end
 
+--- Fills a separator line: centers `label` (with a space on each side) within
+--- `width` columns using `fill_char` on both sides. Returns left_fill, label,
+--- right_fill strings. Falls back gracefully when width <= label length.
+---@param label string
+---@param width integer
+---@param fill_char string single character used for padding
+---@return string, string, string
+local function centered_separator(label, width, fill_char)
+  local inner = ' ' .. label .. ' '
+  local remaining = math.max(0, width - #inner)
+  local left_n = math.floor(remaining / 2)
+  local right_n = remaining - left_n
+  return string.rep(fill_char, left_n), inner, string.rep(fill_char, right_n)
+end
+
 --- Renders the separator injected between already-read messages and new unread
 --- ones. Return `nil` or an empty table to suppress the separator entirely.
+---@param width integer pane width in columns
 ---@return TircSpans
-function Theme:render_unread_separator()
+function Theme:render_unread_separator(width)
   local s = self.styles
+  local left, label, right = centered_separator('new messages', width, '─')
   return {
-    { '─── new messages ', s.unread_separator },
-    { '─', s.unread_separator },
+    { left, s.unread_separator },
+    { label, s.unread_separator },
+    { right, s.unread_separator },
   }
 end
 
@@ -484,15 +502,17 @@ local MONTH_ABBR = {
 --- `date` carries year, month, day (and hour/minute/second, unused here).
 --- Return `nil` or an empty table to suppress.
 ---@param date TircDateTime
+---@param width integer pane width in columns
 ---@return TircSpans
-function Theme:render_date_separator(date)
+function Theme:render_date_separator(date, width)
   local s = self.styles
   local month = MONTH_ABBR[date.month] or tostring(date.month)
   local label = string.format('%d %s %d', date.day, month, date.year)
+  local left, inner, right = centered_separator(label, width, '─')
   return {
-    { '─── ', s.darkgray },
-    { label, s.twhite },
-    { ' ───', s.darkgray },
+    { left, s.darkgray },
+    { inner, s.twhite },
+    { right, s.darkgray },
   }
 end
 

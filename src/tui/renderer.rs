@@ -210,7 +210,9 @@ impl Renderer {
                         seen_unread = true;
                     } else if seen_unread {
                         // First read message after one or more unread ones: inject separator.
-                        messages.push(ListItem::new(self.render_unread_separator(lua)));
+                        messages.push(ListItem::new(
+                            self.render_unread_separator(lua, rect.width),
+                        ));
                         separator_inserted = true;
                     }
                 }
@@ -223,7 +225,9 @@ impl Renderer {
             let current_date = msg_time.date_naive();
             if let (Some(prev), Some(sep_time)) = (prev_date, prev_msg_time) {
                 if current_date != prev {
-                    messages.push(ListItem::new(self.render_date_separator(lua, &sep_time)));
+                    messages.push(ListItem::new(
+                        self.render_date_separator(lua, &sep_time, rect.width),
+                    ));
                 }
             }
             prev_date = Some(current_date);
@@ -273,8 +277,8 @@ impl Renderer {
     /// Renders the "new messages" separator line. The appearance is driven by
     /// the theme's `render_unread_separator` formatter; falls back to a plain
     /// styled line when the theme does not implement it.
-    fn render_unread_separator(&self, lua: &mlua::Lua) -> Line<'_> {
-        match self.format_spans(lua, "render_unread_separator", ()) {
+    fn render_unread_separator(&self, lua: &mlua::Lua, width: u16) -> Line<'_> {
+        match self.format_spans(lua, "render_unread_separator", width as usize) {
             Ok(spans) if !spans.is_empty() => Line::from(spans),
             _ => Line::from(Span::styled(
                 "─── new messages ───",
@@ -291,11 +295,15 @@ impl Renderer {
         &self,
         lua: &mlua::Lua,
         date: &chrono::DateTime<chrono::Local>,
+        width: u16,
     ) -> Line<'_> {
         let fallback = date.format("─── %-d %B %Y ───").to_string();
         match date_time_to_table(lua, date)
             .ok()
-            .and_then(|dt| self.format_spans(lua, "render_date_separator", dt).ok())
+            .and_then(|dt| {
+                self.format_spans(lua, "render_date_separator", (dt, width as usize))
+                    .ok()
+            })
         {
             Some(spans) if !spans.is_empty() => Line::from(spans),
             _ => Line::from(Span::styled(fallback, Style::default().fg(Color::DarkGray))),
@@ -1152,7 +1160,7 @@ mod tests {
             .unwrap();
 
         let renderer = Renderer::new();
-        let line = renderer.render_date_separator(&lua, &date);
+        let line = renderer.render_date_separator(&lua, &date, 80);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
             text.contains("30 Jun 2026"),

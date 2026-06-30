@@ -87,7 +87,8 @@
 ---@field user? fun(user: TircUser): TircSpans
 ---@field render_buffer_tab? fun(buffer: TircBufferTab): TircSpans
 ---@field render_buffer_bar? fun(buffers: TircBufferTab[]): TircBufferBar | TircSpans
----@field render_unread_separator? fun(): TircSpans
+---@field render_unread_separator? fun(width: integer): TircSpans
+---@field render_date_separator? fun(date: TircDateTime, width: integer): TircSpans
 
 ---@class TircModule
 ---@field version string
