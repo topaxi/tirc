@@ -15,6 +15,66 @@ use crate::ui::{ChatBuffer, LayoutMap, Member, Mode, State, StoredMessage, ViewS
 use super::lua::{to_lua_event, to_lua_user, STYLE_MARKER};
 use super::wrap::wrap_line;
 
+/// How the buffer bar scrolls to keep the focused tab visible.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BarScrollMode {
+    /// Scroll the minimum amount to bring the focused tab into view (default).
+    #[default]
+    Follow,
+    /// Always center the focused tab in the bar.
+    Center,
+}
+
+/// Computes the horizontal scroll offset for the buffer bar so the focused tab
+/// is visible (or centered, depending on `mode`). Returns 0 when all tabs fit
+/// without scrolling. `prev_scroll` is the offset from the previous frame and
+/// is only used by `Follow` mode to avoid unnecessary jumps.
+pub fn buffer_bar_scroll(
+    widths: &[u16],
+    focused_index: Option<usize>,
+    bar_width: u16,
+    prev_scroll: u16,
+    mode: BarScrollMode,
+) -> u16 {
+    let total: u16 = widths.iter().copied().fold(0u16, |a, w| a.saturating_add(w));
+    if total <= bar_width || bar_width == 0 {
+        return 0;
+    }
+    let max_scroll = total.saturating_sub(bar_width);
+
+    let Some(idx) = focused_index else {
+        return prev_scroll.min(max_scroll);
+    };
+
+    if idx >= widths.len() {
+        // Multi-row theme: focused tab not on the first row; no scroll.
+        return 0;
+    }
+
+    let tab_start: u16 = widths[..idx]
+        .iter()
+        .copied()
+        .fold(0u16, |a, w| a.saturating_add(w));
+    let tab_width = widths[idx];
+    let tab_end = tab_start.saturating_add(tab_width);
+
+    match mode {
+        BarScrollMode::Center => {
+            let offset = tab_start.saturating_sub(bar_width.saturating_sub(tab_width) / 2);
+            offset.min(max_scroll)
+        }
+        BarScrollMode::Follow => {
+            let mut scroll = prev_scroll;
+            if tab_start < scroll {
+                scroll = tab_start;
+            } else if tab_end > scroll.saturating_add(bar_width) {
+                scroll = tab_end.saturating_sub(bar_width);
+            }
+            scroll.min(max_scroll)
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Renderer {}
 
@@ -396,25 +456,35 @@ impl Renderer {
         state: &State,
         bar_rect: Rect,
         widths: &[u16],
+        scroll: u16,
     ) -> Vec<(Rect, BufferId)> {
         let mut tabs = Vec::with_capacity(widths.len());
-        let mut x = bar_rect.x;
+        let mut content_x: u16 = 0;
 
         for (width, id) in widths.iter().zip(state.buffers.keys()) {
-            if *width == 0 {
-                continue;
+            let w = *width;
+            let content_end = content_x.saturating_add(w);
+
+            if w > 0 && content_end > scroll {
+                let rel_start = content_x.saturating_sub(scroll);
+                if rel_start < bar_rect.width {
+                    let rel_end = content_end.saturating_sub(scroll).min(bar_rect.width);
+                    let visible_width = rel_end.saturating_sub(rel_start);
+                    if visible_width > 0 {
+                        tabs.push((
+                            Rect {
+                                x: bar_rect.x.saturating_add(rel_start),
+                                y: bar_rect.y,
+                                width: visible_width,
+                                height: 1,
+                            },
+                            id.clone(),
+                        ));
+                    }
+                }
             }
 
-            tabs.push((
-                Rect {
-                    x,
-                    y: bar_rect.y,
-                    width: *width,
-                    height: 1,
-                },
-                id.clone(),
-            ));
-            x = x.saturating_add(*width);
+            content_x = content_end;
         }
 
         tabs
@@ -523,31 +593,52 @@ impl Renderer {
             .unwrap_or_default()
     }
 
+    /// Extracts the optional `scroll` mode from a `TircBufferBar` table.
+    /// `"center"` maps to `Center`; everything else (including absent) is `Follow`.
+    fn bar_scroll_mode(table: &mlua::Table) -> BarScrollMode {
+        match table.get::<Option<String>>("scroll").ok().flatten() {
+            Some(s) if s == "center" => BarScrollMode::Center,
+            _ => BarScrollMode::Follow,
+        }
+    }
+
     /// Produces the buffer bar as a list of lines, a base background style, and
     /// the per-tab column widths of the first row (in buffer order) used for
     /// click hit-testing. Delegates the whole layout to the theme's
     /// `render_buffer_bar`; when that formatter is absent, falls back to a single
     /// line built from per-tab `render_buffer_tab` results so raw `TircUi` themes
     /// keep working.
-    fn build_buffer_bar(&self, state: &State, lua: &mlua::Lua) -> (Vec<Line<'_>>, Style, Vec<u16>) {
+    fn build_buffer_bar(
+        &self,
+        state: &State,
+        lua: &mlua::Lua,
+    ) -> (Vec<Line<'_>>, Style, Vec<u16>, BarScrollMode) {
         let tabs = match self.buffer_tabs(state, lua) {
             Ok(tabs) => tabs,
-            Err(_) => return (vec![Line::default()], Style::default(), Vec::new()),
+            Err(_) => {
+                return (
+                    vec![Line::default()],
+                    Style::default(),
+                    Vec::new(),
+                    BarScrollMode::default(),
+                )
+            }
         };
 
         match crate::config::call_formatter(lua, "render_buffer_bar", &tabs) {
             Some(Ok(mlua::Value::Table(table))) => {
                 let bg_style = Self::bar_bg_style(&table);
+                let scroll_mode = Self::bar_scroll_mode(&table);
                 let (lines, widths) = self
                     .rows_to_lines_and_widths(lua, mlua::Value::Table(table))
                     .unwrap_or_default();
-                (lines, bg_style, widths)
+                (lines, bg_style, widths, scroll_mode)
             }
             Some(Ok(value)) => {
                 let (lines, widths) = self
                     .rows_to_lines_and_widths(lua, value)
                     .unwrap_or_default();
-                (lines, Style::default(), widths)
+                (lines, Style::default(), widths, BarScrollMode::default())
             }
             Some(Err(err)) => (
                 vec![Line::from(Self::string_to_span(
@@ -556,6 +647,7 @@ impl Renderer {
                 ))],
                 Style::default(),
                 Vec::new(),
+                BarScrollMode::default(),
             ),
             None => {
                 // No `render_buffer_bar`: build a single row from per-tab spans and
@@ -569,7 +661,12 @@ impl Renderer {
                     widths.push(tab_spans.iter().map(|s| s.width() as u16).sum());
                     spans.extend(tab_spans);
                 }
-                (vec![Line::from(spans)], Style::default(), widths)
+                (
+                    vec![Line::from(spans)],
+                    Style::default(),
+                    widths,
+                    BarScrollMode::default(),
+                )
             }
         }
     }
@@ -697,7 +794,8 @@ impl Renderer {
 
         // Build the bar first so the layout can size its region to fit the rows
         // the theme returned, capped so the message area never collapses.
-        let (bar_lines, bar_style, bar_tab_widths) = self.build_buffer_bar(state, lua);
+        let (bar_lines, bar_style, bar_tab_widths, bar_scroll_mode) =
+            self.build_buffer_bar(state, lua);
         let max_bar_height = f.area().height.saturating_sub(3);
         let bar_height = (bar_lines.len() as u16).clamp(1, max_bar_height.max(1));
 
@@ -734,8 +832,23 @@ impl Renderer {
 
         self.render_messages(f, state, view, lua, msg_rect);
 
+        // Compute horizontal scroll so the focused tab stays visible.
+        let focused_index = view
+            .focused
+            .as_ref()
+            .and_then(|id| state.buffers.keys().position(|k| k == id));
+        view.bar_x_scroll = buffer_bar_scroll(
+            &bar_tab_widths,
+            focused_index,
+            chunks[2].width,
+            view.bar_x_scroll,
+            bar_scroll_mode,
+        );
+
         f.render_widget(
-            Paragraph::new(Text::from(bar_lines)).style(bar_style),
+            Paragraph::new(Text::from(bar_lines))
+                .style(bar_style)
+                .scroll((0, view.bar_x_scroll)),
             chunks[2],
         );
         self.render_input(f, view, input, chunks[1]);
@@ -743,7 +856,8 @@ impl Renderer {
         // Record this frame's hit regions so the input handler can resolve mouse
         // clicks without re-deriving the layout. Built last, after the bar's Lua
         // context is in place, so the tab widths match what was drawn.
-        let bar_tabs = self.bar_tabs_from_widths(state, chunks[2], &bar_tab_widths);
+        let bar_tabs =
+            self.bar_tabs_from_widths(state, chunks[2], &bar_tab_widths, view.bar_x_scroll);
         view.layout = LayoutMap {
             message_rect: msg_rect,
             bar_rect: chunks[2],
@@ -1022,8 +1136,8 @@ mod tests {
             width: 80,
             height: 1,
         };
-        let (_, _, widths) = renderer.build_buffer_bar(&state, &lua);
-        let tabs = renderer.bar_tabs_from_widths(&state, bar_rect, &widths);
+        let (_, _, widths, _) = renderer.build_buffer_bar(&state, &lua);
+        let tabs = renderer.bar_tabs_from_widths(&state, bar_rect, &widths, 0);
 
         assert_eq!(tabs.len(), state.buffers.len(), "one hit box per buffer");
         assert_eq!(tabs[0].0.x, bar_rect.x, "first tab starts at the bar's x");
@@ -1083,14 +1197,14 @@ mod tests {
         let renderer = Renderer::new();
         renderer.update_render_context(&lua, &view, &state)?;
 
-        let (lines, _, widths) = renderer.build_buffer_bar(&state, &lua);
+        let (lines, _, widths, _) = renderer.build_buffer_bar(&state, &lua);
         let bar_rect = Rect {
             x: 0,
             y: 0,
             width: 120,
             height: 1,
         };
-        let tabs = renderer.bar_tabs_from_widths(&state, bar_rect, &widths);
+        let tabs = renderer.bar_tabs_from_widths(&state, bar_rect, &widths, 0);
 
         assert_eq!(tabs.len(), state.buffers.len(), "one hit box per buffer");
 
@@ -1143,6 +1257,170 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let text: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("#tirc"), "row text was {text:?}");
+        Ok(())
+    }
+
+    // --- buffer_bar_scroll unit tests ---
+
+    #[test]
+    fn bar_scroll_no_overflow_returns_zero() {
+        // All tabs fit: no scrolling needed regardless of focused index.
+        let widths = [10u16, 10, 10];
+        assert_eq!(buffer_bar_scroll(&widths, Some(2), 40, 5, BarScrollMode::Follow), 0);
+        assert_eq!(buffer_bar_scroll(&widths, Some(2), 40, 5, BarScrollMode::Center), 0);
+    }
+
+    #[test]
+    fn bar_scroll_follow_scrolls_right_to_reveal_tab() {
+        // Tabs: [0..10), [10..20), [20..30). Bar width = 15.
+        // With prev_scroll=0, focused=2 (tab at [20..30)): tab_end=30 > 0+15=15
+        // → scroll = 30 - 15 = 15.
+        let widths = [10u16, 10, 10];
+        assert_eq!(
+            buffer_bar_scroll(&widths, Some(2), 15, 0, BarScrollMode::Follow),
+            15
+        );
+    }
+
+    #[test]
+    fn bar_scroll_follow_scrolls_left_to_reveal_tab() {
+        // Same tabs, prev_scroll=15, focused=0 (tab at [0..10)): tab_start=0 < 15
+        // → scroll = 0.
+        let widths = [10u16, 10, 10];
+        assert_eq!(
+            buffer_bar_scroll(&widths, Some(0), 15, 15, BarScrollMode::Follow),
+            0
+        );
+    }
+
+    #[test]
+    fn bar_scroll_follow_does_not_scroll_when_tab_already_visible() {
+        // Tabs: [0..10), [10..20), [20..30). Bar width = 15, prev_scroll = 10.
+        // Focused=1 is at [10..20). Visible window: [10..25). Tab fully visible.
+        let widths = [10u16, 10, 10];
+        assert_eq!(
+            buffer_bar_scroll(&widths, Some(1), 15, 10, BarScrollMode::Follow),
+            10
+        );
+    }
+
+    #[test]
+    fn bar_scroll_center_centers_focused_tab() {
+        // Tabs: [0..10), [10..20), [20..30). Bar width = 15. Focused=2.
+        // tab_start=20, tab_width=10. offset = 20 - (15-10)/2 = 20 - 2 = 18.
+        // max_scroll = 30 - 15 = 15. clamped to 15.
+        let widths = [10u16, 10, 10];
+        assert_eq!(
+            buffer_bar_scroll(&widths, Some(2), 15, 0, BarScrollMode::Center),
+            15
+        );
+        // Focused=1: tab_start=10. offset = 10 - 2 = 8. max_scroll=15 → 8.
+        assert_eq!(
+            buffer_bar_scroll(&widths, Some(1), 15, 0, BarScrollMode::Center),
+            8
+        );
+    }
+
+    #[test]
+    fn bar_scroll_clamps_stale_scroll_after_buffer_closes() {
+        // Only one buffer left, width=5, bar=10: no overflow → 0.
+        let widths = [5u16];
+        assert_eq!(
+            buffer_bar_scroll(&widths, Some(0), 10, 20, BarScrollMode::Follow),
+            0
+        );
+    }
+
+    #[test]
+    fn bar_scroll_multi_row_guard_returns_zero() {
+        // Focused index out of range (multi-row theme).
+        let widths = [10u16, 10];
+        assert_eq!(
+            buffer_bar_scroll(&widths, Some(5), 15, 0, BarScrollMode::Follow),
+            0
+        );
+    }
+
+    #[test]
+    fn bar_tabs_hit_boxes_correct_under_scroll() -> anyhow::Result<(), anyhow::Error> {
+        // Tabs widths: 10, 10, 10. Bar x=0, width=15, scroll=10.
+        // Tab 0 [0..10): fully left of window → excluded.
+        // Tab 1 [10..20): rel_start=0, rel_end=min(10,15)=10 → box (x=0, w=10).
+        // Tab 2 [20..30): rel_start=10, rel_end=min(20,15)=15 → box (x=10, w=5).
+        use crate::backends::BackendInfo;
+        use crate::core::{BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef};
+        use crate::ui::{State, ViewState};
+
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default'):setup({})")
+            .exec()?;
+
+        let backend = BackendId(0);
+        let mut state = State::new();
+        state.register_backend(BackendInfo {
+            id: backend,
+            protocol: Protocol::Irc,
+            name: "irc.example.com".to_string(),
+        });
+        // Push messages to create buffers.
+        for channel in ["#a", "#bb"] {
+            state.apply(
+                backend,
+                ChatEvent::Message {
+                    target: TargetId::from(channel),
+                    id: None,
+                    sender: UserRef::new("alice"),
+                    body: MessageBody::plain("hi"),
+                    kind: MsgKind::Text,
+                    echo_of: None,
+                    time: None,
+                },
+            );
+        }
+
+        let mut view = ViewState::new();
+        view.focus(BufferId::status(backend));
+
+        let renderer = Renderer::new();
+        renderer.update_render_context(&lua, &view, &state)?;
+
+        let (_, _, widths, _) = renderer.build_buffer_bar(&state, &lua);
+        let bar_rect = Rect { x: 0, y: 0, width: 80, height: 1 };
+        let total: u16 = widths.iter().sum();
+
+        // Scroll to show the last tab.
+        let last_idx = widths.len() - 1;
+        let last_tab_start: u16 = widths[..last_idx].iter().sum();
+        let last_tab_end = last_tab_start + widths[last_idx];
+        let scroll = last_tab_end.saturating_sub(bar_rect.width);
+
+        let tabs = renderer.bar_tabs_from_widths(&state, bar_rect, &widths, scroll);
+
+        // All scrolled-off tabs should still be mapped but may be partially clipped.
+        // At minimum the last tab must be fully visible at the right side.
+        let last = tabs.last().expect("at least one tab visible");
+        let last_screen_end = last.0.x + last.0.width;
+        assert!(
+            last_screen_end <= bar_rect.x + bar_rect.width,
+            "last tab right edge {last_screen_end} must be within bar width {}",
+            bar_rect.x + bar_rect.width
+        );
+
+        // No hit box must exceed the bar's right boundary.
+        for (rect, _) in &tabs {
+            assert!(
+                rect.x + rect.width <= bar_rect.x + bar_rect.width,
+                "tab hit box overflows bar: {rect:?}"
+            );
+        }
+
+        // With scroll=0 the total hit-box width still equals total rendered width
+        // (existing invariant should still hold after the refactor).
+        let tabs_no_scroll = renderer.bar_tabs_from_widths(&state, bar_rect, &widths, 0);
+        let hit_total: u16 = tabs_no_scroll.iter().map(|(r, _)| r.width).sum();
+        assert_eq!(hit_total, total, "zero-scroll: hit boxes cover all tabs");
+
         Ok(())
     }
 

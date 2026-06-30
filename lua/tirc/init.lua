@@ -16,6 +16,7 @@
 ---@class TircBufferBar
 ---@field rows TircSpans[]
 ---@field bg? string optional base background colour (hex or named) to fill empty bar space
+---@field scroll? 'follow'|'center' how to scroll the bar to keep the focused tab visible: 'follow' (default) scrolls minimally; 'center' always centers the focused tab
 
 --- Styled span tree consumed by the renderer: a string, a `{ content, style }`
 --- pair, or a (possibly nested) list of either. Returning `nil` skips the line.

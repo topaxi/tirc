@@ -805,6 +805,9 @@ pub struct ViewState {
     /// Updated by the renderer after each draw; used by scroll key handlers to
     /// compute page-height steps without a second terminal size query.
     pub viewport_height: u16,
+    /// Horizontal scroll offset of the buffer bar (columns). Persisted across
+    /// frames so "follow" mode can scroll minimally without jumping each frame.
+    pub bar_x_scroll: u16,
     /// Hit-region map from the most recent render, read by the input handler to
     /// resolve mouse clicks to buffers and user-list members.
     pub layout: LayoutMap,
