@@ -21,6 +21,7 @@ pub enum Protocol {
     #[default]
     Irc,
     Matrix,
+    Mattermost,
 }
 
 /// Identifies one connected network. Several backends (multiple IRC servers and

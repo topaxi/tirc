@@ -36,6 +36,11 @@ arboard = "3"
 # features keeps HTTPS working. `e2e-encryption` re-uses the same sqlite store
 # for the crypto state (Olm/Megolm keys); `automatic-room-key-forwarding` lets
 # our other verified sessions forward us room keys so we can decrypt history.
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "rustls-tls-webpki-roots",
+] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 matrix-sdk = { version = "0.18.0", default-features = false, features = [
   "sqlite",
   "e2e-encryption",

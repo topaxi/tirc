@@ -58,6 +58,11 @@ pub struct ServerConfig {
     pub user_id: Option<String>,
     pub password: Option<String>,
     pub device_id: Option<String>,
+
+    // Mattermost fields.
+    pub url: Option<String>,
+    pub token: Option<String>,
+    pub team: Option<String>,
 }
 
 /// How a left drag over the message area behaves. The release-capture copy-mode

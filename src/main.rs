@@ -10,6 +10,7 @@ use anyhow::Context;
 
 use tirc::backends::irc::{IrcBackend, IrcBackendConfig};
 use tirc::backends::matrix::{MatrixBackend, MatrixBackendConfig};
+use tirc::backends::mattermost::{MattermostBackend, MattermostBackendConfig};
 use tirc::backends::{self, ChatBackend};
 use tirc::config::{load_config, ServerConfig, TircConfig};
 use tirc::core::{BackendId, BackendMessage, BufferId, Protocol, TxnAllocator};
@@ -74,6 +75,36 @@ fn build_backend(id: BackendId, server: &ServerConfig) -> anyhow::Result<Box<dyn
                     device_id: server.device_id.clone(),
                     autojoin: server.autojoin.clone(),
                     store_dir: None,
+                },
+            )))
+        }
+        Protocol::Mattermost => {
+            let url = server
+                .url
+                .clone()
+                .context("Mattermost server entry is missing `url`")?;
+            let team = server
+                .team
+                .clone()
+                .with_context(|| format!("Mattermost server '{url}' is missing `team`"))?;
+
+            if server.token.is_none()
+                && (server.user_id.is_none() || server.password.is_none())
+            {
+                anyhow::bail!(
+                    "Mattermost server '{url}' needs either `token` or both `user_id` and `password`"
+                );
+            }
+
+            Ok(Box::new(MattermostBackend::new(
+                id,
+                MattermostBackendConfig {
+                    url,
+                    token: server.token.clone(),
+                    login_id: server.user_id.clone(),
+                    password: server.password.clone(),
+                    team,
+                    autojoin: server.autojoin.clone(),
                 },
             )))
         }

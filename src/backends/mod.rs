@@ -13,6 +13,7 @@ use crate::core::{BackendEvent, BackendId, BackendMessage, Command, Protocol};
 
 pub mod irc;
 pub mod matrix;
+pub mod mattermost;
 
 /// Sender half of the shared channel every backend emits onto. Unbounded so a
 /// backend never blocks on a slow UI, and so the UI can always make progress

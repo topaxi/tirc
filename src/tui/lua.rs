@@ -76,6 +76,7 @@ fn protocol_str(protocol: Protocol) -> &'static str {
     match protocol {
         Protocol::Irc => "irc",
         Protocol::Matrix => "matrix",
+        Protocol::Mattermost => "mattermost",
     }
 }
 
