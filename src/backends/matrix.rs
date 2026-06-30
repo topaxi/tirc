@@ -181,6 +181,38 @@ impl ChatBackend for MatrixBackend {
             let _ = sync_client.sync(SyncSettings::default()).await;
         });
 
+        // Periodic round-trip probe: call whoami() every 30s and emit the RTT
+        // as a Latency event. After 3 consecutive failures, emit Disconnected so
+        // the buffer bar shows an offline indicator (the SDK retries sync internally
+        // so we won't get an explicit Disconnected otherwise).
+        let ping_client = client.clone();
+        let ping_events = events.clone();
+        let ping_task = tokio::spawn(async move {
+            let mut interval = std::time::Duration::from_secs(30);
+            let mut failures: u32 = 0;
+            loop {
+                tokio::time::sleep(interval).await;
+                interval = std::time::Duration::from_secs(30);
+                let start = std::time::Instant::now();
+                if ping_client.whoami().await.is_ok() {
+                    failures = 0;
+                    let ms = start.elapsed().as_millis() as u64;
+                    let _ = ping_events.send(BackendMessage {
+                        backend: id,
+                        event: BackendEvent::Latency { ms },
+                    });
+                } else {
+                    failures += 1;
+                    if failures >= 3 {
+                        let _ = ping_events.send(BackendMessage {
+                            backend: id,
+                            event: BackendEvent::Disconnected { reason: None },
+                        });
+                    }
+                }
+            }
+        });
+
         // Autojoin configured rooms (aliases or ids), skipping ones we are
         // already in. Re-joining wastes a round-trip and some homeservers even
         // return 5xx for it, which the SDK retries with backoff and would stall
@@ -197,6 +229,7 @@ impl ChatBackend for MatrixBackend {
         }
 
         sync.abort();
+        ping_task.abort();
         Ok(())
     }
 }

@@ -217,6 +217,18 @@ impl ChatBuffer {
     }
 }
 
+/// Lifecycle phase of a backend connection, used to annotate the status buffer tab.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ConnectionStatus {
+    /// Initial state: connecting for the first time.
+    #[default]
+    Connecting,
+    /// Fully connected and identified (after Ready).
+    Connected,
+    /// Connection lost; backend is waiting to reconnect.
+    Disconnected,
+}
+
 /// Per-backend runtime state the UI needs beyond the buffers themselves.
 #[derive(Debug)]
 pub struct BackendState {
@@ -226,6 +238,9 @@ pub struct BackendState {
     /// Unread/mention flags are only set after this point so backfill doesn't
     /// trigger activity indicators.
     pub synced: bool,
+    pub connection_status: ConnectionStatus,
+    /// Last measured round-trip time in milliseconds. None until the first probe completes.
+    pub latency_ms: Option<u64>,
 }
 
 /// Domain state: every backend and buffer, mutated purely by applying
@@ -253,6 +268,8 @@ impl State {
                 info,
                 nickname: String::new(),
                 synced: false,
+                connection_status: ConnectionStatus::Connecting,
+                latency_ms: None,
             },
         );
     }
@@ -260,6 +277,18 @@ impl State {
     pub fn set_synced(&mut self, backend: BackendId) {
         if let Some(state) = self.backends.get_mut(&backend) {
             state.synced = true;
+        }
+    }
+
+    pub fn set_connection_status(&mut self, backend: BackendId, status: ConnectionStatus) {
+        if let Some(state) = self.backends.get_mut(&backend) {
+            state.connection_status = status;
+        }
+    }
+
+    pub fn set_latency(&mut self, backend: BackendId, ms: Option<u64>) {
+        if let Some(state) = self.backends.get_mut(&backend) {
+            state.latency_ms = ms;
         }
     }
 

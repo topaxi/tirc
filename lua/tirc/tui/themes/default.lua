@@ -549,6 +549,17 @@ function Theme:render_buffer_tab(buffer)
     style = s.tab
   end
 
+  if buffer.is_status then
+    local conn = buffer.connection_status
+    if conn == 'disconnected' then
+      name = name .. ' [offline]'
+    elseif conn == 'connecting' then
+      name = name .. ' [connecting]'
+    elseif buffer.latency_ms and buffer.latency_ms > 100 then
+      name = name .. ' [' .. buffer.latency_ms .. 'ms]'
+    end
+  end
+
   return { { ' ' .. name .. ' ', style }, ' ' }
 end
 

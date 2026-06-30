@@ -343,6 +343,10 @@ pub enum BackendEvent {
     Error {
         message: String,
     },
+    /// Round-trip time measured by the backend (IRC PING/PONG, Matrix whoami probe).
+    Latency {
+        ms: u64,
+    },
     Event(ChatEvent),
 }
 

@@ -16,6 +16,7 @@ use crate::core::{
     BackendEvent, BackendId, BackendMessage, ChatEvent, Command, MsgKind, TargetId, TxnAllocator,
     VerifyAction,
 };
+use crate::ui::ConnectionStatus;
 use crate::tui::lua::{create_lua_sender, to_lua_event};
 use crate::tui::Tui;
 
@@ -1040,7 +1041,10 @@ impl<'lua> InputHandler<'lua> {
         let backend = message.backend;
 
         match message.event {
-            BackendEvent::Ready { nickname } => state.set_nickname(backend, nickname),
+            BackendEvent::Ready { nickname } => {
+                state.set_nickname(backend, nickname);
+                state.set_connection_status(backend, ConnectionStatus::Connected);
+            }
             BackendEvent::Synced => state.set_synced(backend),
             BackendEvent::Disconnected { reason } => {
                 let text = match reason {
@@ -1048,9 +1052,17 @@ impl<'lua> InputHandler<'lua> {
                     None => "Disconnected".to_string(),
                 };
                 state.apply(backend, server_info(text));
+                state.set_connection_status(backend, ConnectionStatus::Disconnected);
+                state.set_latency(backend, None);
             }
             BackendEvent::Error { message } => {
                 state.apply(backend, server_info(format!("Error: {message}")));
+                state.set_connection_status(backend, ConnectionStatus::Disconnected);
+                state.set_latency(backend, None);
+            }
+            BackendEvent::Latency { ms } => {
+                state.set_latency(backend, Some(ms));
+                state.set_connection_status(backend, ConnectionStatus::Connected);
             }
             BackendEvent::Event(event) => {
                 self.emit_lua_event(state, backend, &event);

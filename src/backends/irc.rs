@@ -4,7 +4,8 @@
 //! (this subsumes the old `to_lua_message` shaping and the `get_target_buffer_name`
 //! routing), and outgoing [`Command`]s are translated into IRC sends.
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use futures::prelude::*;
 use irc::client::prelude::{Capability, Client, Config};
@@ -110,6 +111,10 @@ impl IrcBackend {
         };
 
         let mut ready_received = false;
+        let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+        ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut pending_pings: HashMap<String, Instant> = HashMap::new();
+        let mut ping_seq: u64 = 0;
 
         loop {
             tokio::select! {
@@ -135,8 +140,29 @@ impl IrcBackend {
                         });
                     }
 
+                    if let IrcCommand::PONG(first, second) = &message.command {
+                        let token = second.as_deref().unwrap_or(first.as_str());
+                        if let Some(sent_at) = pending_pings.remove(token) {
+                            let ms = sent_at.elapsed().as_millis() as u64;
+                            let _ = events.send(BackendMessage {
+                                backend: id,
+                                event: BackendEvent::Latency { ms },
+                            });
+                        }
+                    }
+
                     for event in translate(&message, &nickname) {
                         emit(event);
+                    }
+                }
+                _ = ping_interval.tick() => {
+                    let now = Instant::now();
+                    pending_pings.retain(|_, sent_at| now.duration_since(*sent_at) < Duration::from_secs(120));
+                    if ready_received {
+                        ping_seq += 1;
+                        let token = format!("tirc{ping_seq}");
+                        pending_pings.insert(token.clone(), Instant::now());
+                        let _ = client.send(IrcCommand::PING(token, None));
                     }
                 }
                 command = commands.recv() => {

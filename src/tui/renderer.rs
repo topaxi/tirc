@@ -10,7 +10,7 @@ use tui_input::Input;
 use crate::backends::BackendInfo;
 use crate::core::{BufferId, TargetId};
 use crate::lua::date_time::date_time_to_table;
-use crate::ui::{ChatBuffer, LayoutMap, Member, Mode, State, StoredMessage, ViewState};
+use crate::ui::{ChatBuffer, ConnectionStatus, LayoutMap, Member, Mode, State, StoredMessage, ViewState};
 
 use super::lua::{to_lua_event, to_lua_user, STYLE_MARKER};
 use super::wrap::wrap_line;
@@ -425,6 +425,7 @@ impl Renderer {
         t.set("id", format!("{}:{}", id.backend.0, id.target.as_str()))?;
         t.set("name", buffer.label(&id.target))?;
         t.set("target", id.target.as_str())?;
+        t.set("is_status", id.target.is_status())?;
         t.set("backend_id", id.backend.0)?;
         t.set("backend_name", backend_name)?;
         if let Some(metadata) = crate::config::get_backend_metadata(lua, id.backend) {
@@ -432,6 +433,17 @@ impl Renderer {
         }
         t.set("has_unread", buffer.has_unread)?;
         t.set("has_mention", buffer.has_mention)?;
+        if let Some(backend_state) = state.backends.get(&id.backend) {
+            t.set("latency_ms", backend_state.latency_ms)?;
+            t.set(
+                "connection_status",
+                match backend_state.connection_status {
+                    ConnectionStatus::Connecting => "connecting",
+                    ConnectionStatus::Connected => "connected",
+                    ConnectionStatus::Disconnected => "disconnected",
+                },
+            )?;
+        }
         Ok(t)
     }
 
