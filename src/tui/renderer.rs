@@ -8,9 +8,12 @@ use ratatui::{
 use tui_input::Input;
 
 use crate::backends::BackendInfo;
-use crate::core::{BufferId, TargetId};
+use crate::core::{BufferId, EventId, TargetId};
 use crate::lua::date_time::date_time_to_table;
-use crate::ui::{ChatBuffer, ConnectionStatus, LayoutMap, Member, Mode, State, StoredMessage, ViewState};
+use crate::ui::{
+    ChatBuffer, ConnectionStatus, LayoutMap, Member, Mode, ReactionHit, State, StoredMessage,
+    ViewState,
+};
 
 use super::lua::{to_lua_event, to_lua_user, STYLE_MARKER};
 use super::wrap::wrap_line;
@@ -36,7 +39,10 @@ pub fn buffer_bar_scroll(
     prev_scroll: u16,
     mode: BarScrollMode,
 ) -> u16 {
-    let total: u16 = widths.iter().copied().fold(0u16, |a, w| a.saturating_add(w));
+    let total: u16 = widths
+        .iter()
+        .copied()
+        .fold(0u16, |a, w| a.saturating_add(w));
     if total <= bar_width || bar_width == 0 {
         return 0;
     }
@@ -82,6 +88,21 @@ pub struct Renderer {}
 pub struct RenderedMessage<'a> {
     pub time: Box<[Span<'a>]>,
     pub message: Box<Line<'a>>,
+    /// Server event id of the message, when confirmed. `None` messages have no
+    /// clickable reactions (there is nothing to toggle against yet).
+    pub event_id: Option<EventId>,
+    /// Reaction pills to draw on a dedicated row below the message, left to
+    /// right in the order the theme returned them.
+    pub reactions: Vec<ReactionPill<'a>>,
+}
+
+/// One reaction pill: its emoji key, the styled spans to draw, and the measured
+/// display width used to place the pill's hit box.
+#[derive(Debug, Clone)]
+pub struct ReactionPill<'a> {
+    pub key: String,
+    pub spans: Vec<Span<'a>>,
+    pub width: u16,
 }
 
 impl Default for Renderer {
@@ -218,6 +239,9 @@ impl Renderer {
         )
     }
 
+    /// Draws the message list and returns the reaction-pill hit boxes recorded
+    /// this frame (screen `Rect` paired with the reaction it toggles), for the
+    /// caller to store in the [`LayoutMap`].
     fn render_messages(
         &self,
         f: &mut ratatui::Frame,
@@ -225,9 +249,9 @@ impl Renderer {
         view: &ViewState,
         lua: &mlua::Lua,
         rect: Rect,
-    ) {
+    ) -> Vec<(Rect, ReactionHit)> {
         let Some((buffer_id, buffer, backend, nickname)) = self.focused(state, view) else {
-            return;
+            return vec![];
         };
 
         let target_name = buffer.label(&buffer_id.target);
@@ -246,10 +270,34 @@ impl Renderer {
             // others wrap.
             .take((rect.height as usize) + (rect.height as usize) / 2)
             .filter_map(|message| {
-                self.render_message(lua, backend, &buffer_id.target, target_name, message)
-                    .map(|rm| (rm, message.time))
+                // A reaction on this message is highlighted only if the hovered
+                // pill belongs to it (matched by server event id).
+                let hovered_key = view
+                    .hovered_reaction
+                    .as_ref()
+                    .filter(|hit| message.event_id() == Some(&hit.event_id))
+                    .map(|hit| hit.key.as_str());
+                self.render_message(
+                    lua,
+                    backend,
+                    &buffer_id.target,
+                    target_name,
+                    message,
+                    hovered_key,
+                )
+                .map(|rm| (rm, message.time))
             })
             .collect();
+
+        let title = self
+            .render_buffer_title(lua, backend, nickname, buffer.label(&buffer_id.target))
+            .unwrap_or_default();
+
+        // Build the block up front so `list_area` can be derived from the exact
+        // geometry `List` will render into (the title consumes one top row). This
+        // lets the reaction hit boxes below mirror the widget's placement.
+        let block = Block::default().title(title).borders(Borders::NONE);
+        let list_area = block.inner(rect);
 
         let read_marker = buffer.read_marker;
         let mut seen_unread = false;
@@ -257,6 +305,12 @@ impl Renderer {
         let mut prev_date: Option<chrono::NaiveDate> = None;
         let mut prev_msg_time: Option<chrono::DateTime<chrono::Local>> = None;
         let mut messages: Vec<ListItem<'_>> = Vec::with_capacity(rendered.len() + 2);
+        let mut reaction_hits: Vec<(Rect, ReactionHit)> = vec![];
+
+        // Rows of every item pushed so far. `List` (BottomToTop) anchors item 0 at
+        // the bottom, so item `i` occupies rows `[bottom - cum - h, bottom - cum)`
+        // and is drawn iff `cum + h <= list_area.height` (no partial top clip).
+        let mut cum: u16 = 0;
 
         for (rm, msg_time) in &rendered {
             if rm.message.width() == 0 {
@@ -270,9 +324,8 @@ impl Renderer {
                         seen_unread = true;
                     } else if seen_unread {
                         // First read message after one or more unread ones: inject separator.
-                        messages.push(ListItem::new(
-                            self.render_unread_separator(lua, rect.width),
-                        ));
+                        messages.push(ListItem::new(self.render_unread_separator(lua, rect.width)));
+                        cum = cum.saturating_add(1);
                         separator_inserted = true;
                     }
                 }
@@ -288,12 +341,18 @@ impl Renderer {
                     messages.push(ListItem::new(
                         self.render_date_separator(lua, &sep_time, rect.width),
                     ));
+                    cum = cum.saturating_add(1);
                 }
             }
             prev_date = Some(current_date);
             prev_msg_time = Some(*msg_time);
 
             let initial_indent = rm.time.clone();
+            // Column where the message body (and thus the reaction row) begins.
+            let indent_width: u16 = initial_indent
+                .iter()
+                .map(|span| span.width())
+                .sum::<usize>() as u16;
 
             let subsequent_indent = if !initial_indent.is_empty() {
                 Box::new([
@@ -312,7 +371,7 @@ impl Renderer {
                 Box::new([Span::raw(""), Span::raw("")])
             };
 
-            messages.push(ListItem::new(wrap_line(
+            let mut text = wrap_line(
                 &rm.message,
                 super::wrap::Options {
                     width: rect.width as usize,
@@ -320,18 +379,65 @@ impl Renderer {
                     subsequent_indent,
                     break_words: true,
                 },
-            )));
+            );
+
+            // Append the reaction pills on their own trailing row, aligned under
+            // the message body. Pills are separated by a single blank column.
+            if !rm.reactions.is_empty() {
+                let mut spans: Vec<Span<'_>> = vec![Span::raw(" ".repeat(indent_width as usize))];
+                for (i, pill) in rm.reactions.iter().enumerate() {
+                    if i > 0 {
+                        spans.push(Span::raw(" "));
+                    }
+                    spans.extend(pill.spans.iter().cloned());
+                }
+                text.lines.push(Line::from(spans));
+            }
+
+            let h = text.lines.len() as u16;
+
+            // Record hit boxes for the reaction row, but only when the item is
+            // fully visible (matching `List`'s drop-the-overflow-item rule) and
+            // the message has a server id to toggle against.
+            if let Some(event_id) = &rm.event_id {
+                if !rm.reactions.is_empty() && cum.saturating_add(h) <= list_area.height {
+                    let row_y = list_area.bottom().saturating_sub(1).saturating_sub(cum);
+                    let mut pill_x = list_area.x.saturating_add(indent_width);
+                    for (i, pill) in rm.reactions.iter().enumerate() {
+                        if i > 0 {
+                            pill_x = pill_x.saturating_add(1);
+                        }
+                        if pill_x < list_area.right() {
+                            let width = pill.width.min(list_area.right() - pill_x);
+                            reaction_hits.push((
+                                Rect {
+                                    x: pill_x,
+                                    y: row_y,
+                                    width,
+                                    height: 1,
+                                },
+                                ReactionHit {
+                                    event_id: event_id.clone(),
+                                    key: pill.key.clone(),
+                                },
+                            ));
+                        }
+                        pill_x = pill_x.saturating_add(pill.width);
+                    }
+                }
+            }
+
+            cum = cum.saturating_add(h);
+            messages.push(ListItem::new(text));
         }
 
-        let title = self
-            .render_buffer_title(lua, backend, nickname, buffer.label(&buffer_id.target))
-            .unwrap_or_default();
-
         let list = List::new(messages)
-            .block(Block::default().title(title).borders(Borders::NONE))
+            .block(block)
             .direction(ListDirection::BottomToTop);
 
         f.render_widget(list, rect);
+
+        reaction_hits
     }
 
     /// Renders the "new messages" separator line. The appearance is driven by
@@ -358,13 +464,10 @@ impl Renderer {
         width: u16,
     ) -> Line<'_> {
         let fallback = date.format("─── %-d %B %Y ───").to_string();
-        match date_time_to_table(lua, date)
-            .ok()
-            .and_then(|dt| {
-                self.format_spans(lua, "render_date_separator", (dt, width as usize))
-                    .ok()
-            })
-        {
+        match date_time_to_table(lua, date).ok().and_then(|dt| {
+            self.format_spans(lua, "render_date_separator", (dt, width as usize))
+                .ok()
+        }) {
             Some(spans) if !spans.is_empty() => Line::from(spans),
             _ => Line::from(Span::styled(fallback, Style::default().fg(Color::DarkGray))),
         }
@@ -377,6 +480,7 @@ impl Renderer {
         target: &TargetId,
         target_name: &str,
         message: &StoredMessage,
+        hovered_key: Option<&str>,
     ) -> Option<RenderedMessage<'_>> {
         let event = to_lua_event(lua, message, backend, target, target_name).ok()?;
 
@@ -400,10 +504,55 @@ impl Renderer {
             return None;
         }
 
+        let reactions = self.render_reaction_pills(lua, &event, hovered_key);
+
         Some(RenderedMessage {
             time: time_spans.into_boxed_slice(),
             message: Box::new(Line::from(message_spans)),
+            event_id: message.event_id().cloned(),
+            reactions,
         })
+    }
+
+    /// Calls the theme's `render_reactions` formatter and converts each returned
+    /// pill (`{ key, spans }`) into a measured [`ReactionPill`]. Pills with zero
+    /// width are dropped so they never produce an unclickable hit box.
+    fn render_reaction_pills(
+        &self,
+        lua: &mlua::Lua,
+        event: &mlua::Table,
+        hovered_key: Option<&str>,
+    ) -> Vec<ReactionPill<'_>> {
+        let value =
+            match crate::config::call_formatter(lua, "render_reactions", (event, hovered_key)) {
+                Some(Ok(value)) => value,
+                _ => return vec![],
+            };
+
+        let mlua::Value::Table(list) = value else {
+            return vec![];
+        };
+
+        let mut pills = vec![];
+        for entry in list.sequence_values::<mlua::Value>() {
+            let Ok(mlua::Value::Table(pill)) = entry else {
+                continue;
+            };
+            let Ok(key) = pill.get::<String>("key") else {
+                continue;
+            };
+            let spans = pill
+                .get::<mlua::Value>("spans")
+                .ok()
+                .and_then(|spans| self.lua_value_to_spans(lua, spans).ok())
+                .unwrap_or_default();
+            let width: u16 = spans.iter().map(|s| s.width()).sum::<usize>() as u16;
+            if width == 0 {
+                continue;
+            }
+            pills.push(ReactionPill { key, spans, width });
+        }
+        pills
     }
 
     /// Builds the `TircBufferTab` table for one buffer, the shape passed to the
@@ -842,7 +991,7 @@ impl Renderer {
 
         view.viewport_height = msg_rect.height;
 
-        self.render_messages(f, state, view, lua, msg_rect);
+        let reaction_hits = self.render_messages(f, state, view, lua, msg_rect);
 
         // Compute horizontal scroll so the focused tab stays visible.
         let focused_index = view
@@ -877,6 +1026,7 @@ impl Renderer {
             userlist_rect,
             userlist_first_member: 0,
             split_x,
+            reactions: reaction_hits,
         };
 
         // Highlight the app-level selection by reversing the covered cells of the
@@ -1272,14 +1422,115 @@ mod tests {
         Ok(())
     }
 
+    /// The reaction hit boxes must mirror the bottom-to-top `List` placement:
+    /// each message's reaction row lands on that message's last drawn line, and
+    /// `cum` accumulation across items keeps the older message's row exactly two
+    /// rows above the newer one (each message here is body + reaction = 2 rows).
+    #[test]
+    fn reaction_hit_boxes_track_bottom_to_top_layout() -> anyhow::Result<(), anyhow::Error> {
+        use crate::backends::BackendInfo;
+        use crate::core::{
+            BackendId, ChatEvent, EventId, MessageBody, MsgKind, Protocol, TargetId, UserRef,
+        };
+        use crate::ui::{State, ViewState};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default'):setup({})")
+            .exec()?;
+
+        let backend = BackendId(0);
+        let mut state = State::new();
+        state.register_backend(BackendInfo {
+            id: backend,
+            protocol: Protocol::Irc,
+            name: "irc.example.com".to_string(),
+        });
+        state.set_nickname(backend, "me".to_string());
+
+        // Two confirmed messages, oldest first, each with one reaction.
+        for event_id in ["$1", "$2"] {
+            state.apply(
+                backend,
+                ChatEvent::Message {
+                    target: TargetId::from("#chan"),
+                    id: Some(EventId(event_id.to_string())),
+                    sender: UserRef::new("alice"),
+                    body: MessageBody::plain("hi"),
+                    kind: MsgKind::Text,
+                    echo_of: None,
+                    time: None,
+                },
+            );
+            state.apply(
+                backend,
+                ChatEvent::Reaction {
+                    target: TargetId::from("#chan"),
+                    id: EventId(event_id.to_string()),
+                    sender: UserRef::new("bob"),
+                    key: "👍".to_string(),
+                    add: true,
+                },
+            );
+        }
+
+        let mut view = ViewState::new();
+        view.focus(BufferId::new(backend, "#chan"));
+
+        let mut renderer = Renderer::new();
+        let mut terminal = Terminal::new(TestBackend::new(40, 12))?;
+        terminal.draw(|f| renderer.render(f, &state, &mut view, &lua, &Input::default()))?;
+
+        let hits = &view.layout.reactions;
+        assert_eq!(hits.len(), 2, "one pill per reacted message");
+
+        let bottom = view.layout.message_rect.bottom();
+        // Newest message ($2) is anchored at the bottom; its reaction row is the
+        // bottom-most row. The older message ($1) sits above by its own 2-row
+        // height, so its reaction row is two rows higher.
+        let y_of = |id: &str| {
+            hits.iter()
+                .find(|(_, hit)| hit.event_id == EventId(id.to_string()))
+                .map(|(rect, _)| rect.y)
+        };
+        assert_eq!(
+            y_of("$2"),
+            Some(bottom - 1),
+            "newest reaction on bottom row"
+        );
+        assert_eq!(y_of("$1"), Some(bottom - 3), "older reaction two rows up");
+
+        // Every recorded hit round-trips through `reaction_at`.
+        for (rect, hit) in hits {
+            assert!(rect.width > 0, "pill has a measurable width");
+            assert!(
+                rect.x >= view.layout.message_rect.x,
+                "pill starts within the message area"
+            );
+            assert_eq!(
+                view.layout.reaction_at(rect.x, rect.y),
+                Some(hit),
+                "reaction_at resolves the pill it recorded"
+            );
+        }
+        Ok(())
+    }
+
     // --- buffer_bar_scroll unit tests ---
 
     #[test]
     fn bar_scroll_no_overflow_returns_zero() {
         // All tabs fit: no scrolling needed regardless of focused index.
         let widths = [10u16, 10, 10];
-        assert_eq!(buffer_bar_scroll(&widths, Some(2), 40, 5, BarScrollMode::Follow), 0);
-        assert_eq!(buffer_bar_scroll(&widths, Some(2), 40, 5, BarScrollMode::Center), 0);
+        assert_eq!(
+            buffer_bar_scroll(&widths, Some(2), 40, 5, BarScrollMode::Follow),
+            0
+        );
+        assert_eq!(
+            buffer_bar_scroll(&widths, Some(2), 40, 5, BarScrollMode::Center),
+            0
+        );
     }
 
     #[test]
@@ -1360,7 +1611,9 @@ mod tests {
         // Tab 1 [10..20): rel_start=0, rel_end=min(10,15)=10 → box (x=0, w=10).
         // Tab 2 [20..30): rel_start=10, rel_end=min(20,15)=15 → box (x=10, w=5).
         use crate::backends::BackendInfo;
-        use crate::core::{BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef};
+        use crate::core::{
+            BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef,
+        };
         use crate::ui::{State, ViewState};
 
         let lua = mlua::Lua::new();
@@ -1398,7 +1651,12 @@ mod tests {
         renderer.update_render_context(&lua, &view, &state)?;
 
         let (_, _, widths, _) = renderer.build_buffer_bar(&state, &lua);
-        let bar_rect = Rect { x: 0, y: 0, width: 80, height: 1 };
+        let bar_rect = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 1,
+        };
         let total: u16 = widths.iter().sum();
 
         // Scroll to show the last tab.

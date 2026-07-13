@@ -149,8 +149,11 @@ pub fn to_lua_event(
 
     if !message.reactions.is_empty() {
         let reactions = lua.create_table()?;
-        for (key, count) in &message.reactions {
-            reactions.set(key.as_str(), *count)?;
+        for (key, reaction) in &message.reactions {
+            let entry = lua.create_table()?;
+            entry.set("count", reaction.count)?;
+            entry.set("mine", reaction.mine)?;
+            reactions.set(key.as_str(), entry)?;
         }
         table.set("reactions", reactions)?;
     }

@@ -389,6 +389,8 @@ pub enum Command {
         target: TargetId,
         id: EventId,
         key: String,
+        /// `true` to add the reaction, `false` to remove the local user's own.
+        add: bool,
     },
     Redact {
         target: TargetId,

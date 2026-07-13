@@ -36,6 +36,7 @@ use matrix_sdk::encryption::verification::{
 use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::ruma::events::key::verification::request::ToDeviceKeyVerificationRequestEvent;
 use matrix_sdk::ruma::events::reaction::ReactionEventContent;
+use matrix_sdk::ruma::events::relation::Annotation;
 use matrix_sdk::ruma::events::room::encrypted::{
     OriginalSyncRoomEncryptedEvent, SyncRoomEncryptedEvent,
 };
@@ -179,11 +180,13 @@ impl ChatBackend for MatrixBackend {
 
         let known_topics = Arc::new(Mutex::new(known_topics));
         let verifications = Verifications::default();
+        let reactions = ReactionIndex::default();
         register_handlers(
             &client,
             id,
             events.clone(),
             verifications.clone(),
+            reactions.clone(),
             known_topics,
             known_topics_path,
         );
@@ -239,7 +242,7 @@ impl ChatBackend for MatrixBackend {
         }
 
         while let Some(command) = commands.recv().await {
-            apply_command(&client, id, &events, &verifications, command).await;
+            apply_command(&client, id, &events, &verifications, &reactions, command).await;
         }
 
         sync.abort();
@@ -263,12 +266,63 @@ fn server_ts(
         .and_then(chrono::DateTime::from_timestamp_millis)
 }
 
+/// Tracks reaction events so a reaction redaction can be resolved back to the
+/// message and key it targeted, and so the local user's own reaction can be
+/// redacted when toggled off. Matrix models "unreact" as redacting the reaction
+/// event, which requires knowing that event's id.
+#[derive(Clone, Default)]
+struct ReactionIndex {
+    inner: Arc<Mutex<ReactionIndexState>>,
+}
+
+#[derive(Default)]
+struct ReactionIndexState {
+    /// reaction event id -> (target message id, key).
+    by_event: HashMap<String, (String, String)>,
+    /// (target message id, key) -> the local user's own reaction event id.
+    mine: HashMap<(String, String), String>,
+}
+
+impl ReactionIndex {
+    async fn record(&self, reaction_event: &str, target_id: &str, key: &str, mine: bool) {
+        let mut state = self.inner.lock().await;
+        state.by_event.insert(
+            reaction_event.to_string(),
+            (target_id.to_string(), key.to_string()),
+        );
+        if mine {
+            state.mine.insert(
+                (target_id.to_string(), key.to_string()),
+                reaction_event.to_string(),
+            );
+        }
+    }
+
+    /// Resolves a redacted event id to the `(target, key)` it reacted to and
+    /// forgets it. Returns `None` when the redaction was not for a tracked
+    /// reaction (e.g. a normal message deletion).
+    async fn resolve_redaction(&self, reaction_event: &str) -> Option<(String, String)> {
+        let mut state = self.inner.lock().await;
+        let (target, key) = state.by_event.remove(reaction_event)?;
+        state.mine.remove(&(target.clone(), key.clone()));
+        Some((target, key))
+    }
+
+    /// Removes and returns the local user's own reaction event id for a
+    /// `(target, key)`, used to redact it when toggling the reaction off.
+    async fn take_mine(&self, target_id: &str, key: &str) -> Option<String> {
+        let mut state = self.inner.lock().await;
+        state.mine.remove(&(target_id.to_string(), key.to_string()))
+    }
+}
+
 /// Registers sync handlers translating Matrix events into [`ChatEvent`]s.
 fn register_handlers(
     client: &Client,
     id: BackendId,
     events: EventSender,
     verifications: Verifications,
+    reactions: ReactionIndex,
     known_topics: Arc<Mutex<HashMap<String, String>>>,
     known_topics_path: PathBuf,
 ) {
@@ -359,8 +413,10 @@ fn register_handlers(
     });
 
     let redaction_events = events.clone();
+    let redaction_index = reactions.clone();
     client.add_event_handler(move |event: SyncRoomRedactionEvent, room: Room| {
         let events = redaction_events.clone();
+        let reactions = redaction_index.clone();
         async move {
             if let SyncRoomRedactionEvent::Original(event) = event {
                 // `redacts` is at the event level in old room versions, inside
@@ -370,34 +426,61 @@ fn register_handlers(
                     .as_deref()
                     .or(event.content.redacts.as_deref());
                 if let Some(redacted_id) = redacted_id {
-                    emit(
-                        &events,
-                        id,
-                        ChatEvent::Redaction {
-                            target: room_target(&room),
-                            id: EventId(redacted_id.to_string()),
-                            by: Some(sender_ref(&room, &event.sender).await),
-                        },
-                    );
+                    let mine = room.own_user_id().as_str() == event.sender.as_str();
+                    // A redaction of a tracked reaction removes it; anything else
+                    // is a normal message deletion.
+                    if let Some((target, key)) =
+                        reactions.resolve_redaction(redacted_id.as_str()).await
+                    {
+                        emit(
+                            &events,
+                            id,
+                            ChatEvent::Reaction {
+                                target: room_target(&room),
+                                id: EventId(target),
+                                sender: own_or_sender_ref(&room, &event.sender, mine).await,
+                                key,
+                                add: false,
+                            },
+                        );
+                    } else {
+                        emit(
+                            &events,
+                            id,
+                            ChatEvent::Redaction {
+                                target: room_target(&room),
+                                id: EventId(redacted_id.to_string()),
+                                by: Some(sender_ref(&room, &event.sender).await),
+                            },
+                        );
+                    }
                 }
             }
         }
     });
 
     let reaction_events = events.clone();
+    let reaction_index = reactions.clone();
     client.add_event_handler(
         move |event: SyncMessageLikeEvent<ReactionEventContent>, room: Room| {
             let events = reaction_events.clone();
+            let reactions = reaction_index.clone();
             async move {
                 if let SyncMessageLikeEvent::Original(event) = event {
+                    let target_id = event.content.relates_to.event_id.to_string();
+                    let key = event.content.relates_to.key.clone();
+                    let mine = room.own_user_id().as_str() == event.sender.as_str();
+                    reactions
+                        .record(event.event_id.as_str(), &target_id, &key, mine)
+                        .await;
                     emit(
                         &events,
                         id,
                         ChatEvent::Reaction {
                             target: room_target(&room),
-                            id: EventId(event.content.relates_to.event_id.to_string()),
-                            sender: sender_ref(&room, &event.sender).await,
-                            key: event.content.relates_to.key,
+                            id: EventId(target_id),
+                            sender: own_or_sender_ref(&room, &event.sender, mine).await,
+                            key,
                             add: true,
                         },
                     );
@@ -459,6 +542,7 @@ async fn apply_command(
     id: BackendId,
     events: &EventSender,
     verifications: &Verifications,
+    reactions: &ReactionIndex,
     command: Command,
 ) {
     match command {
@@ -518,8 +602,57 @@ async fn apply_command(
         }
         Command::ListChannels => list_public_rooms(client, id, events).await,
         Command::Verify(action) => apply_verify(client, id, events, verifications, action).await,
-        // Reactions/redactions and IRC-only commands are not handled yet.
+        Command::React {
+            target,
+            id: event_id,
+            key,
+            add,
+        } => {
+            let Some(room) = room_by_target(client, &target) else {
+                return;
+            };
+            if add {
+                let target_event = match matrix_sdk::ruma::EventId::parse(&event_id.0) {
+                    Ok(event) => event,
+                    Err(err) => {
+                        log::warn!("React: invalid event id {}: {err}", event_id.0);
+                        return;
+                    }
+                };
+                let content = ReactionEventContent::new(Annotation::new(target_event, key.clone()));
+                match room.send(content).await {
+                    Ok(resp) => {
+                        reactions
+                            .record(resp.response.event_id.as_str(), &event_id.0, &key, true)
+                            .await;
+                    }
+                    Err(err) => log::warn!("React add failed: {err}"),
+                }
+            } else if let Some(reaction_event) = reactions.take_mine(&event_id.0, &key).await {
+                match matrix_sdk::ruma::EventId::parse(&reaction_event) {
+                    Ok(reaction_event) => {
+                        let _ = room.redact(&reaction_event, None, None).await;
+                    }
+                    Err(err) => log::warn!("React remove: invalid reaction id: {err}"),
+                }
+            } else {
+                log::warn!("React remove: no known reaction to redact");
+            }
+        }
+        // IRC-only commands are not handled here.
         _ => {}
+    }
+}
+
+/// Like [`sender_ref`], but for the local user's own events returns a `UserRef`
+/// keyed by the bare localpart so it matches the registered nickname (which is
+/// the localpart, not the full MXID). This lets `State` mark the reaction as
+/// `mine`.
+async fn own_or_sender_ref(room: &Room, user: &UserId, mine: bool) -> UserRef {
+    if mine {
+        UserRef::new(room.own_user_id().localpart())
+    } else {
+        sender_ref(room, user).await
     }
 }
 

@@ -55,6 +55,7 @@ local Class = require('tirc.class')
 ---@field userlist_title? fun(self: TircTheme, buffer: string): TircSpans
 ---@field message_time? fun(self: TircTheme, date_time: TircDateTime, event: TircEvent): TircSpans
 ---@field message_text? fun(self: TircTheme, event: TircEvent, nickname: string): TircSpans?
+---@field render_reactions? fun(self: TircTheme, event: TircEvent, hovered_key: string|nil): TircReactionPill[]
 ---@field user? fun(self: TircTheme, user: TircUser): TircSpans
 ---@field render_buffer_tab? fun(self: TircTheme, buffer: TircBufferTab): TircSpans
 ---@field render_buffer_bar? fun(self: TircTheme, buffers: TircBufferTab[]): TircBufferBar | TircSpans
@@ -106,6 +107,9 @@ function Theme:make_styles(overrides)
     tab_unread = theme.style { fg = 'white', bg = 'darkgray' },
     tab_mention = theme.style { fg = 'red', bg = 'darkgray' },
     unread_separator = theme.style { fg = 'darkgray' },
+    reaction = theme.style { fg = 'gray', bg = 'darkgray' },
+    reaction_mine = theme.style { fg = 'white', bg = 'blue' },
+    reaction_hover = theme.style { fg = 'white', bg = 'gray' },
   }
 
   if overrides then
@@ -389,7 +393,8 @@ function Theme:message_time(dt, _event)
   }
 end
 
---- Appends `(edited)` and reaction counts to a spans table in place.
+--- Appends `(edited)` to a spans table in place. Reactions are no longer
+--- appended here; they render on their own row via `render_reactions`.
 ---@param spans table
 ---@param event TircEvent
 function Theme:append_message_meta(spans, event)
@@ -397,20 +402,45 @@ function Theme:append_message_meta(spans, event)
   if event.edited then
     spans[#spans + 1] = { ' (edited)', s.darkgray }
   end
-  if event.reactions then
-    local keys = {}
-    for key in pairs(event.reactions) do
-      keys[#keys + 1] = key
-    end
-    table.sort(keys)
-    for _, key in ipairs(keys) do
-      local count = event.reactions[key]
-      if count > 0 then
-        spans[#spans + 1] =
-          { ' [' .. key .. ' ' .. tostring(count) .. ']', s.darkgray }
+end
+
+--- Builds the clickable reaction pills for a message, one entry per key sorted
+--- alphabetically. Each pill is `{ key = <emoji>, spans = TircSpans }`; the
+--- renderer lays them out on a dedicated row below the message and uses `key`
+--- to map clicks back to the reaction. `hovered_key` is the key of the pill
+--- under the mouse for this message (or `nil`), so it can be highlighted.
+---@param event TircEvent
+---@param hovered_key string|nil
+---@return TircReactionPill[]
+function Theme:render_reactions(event, hovered_key)
+  if not event.reactions then
+    return {}
+  end
+  local s = self.styles
+  local keys = {}
+  for key in pairs(event.reactions) do
+    keys[#keys + 1] = key
+  end
+  table.sort(keys)
+  local pills = {}
+  for _, key in ipairs(keys) do
+    local reaction = event.reactions[key]
+    if reaction.count > 0 then
+      local style = s.reaction
+      if key == hovered_key then
+        style = s.reaction_hover
+      elseif reaction.mine then
+        style = s.reaction_mine
       end
+      pills[#pills + 1] = {
+        key = key,
+        spans = {
+          { ' ' .. key .. ' ' .. tostring(reaction.count) .. ' ', style },
+        },
+      }
     end
   end
+  return pills
 end
 
 ---@param event TircEvent

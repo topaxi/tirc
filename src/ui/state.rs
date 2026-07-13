@@ -38,8 +38,17 @@ pub struct StoredMessage {
     pub redacted: bool,
     /// True when the message body was replaced by an incoming edit event.
     pub edited: bool,
-    /// Reaction key -> count. Populated by Matrix; unused by IRC.
-    pub reactions: IndexMap<String, u32>,
+    /// Reaction key -> aggregated state. Populated by Matrix/Mattermost; unused
+    /// by IRC.
+    pub reactions: IndexMap<String, ReactionState>,
+}
+
+/// Aggregated state for one reaction key on a message: how many people reacted
+/// and whether the local user is one of them (drives add/remove on click).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReactionState {
+    pub count: u32,
+    pub mine: bool,
 }
 
 impl StoredMessage {
@@ -80,6 +89,15 @@ impl StoredMessage {
 
     fn has_event_id(&self, id: &EventId) -> bool {
         matches!(&self.event, ChatEvent::Message { id: Some(existing), .. } if existing == id)
+    }
+
+    /// The server event id of this message, if it is a `Message` that has been
+    /// confirmed by the server. Used to pair reaction hits back to a message.
+    pub fn event_id(&self) -> Option<&EventId> {
+        match &self.event {
+            ChatEvent::Message { id: Some(id), .. } => Some(id),
+            _ => None,
+        }
     }
 }
 
@@ -326,10 +344,15 @@ impl State {
             ChatEvent::Reaction {
                 target,
                 id,
+                sender,
                 key,
                 add,
-                ..
-            } => self.apply_reaction(backend, target, id, key, add),
+            } => {
+                // Resolve `mine` before the mutable buffer borrow in
+                // `apply_reaction` so the immutable identity borrow is released.
+                let mine = self.nickname(backend) == sender.id;
+                self.apply_reaction(backend, target, id, key, add, mine);
+            }
             ChatEvent::Membership { .. } => self.apply_membership(backend, event),
             ChatEvent::Topic {
                 ref target,
@@ -486,14 +509,21 @@ impl State {
         id: EventId,
         key: String,
         add: bool,
+        mine: bool,
     ) {
         let buffer = self.buffer_mut(backend, target);
         if let Some(slot) = buffer.messages.iter_mut().find(|m| m.has_event_id(&id)) {
-            let count = slot.reactions.entry(key).or_insert(0);
+            let reaction = slot.reactions.entry(key).or_default();
             if add {
-                *count += 1;
-            } else if *count > 0 {
-                *count -= 1;
+                reaction.count += 1;
+                if mine {
+                    reaction.mine = true;
+                }
+            } else {
+                reaction.count = reaction.count.saturating_sub(1);
+                if mine {
+                    reaction.mine = false;
+                }
             }
         }
     }
@@ -610,6 +640,17 @@ pub struct LayoutMap {
     /// Column of the sidebar split boundary, or `None` when there is no sidebar.
     /// Reserved for the resizable-sidebar drag handling in a later commit.
     pub split_x: Option<u16>,
+    /// Per-pill hit boxes for the reactions drawn this frame, paired with the
+    /// message and key they toggle. Only the focused buffer's reactions appear.
+    pub reactions: Vec<(Rect, ReactionHit)>,
+}
+
+/// Identifies one reaction pill: the message it belongs to and the emoji key.
+/// The backend/target are implied by the focused buffer at hit-test time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReactionHit {
+    pub event_id: EventId,
+    pub key: String,
 }
 
 impl LayoutMap {
@@ -636,6 +677,14 @@ impl LayoutMap {
             return None;
         }
         Some(self.userlist_first_member + (y - first_member_row) as usize)
+    }
+
+    /// Returns the reaction pill whose hit box contains `(x, y)`, if any. Used to
+    /// turn a hover or left-click over a reaction into an add/remove toggle.
+    pub fn reaction_at(&self, x: u16, y: u16) -> Option<&ReactionHit> {
+        self.reactions
+            .iter()
+            .find_map(|(rect, hit)| rect_contains(rect, x, y).then_some(hit))
     }
 }
 
@@ -864,6 +913,9 @@ pub struct ViewState {
     /// selected. Set on a left drag in the message area, highlighted by the
     /// renderer, and read by the yank keybind to copy text to the clipboard.
     pub selection: Option<Selection>,
+    /// The reaction pill currently under the mouse cursor, or `None`. Updated on
+    /// mouse-move; read by the renderer to highlight that pill.
+    pub hovered_reaction: Option<ReactionHit>,
 }
 
 /// Minimum sidebar width in columns. Narrow enough for short nicks while still
@@ -1885,6 +1937,13 @@ mod tests {
 
         let buf = buffer(&state, "#tirc");
         assert_eq!(buf.messages.len(), 1, "reactions do not add new messages");
-        assert_eq!(buf.messages[0].reactions.get("👍"), Some(&2));
+        assert_eq!(
+            buf.messages[0].reactions.get("👍").map(|r| r.count),
+            Some(2)
+        );
+        assert!(
+            !buf.messages[0].reactions["👍"].mine,
+            "reactions from others are not marked mine"
+        );
     }
 }

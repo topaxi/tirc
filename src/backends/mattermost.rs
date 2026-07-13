@@ -197,9 +197,10 @@ async fn authenticate(config: &MattermostBackendConfig) -> anyhow::Result<MmSess
         });
     }
 
-    let login_id = config.login_id.as_deref().ok_or_else(|| {
-        anyhow::anyhow!("Mattermost: need `token` or `user_id` + `password`")
-    })?;
+    let login_id = config
+        .login_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Mattermost: need `token` or `user_id` + `password`"))?;
     let password = config
         .password
         .as_deref()
@@ -279,10 +280,7 @@ fn parse_channel(v: &Value) -> Option<MmChannel> {
     })
 }
 
-async fn get_joined_channels(
-    session: &MmSession,
-    team_id: &str,
-) -> anyhow::Result<Vec<MmChannel>> {
+async fn get_joined_channels(session: &MmSession, team_id: &str) -> anyhow::Result<Vec<MmChannel>> {
     let list = session
         .get(&format!("users/me/teams/{team_id}/channels"))
         .await?;
@@ -329,9 +327,8 @@ fn send_backend(id: BackendId, events: &EventSender, event: BackendEvent) {
 // ---- Connection ----
 
 /// WS stream/sink aliases.
-type WsStream = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn connect_once(
     id: BackendId,
@@ -346,7 +343,13 @@ async fn connect_once(
     let me = session.get("users/me").await?;
     let username = me["username"].as_str().unwrap_or("unknown").to_string();
 
-    send_backend(id, events, BackendEvent::Ready { nickname: username.clone() });
+    send_backend(
+        id,
+        events,
+        BackendEvent::Ready {
+            nickname: username.clone(),
+        },
+    );
 
     let joined = get_joined_channels(&session, &team_id).await?;
     let mut channel_names: HashMap<String, String> = HashMap::new();
@@ -355,15 +358,23 @@ async fn connect_once(
         let display = channel_display_name(ch);
         channel_names.insert(ch.id.clone(), display.clone());
         let target = TargetId::from(ch.id.clone());
-        send_event(id, events, ChatEvent::BufferName {
-            target: target.clone(),
-            name: display,
-        });
+        send_event(
+            id,
+            events,
+            ChatEvent::BufferName {
+                target: target.clone(),
+                name: display,
+            },
+        );
         if !ch.header.is_empty() {
-            send_event(id, events, ChatEvent::BufferTopic {
-                target,
-                topic: ch.header.clone(),
-            });
+            send_event(
+                id,
+                events,
+                ChatEvent::BufferTopic {
+                    target,
+                    topic: ch.header.clone(),
+                },
+            );
         }
     }
 
@@ -378,10 +389,14 @@ async fn connect_once(
             Ok(ch) => {
                 let display = channel_display_name(&ch);
                 channel_names.insert(ch.id.clone(), display.clone());
-                send_event(id, events, ChatEvent::BufferName {
-                    target: TargetId::from(ch.id),
-                    name: display,
-                });
+                send_event(
+                    id,
+                    events,
+                    ChatEvent::BufferName {
+                        target: TargetId::from(ch.id),
+                        name: display,
+                    },
+                );
             }
             Err(err) => {
                 log::warn!("autojoin '{ch_name}' failed: {err}");
@@ -432,7 +447,14 @@ async fn connect_once(
             frame = stream.next() => {
                 match frame {
                     Some(Ok(WsMessage::Text(text))) => {
-                        if let Err(err) = handle_ws_frame(id, events, &mut channel_names, &text) {
+                        if let Err(err) = handle_ws_frame(
+                            id,
+                            events,
+                            &mut channel_names,
+                            &session.user_id,
+                            &username,
+                            &text,
+                        ) {
                             log::warn!("WS frame error: {err}");
                         }
                     }
@@ -494,6 +516,8 @@ fn handle_ws_frame(
     id: BackendId,
     events: &EventSender,
     channel_names: &mut HashMap<String, String>,
+    my_user_id: &str,
+    my_username: &str,
     text: &str,
 ) -> anyhow::Result<()> {
     let v: Value = serde_json::from_str(text)?;
@@ -525,11 +549,15 @@ fn handle_ws_frame(
 
             if event_type == "post_edited" {
                 if !post_id.is_empty() {
-                    send_event(id, events, ChatEvent::Edit {
-                        target,
-                        id: EventId(post_id),
-                        body: MessageBody::plain(message),
-                    });
+                    send_event(
+                        id,
+                        events,
+                        ChatEvent::Edit {
+                            target,
+                            id: EventId(post_id),
+                            body: MessageBody::plain(message),
+                        },
+                    );
                 }
                 return Ok(());
             }
@@ -551,24 +579,32 @@ fn handle_ws_frame(
                 Some(EventId(post_id))
             };
 
-            send_event(id, events, ChatEvent::Message {
-                target: target.clone(),
-                id: event_id,
-                sender: UserRef::new(sender_name),
-                body: MessageBody::plain(message),
-                kind: MsgKind::Text,
-                echo_of,
-                time,
-            });
+            send_event(
+                id,
+                events,
+                ChatEvent::Message {
+                    target: target.clone(),
+                    id: event_id,
+                    sender: UserRef::new(sender_name),
+                    body: MessageBody::plain(message),
+                    kind: MsgKind::Text,
+                    echo_of,
+                    time,
+                },
+            );
 
             // Surface channel name on first encounter.
             if !channel_names.contains_key(&channel_id) {
                 if let Some(display) = data["channel_display_name"].as_str() {
                     channel_names.insert(channel_id.clone(), display.to_string());
-                    send_event(id, events, ChatEvent::BufferName {
-                        target: TargetId::from(channel_id),
-                        name: display.to_string(),
-                    });
+                    send_event(
+                        id,
+                        events,
+                        ChatEvent::BufferName {
+                            target: TargetId::from(channel_id),
+                            name: display.to_string(),
+                        },
+                    );
                 }
             }
         }
@@ -579,11 +615,15 @@ fn handle_ws_frame(
             let post_id = post["id"].as_str().unwrap_or_default();
             let channel_id = post["channel_id"].as_str().unwrap_or_default();
             if !post_id.is_empty() && !channel_id.is_empty() {
-                send_event(id, events, ChatEvent::Redaction {
-                    target: TargetId::from(channel_id),
-                    id: EventId(post_id.to_string()),
-                    by: None,
-                });
+                send_event(
+                    id,
+                    events,
+                    ChatEvent::Redaction {
+                        target: TargetId::from(channel_id),
+                        id: EventId(post_id.to_string()),
+                        by: None,
+                    },
+                );
             }
         }
 
@@ -594,12 +634,16 @@ fn handle_ws_frame(
                 .to_string();
             let username = v["data"]["username"].as_str().unwrap_or_default();
             if !channel_id.is_empty() && !username.is_empty() {
-                send_event(id, events, ChatEvent::Membership {
-                    target: TargetId::from(channel_id),
-                    who: UserRef::new(username),
-                    change: MembershipChange::Join { realname: None },
-                    time: None,
-                });
+                send_event(
+                    id,
+                    events,
+                    ChatEvent::Membership {
+                        target: TargetId::from(channel_id),
+                        who: UserRef::new(username),
+                        change: MembershipChange::Join { realname: None },
+                        time: None,
+                    },
+                );
             }
         }
 
@@ -610,27 +654,73 @@ fn handle_ws_frame(
                 .to_string();
             let user_id = v["broadcast"]["user_id"].as_str().unwrap_or_default();
             if !channel_id.is_empty() && !user_id.is_empty() {
-                send_event(id, events, ChatEvent::Membership {
-                    target: TargetId::from(channel_id),
-                    who: UserRef::new(user_id),
-                    change: MembershipChange::Part { reason: None },
-                    time: None,
-                });
+                send_event(
+                    id,
+                    events,
+                    ChatEvent::Membership {
+                        target: TargetId::from(channel_id),
+                        who: UserRef::new(user_id),
+                        change: MembershipChange::Part { reason: None },
+                        time: None,
+                    },
+                );
             }
         }
 
         "channel_updated" => {
             let ch_str = v["data"]["channel"].as_str().unwrap_or("{}");
             let ch: Value = serde_json::from_str(ch_str)?;
-            if let (Some(ch_id), Some(display)) =
-                (ch["id"].as_str(), ch["display_name"].as_str())
-            {
+            if let (Some(ch_id), Some(display)) = (ch["id"].as_str(), ch["display_name"].as_str()) {
                 channel_names.insert(ch_id.to_string(), display.to_string());
-                send_event(id, events, ChatEvent::BufferName {
-                    target: TargetId::from(ch_id),
-                    name: display.to_string(),
-                });
+                send_event(
+                    id,
+                    events,
+                    ChatEvent::BufferName {
+                        target: TargetId::from(ch_id),
+                        name: display.to_string(),
+                    },
+                );
             }
+        }
+
+        "reaction_added" | "reaction_removed" => {
+            // `data.reaction` is a JSON-encoded string: { user_id, post_id,
+            // emoji_name, channel_id, ... }.
+            let reaction_str = v["data"]["reaction"].as_str().unwrap_or("{}");
+            let reaction: Value = serde_json::from_str(reaction_str)?;
+
+            let channel_id = reaction["channel_id"]
+                .as_str()
+                .or_else(|| v["broadcast"]["channel_id"].as_str())
+                .unwrap_or_default();
+            let post_id = reaction["post_id"].as_str().unwrap_or_default();
+            let emoji = reaction["emoji_name"].as_str().unwrap_or_default();
+            let user_id = reaction["user_id"].as_str().unwrap_or_default();
+
+            if channel_id.is_empty() || post_id.is_empty() || emoji.is_empty() {
+                return Ok(());
+            }
+
+            // Set the sender to our username for our own reactions so `State`'s
+            // `mine` detection (nickname == sender) fires; other users are keyed
+            // by their opaque id, which never matches our nickname.
+            let sender = if user_id == my_user_id {
+                UserRef::new(my_username)
+            } else {
+                UserRef::new(user_id)
+            };
+
+            send_event(
+                id,
+                events,
+                ChatEvent::Reaction {
+                    target: TargetId::from(channel_id),
+                    id: EventId(post_id.to_string()),
+                    sender,
+                    key: emoji.to_string(),
+                    add: event_type == "reaction_added",
+                },
+            );
         }
 
         "direct_added" => {
@@ -641,10 +731,14 @@ fn handle_ws_frame(
                         .unwrap_or(ch_id)
                         .to_string();
                     channel_names.insert(ch_id.to_string(), name.clone());
-                    send_event(id, events, ChatEvent::BufferName {
-                        target: TargetId::from(ch_id),
-                        name,
-                    });
+                    send_event(
+                        id,
+                        events,
+                        ChatEvent::BufferName {
+                            target: TargetId::from(ch_id),
+                            name,
+                        },
+                    );
                 }
             }
         }
@@ -682,15 +776,19 @@ async fn apply_command(
             };
 
             // Optimistic local echo: pending=true (echo_of is Some, no event id).
-            send_event(id, events, ChatEvent::Message {
-                target: target.clone(),
-                id: None,
-                sender: UserRef::new(my_username),
-                body: MessageBody::plain(&body),
-                kind,
-                echo_of: Some(txn),
-                time: None,
-            });
+            send_event(
+                id,
+                events,
+                ChatEvent::Message {
+                    target: target.clone(),
+                    id: None,
+                    sender: UserRef::new(my_username),
+                    body: MessageBody::plain(&body),
+                    kind,
+                    echo_of: Some(txn),
+                    time: None,
+                },
+            );
 
             session
                 .post(
@@ -713,19 +811,27 @@ async fn apply_command(
                 Ok(ch) => {
                     let display = channel_display_name(&ch);
                     channel_names.insert(ch.id.clone(), display.clone());
-                    send_event(id, events, ChatEvent::BufferName {
-                        target: TargetId::from(ch.id),
-                        name: display,
-                    });
+                    send_event(
+                        id,
+                        events,
+                        ChatEvent::BufferName {
+                            target: TargetId::from(ch.id),
+                            name: display,
+                        },
+                    );
                 }
                 Err(err) => {
-                    send_event(id, events, ChatEvent::ServerInfo {
-                        target: None,
-                        from: None,
-                        code: None,
-                        text: format!("Join failed: {err}"),
-                        raw: None,
-                    });
+                    send_event(
+                        id,
+                        events,
+                        ChatEvent::ServerInfo {
+                            target: None,
+                            from: None,
+                            code: None,
+                            text: format!("Join failed: {err}"),
+                            raw: None,
+                        },
+                    );
                 }
             }
         }
@@ -743,6 +849,37 @@ async fn apply_command(
                 .delete_req(&format!("posts/{}", event_id.0))
                 .await
                 .unwrap_or_else(|err| log::warn!("Redact failed: {err}"));
+        }
+
+        Command::React {
+            id: event_id,
+            key,
+            add,
+            ..
+        } => {
+            if add {
+                session
+                    .post(
+                        "reactions",
+                        &json!({
+                            "user_id": session.user_id,
+                            "post_id": event_id.0,
+                            "emoji_name": key,
+                        }),
+                    )
+                    .await
+                    .map(|_| ())
+                    .unwrap_or_else(|err| log::warn!("React add failed: {err}"));
+            } else {
+                let path = format!(
+                    "users/{}/posts/{}/reactions/{}",
+                    session.user_id, event_id.0, key
+                );
+                session
+                    .delete_req(&path)
+                    .await
+                    .unwrap_or_else(|err| log::warn!("React remove failed: {err}"));
+            }
         }
 
         // Unsupported commands are silently ignored.

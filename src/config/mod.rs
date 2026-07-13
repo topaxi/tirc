@@ -1009,7 +1009,8 @@ mod tests {
     }
 
     #[test]
-    fn theme_appends_reaction_counts_to_message() {
+    fn theme_renders_reaction_pills() {
+        use crate::ui::ReactionState;
         let lua = setup_theme();
 
         let mut message = stored(ChatEvent::Message {
@@ -1021,18 +1022,49 @@ mod tests {
             echo_of: None,
             time: None,
         });
-        message.reactions.insert("👍".to_string(), 2);
-        message.reactions.insert("❤️".to_string(), 1);
+        message.reactions.insert(
+            "👍".to_string(),
+            ReactionState {
+                count: 2,
+                mine: true,
+            },
+        );
+        message.reactions.insert(
+            "❤️".to_string(),
+            ReactionState {
+                count: 1,
+                mine: false,
+            },
+        );
 
-        let value = render_stored_message_text(&lua, message);
-        let text = collect_text(&value);
-        assert!(
-            text.contains("[👍 2]"),
-            "expected '[👍 2]' in rendered spans, got: {text:?}"
-        );
-        assert!(
-            text.contains("[❤️ 1]"),
-            "expected '[❤️ 1]' in rendered spans, got: {text:?}"
-        );
+        let table = to_lua_event(
+            &lua,
+            &message,
+            &backend(),
+            &TargetId::from("#tirc"),
+            "#tirc",
+        )
+        .expect("event table");
+        let value = call_formatter(&lua, "render_reactions", (table, mlua::Value::Nil))
+            .expect("render_reactions formatter registered")
+            .expect("render_reactions formatter callback");
+
+        // The formatter returns a list of `{ key, spans }` pills, sorted by key.
+        let pills = match &value {
+            mlua::Value::Table(t) => t,
+            _ => panic!("render_reactions did not return a table"),
+        };
+        let mut text = String::new();
+        for i in 1.. {
+            match pills.get::<mlua::Value>(i) {
+                Ok(mlua::Value::Table(pill)) => {
+                    let spans: mlua::Value = pill.get("spans").expect("pill has spans");
+                    text.push_str(&collect_text(&spans));
+                }
+                _ => break,
+            }
+        }
+        assert!(text.contains("👍 2"), "expected '👍 2' pill, got: {text:?}");
+        assert!(text.contains("❤️ 1"), "expected '❤️ 1' pill, got: {text:?}");
     }
 }

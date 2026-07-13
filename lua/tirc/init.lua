@@ -62,7 +62,17 @@
 ---@field code? string protocol classifier for 'server_info' (e.g. 'RPL_WELCOME', 'MODE')
 ---@field text? string set for 'server_info'
 ---@field raw? string wire representation escape hatch
----@field reactions? table<string, integer>
+---@field reactions? table<string, TircReaction> emoji key -> aggregated state
+
+--- Aggregated state for one reaction key on a message.
+---@class TircReaction
+---@field count integer number of people who reacted with this key
+---@field mine boolean whether the local user is one of them
+
+--- One clickable reaction pill returned by the `render_reactions` formatter.
+---@class TircReactionPill
+---@field key string emoji key this pill toggles
+---@field spans TircSpans styled content drawn for the pill
 
 --- A buffer member for the `user` formatter.
 ---@class TircUser
@@ -85,6 +95,7 @@
 ---@field userlist_title? fun(buffer: string): TircSpans
 ---@field message_time? fun(date_time: TircDateTime, event: TircEvent): TircSpans
 ---@field message_text? fun(event: TircEvent, nickname: string): TircSpans?
+---@field render_reactions? fun(event: TircEvent, hovered_key: string|nil): TircReactionPill[]
 ---@field user? fun(user: TircUser): TircSpans
 ---@field render_buffer_tab? fun(buffer: TircBufferTab): TircSpans
 ---@field render_buffer_bar? fun(buffers: TircBufferTab[]): TircBufferBar | TircSpans

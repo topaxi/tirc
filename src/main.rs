@@ -88,9 +88,7 @@ fn build_backend(id: BackendId, server: &ServerConfig) -> anyhow::Result<Box<dyn
                 .clone()
                 .with_context(|| format!("Mattermost server '{url}' is missing `team`"))?;
 
-            if server.token.is_none()
-                && (server.user_id.is_none() || server.password.is_none())
-            {
+            if server.token.is_none() && (server.user_id.is_none() || server.password.is_none()) {
                 anyhow::bail!(
                     "Mattermost server '{url}' needs either `token` or both `user_id` and `password`"
                 );

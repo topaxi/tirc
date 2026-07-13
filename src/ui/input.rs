@@ -16,9 +16,9 @@ use crate::core::{
     BackendEvent, BackendId, BackendMessage, ChatEvent, Command, MsgKind, TargetId, TxnAllocator,
     VerifyAction,
 };
-use crate::ui::ConnectionStatus;
 use crate::tui::lua::{create_lua_sender, to_lua_event};
 use crate::tui::Tui;
+use crate::ui::ConnectionStatus;
 
 use super::state::StoredMessage;
 use super::{MenuAction, MenuItem, MenuTarget, Mode, Selection, State, ViewState};
@@ -257,6 +257,7 @@ impl<'lua> InputHandler<'lua> {
                 // through to tab/user-row handling. `had_selection` keeps the
                 // frame repainting when only the cleared highlight changed.
                 self.try_start_split_drag(view, event.column, event.row)
+                    || self.try_reaction_click(state, view, event.column, event.row)
                     || self.try_start_selection(view, event.column, event.row)
                     || self.handle_left_click(state, view, event.column, event.row)
                     || had_selection
@@ -278,8 +279,58 @@ impl<'lua> InputHandler<'lua> {
                 self.selecting = false;
                 was_selecting
             }
+            MouseEventKind::Moved => self.handle_mouse_moved(view, event.column, event.row),
             _ => false,
         }
+    }
+
+    /// Tracks the reaction pill under the cursor for hover highlighting. Returns
+    /// `true` (triggering a repaint) only when the hovered pill changes - moves
+    /// within the same pill, or over empty space, do not repaint.
+    fn handle_mouse_moved(&mut self, view: &mut ViewState, x: u16, y: u16) -> bool {
+        let hit = view.layout.reaction_at(x, y).cloned();
+        if hit != view.hovered_reaction {
+            view.hovered_reaction = hit;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Handles a left-click on a reaction pill: toggles the local user's reaction
+    /// (remove if already `mine`, otherwise add) by sending [`Command::React`] to
+    /// the focused buffer's backend. Returns whether the click hit a pill (and so
+    /// must not fall through to text selection).
+    fn try_reaction_click(&mut self, state: &State, view: &ViewState, x: u16, y: u16) -> bool {
+        let Some(hit) = view.layout.reaction_at(x, y).cloned() else {
+            return false;
+        };
+        let Some(focused) = view.focused.clone() else {
+            return false;
+        };
+        let mine = state
+            .buffers
+            .get(&focused)
+            .and_then(|buffer| {
+                buffer
+                    .messages
+                    .iter()
+                    .find(|m| m.event_id() == Some(&hit.event_id))
+            })
+            .and_then(|message| message.reactions.get(&hit.key))
+            .map(|reaction| reaction.mine)
+            .unwrap_or(false);
+
+        self.send_to(
+            Some(focused.backend),
+            Command::React {
+                target: focused.target,
+                id: hit.event_id,
+                key: hit.key,
+                add: !mine,
+            },
+        );
+        true
     }
 
     /// Begins a message-area text selection when a left-press lands inside the
