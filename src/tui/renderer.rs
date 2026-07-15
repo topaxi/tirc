@@ -176,7 +176,19 @@ pub struct Renderer {
     /// suppressed while unfocused. Assumed focused until a focus event says
     /// otherwise.
     focused: bool,
+    /// Whether quick reactions are offered on the selected message. When `false`
+    /// the selected-message highlight and pill bar are not drawn. Set from config.
+    quick_reactions_enabled: bool,
+    /// Ordered emoji offered as quick reactions, bound to the number keys in
+    /// select mode and drawn as the pill bar. Set from config.
+    quick_reaction_emojis: Vec<String>,
 }
+
+/// What [`Renderer::render_messages`] hands back to `render`: the reaction-pill
+/// hit boxes (screen `Rect` paired with the reaction it toggles), the inline
+/// images to draw over the list, and the per-message row spans (paired with the
+/// message's index-from-newest) for click-to-select.
+type MessagesRender = (Vec<(Rect, ReactionHit)>, Vec<ImageDraw>, Vec<(Rect, usize)>);
 
 #[derive(Debug, Clone, Default)]
 pub struct RenderedMessage<'a> {
@@ -185,8 +197,10 @@ pub struct RenderedMessage<'a> {
     /// Server event id of the message, when confirmed. `None` messages have no
     /// clickable reactions (there is nothing to toggle against yet).
     pub event_id: Option<EventId>,
-    /// Reaction pills to draw on a dedicated row below the message, left to
-    /// right in the order the theme returned them.
+    /// Reaction pills to draw on a dedicated row below the message, left to right
+    /// in the order the theme returned them. For the selected message this also
+    /// includes the quick-reaction pills, appended after the existing reactions so
+    /// both share one unified row and one set of hit boxes.
     pub reactions: Vec<ReactionPill<'a>>,
     /// Image attachments to render inline (or as a text fallback) below the message.
     images: Vec<ImageAttachment>,
@@ -296,6 +310,55 @@ fn image_fallback_line(indent: u16, image: &ImageAttachment) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Builds a trailing pill row (reactions or quick reactions), indented under the
+/// message body with a single blank column between pills.
+fn pill_row<'a>(indent_width: u16, pills: &[ReactionPill<'a>]) -> Line<'a> {
+    let mut spans: Vec<Span<'a>> = vec![Span::raw(" ".repeat(indent_width as usize))];
+    for (i, pill) in pills.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+        spans.extend(pill.spans.iter().cloned());
+    }
+    Line::from(spans)
+}
+
+/// Records the per-pill hit boxes for one pill row at screen row `row_y`, mirroring
+/// how the row is laid out by [`pill_row`] (indent, one blank column between
+/// pills). Pills clipped past the right edge are truncated; ones fully off-screen
+/// are skipped.
+fn record_pill_hits(
+    hits: &mut Vec<(Rect, ReactionHit)>,
+    pills: &[ReactionPill<'_>],
+    event_id: &EventId,
+    list_area: Rect,
+    indent_width: u16,
+    row_y: u16,
+) {
+    let mut pill_x = list_area.x.saturating_add(indent_width);
+    for (i, pill) in pills.iter().enumerate() {
+        if i > 0 {
+            pill_x = pill_x.saturating_add(1);
+        }
+        if pill_x < list_area.right() {
+            let width = pill.width.min(list_area.right() - pill_x);
+            hits.push((
+                Rect {
+                    x: pill_x,
+                    y: row_y,
+                    width,
+                    height: 1,
+                },
+                ReactionHit {
+                    event_id: event_id.clone(),
+                    key: pill.key.clone(),
+                },
+            ));
+        }
+        pill_x = pill_x.saturating_add(pill.width);
+    }
+}
+
 impl Renderer {
     pub fn new() -> Self {
         Self {
@@ -309,6 +372,8 @@ impl Renderer {
             preview_failed: RefCell::new(HashSet::new()),
             preview_cache: RefCell::new(HashMap::new()),
             focused: true,
+            quick_reactions_enabled: true,
+            quick_reaction_emojis: Vec::new(),
         }
     }
 
@@ -316,6 +381,13 @@ impl Renderer {
     /// initialized when graphics support was detected.
     pub fn enable_images(&mut self) {
         self.images_enabled = true;
+    }
+
+    /// Configures the quick-reaction affordance (feature toggle + emoji set) from
+    /// the user config. Called once at startup.
+    pub fn set_quick_reactions(&mut self, config: &crate::config::QuickReactions) {
+        self.quick_reactions_enabled = config.enabled;
+        self.quick_reaction_emojis = config.emojis.clone();
     }
 
     /// Wires the channel used to request background image decodes. Called once at
@@ -608,9 +680,9 @@ impl Renderer {
         });
     }
 
-    /// Draws the message list and returns the reaction-pill hit boxes recorded
-    /// this frame (screen `Rect` paired with the reaction it toggles) plus the
-    /// inline images to draw over the list, for the caller to place.
+    /// Draws the message list and returns the hit maps recorded this frame (see
+    /// [`MessagesRender`]) plus the inline images to draw over the list, for the
+    /// caller to place.
     fn render_messages(
         &self,
         f: &mut ratatui::Frame,
@@ -618,9 +690,9 @@ impl Renderer {
         view: &ViewState,
         lua: &mlua::Lua,
         rect: Rect,
-    ) -> (Vec<(Rect, ReactionHit)>, Vec<ImageDraw>) {
+    ) -> MessagesRender {
         let Some((buffer_id, buffer, backend, nickname)) = self.focused(state, view) else {
-            return (vec![], vec![]);
+            return (vec![], vec![], vec![]);
         };
 
         let target_name = buffer.label(&buffer_id.target);
@@ -630,15 +702,18 @@ impl Renderer {
 
         // Collect (RenderedMessage, message_time) pairs so we can detect the
         // read boundary and inject a separator between read and unread messages.
-        let rendered: Vec<(RenderedMessage, chrono::DateTime<chrono::Local>)> = buffer
+        let rendered: Vec<(RenderedMessage, chrono::DateTime<chrono::Local>, usize)> = buffer
             .messages
             .iter()
             .rev()
+            // `enumerate` before `skip` so the index counts from the newest (0),
+            // matching `view.selected_message` and the message-row hit map.
+            .enumerate()
             .skip(scroll)
             // Render a bit more than fits, as some lines are filtered out and
             // others wrap.
             .take((rect.height as usize) + (rect.height as usize) / 2)
-            .filter_map(|message| {
+            .filter_map(|(index, message)| {
                 // A reaction on this message is highlighted only if the hovered
                 // pill belongs to it (matched by server event id).
                 let hovered_key = view
@@ -646,6 +721,7 @@ impl Renderer {
                     .as_ref()
                     .filter(|hit| message.event_id() == Some(&hit.event_id))
                     .map(|hit| hit.key.as_str());
+                let selected = view.selected_message == Some(index);
                 self.render_message(
                     lua,
                     backend,
@@ -653,8 +729,9 @@ impl Renderer {
                     target_name,
                     message,
                     hovered_key,
+                    selected,
                 )
-                .map(|rm| (rm, message.time))
+                .map(|rm| (rm, message.time, index))
             })
             .collect();
 
@@ -676,13 +753,16 @@ impl Renderer {
         let mut messages: Vec<ListItem<'_>> = Vec::with_capacity(rendered.len() + 2);
         let mut reaction_hits: Vec<(Rect, ReactionHit)> = vec![];
         let mut image_draws: Vec<ImageDraw> = vec![];
+        // Per-message row spans paired with their index-from-newest, for
+        // click-to-select. Only fully-visible messages are recorded.
+        let mut message_rows: Vec<(Rect, usize)> = vec![];
 
         // Rows of every item pushed so far. `List` (BottomToTop) anchors item 0 at
         // the bottom, so item `i` occupies rows `[bottom - cum - h, bottom - cum)`
         // and is drawn iff `cum + h <= list_area.height` (no partial top clip).
         let mut cum: u16 = 0;
 
-        for (rm, msg_time) in &rendered {
+        for (rm, msg_time, msg_index) in &rendered {
             if rm.message.width() == 0 {
                 continue;
             }
@@ -859,15 +939,10 @@ impl Renderer {
             // Append the reaction pills on their own trailing row, aligned under
             // the message body. Kept last so its hit-box geometry is unchanged by
             // the image rows above it. Pills are separated by a single blank column.
+            // For the selected message this row already includes the quick-reaction
+            // pills (appended in `render_message`), so both share one row.
             if !rm.reactions.is_empty() {
-                let mut spans: Vec<Span<'_>> = vec![Span::raw(" ".repeat(indent_width as usize))];
-                for (i, pill) in rm.reactions.iter().enumerate() {
-                    if i > 0 {
-                        spans.push(Span::raw(" "));
-                    }
-                    spans.extend(pill.spans.iter().cloned());
-                }
-                text.lines.push(Line::from(spans));
+                text.lines.push(pill_row(indent_width, &rm.reactions));
             }
 
             let h = text.lines.len() as u16;
@@ -875,34 +950,36 @@ impl Renderer {
             // items); its hit boxes and images must obey the same rule.
             let fully_visible = cum.saturating_add(h) <= list_area.height;
 
-            // Record hit boxes for the reaction row (still the item's last row),
-            // only when fully visible and the message has a server id to toggle.
+            // Record hit boxes for the reaction row (the item's last row), only
+            // when fully visible and the message has a server id to toggle.
             if let Some(event_id) = &rm.event_id {
                 if !rm.reactions.is_empty() && fully_visible {
                     let row_y = list_area.bottom().saturating_sub(1).saturating_sub(cum);
-                    let mut pill_x = list_area.x.saturating_add(indent_width);
-                    for (i, pill) in rm.reactions.iter().enumerate() {
-                        if i > 0 {
-                            pill_x = pill_x.saturating_add(1);
-                        }
-                        if pill_x < list_area.right() {
-                            let width = pill.width.min(list_area.right() - pill_x);
-                            reaction_hits.push((
-                                Rect {
-                                    x: pill_x,
-                                    y: row_y,
-                                    width,
-                                    height: 1,
-                                },
-                                ReactionHit {
-                                    event_id: event_id.clone(),
-                                    key: pill.key.clone(),
-                                },
-                            ));
-                        }
-                        pill_x = pill_x.saturating_add(pill.width);
-                    }
+                    record_pill_hits(
+                        &mut reaction_hits,
+                        &rm.reactions,
+                        event_id,
+                        list_area,
+                        indent_width,
+                        row_y,
+                    );
                 }
+            }
+
+            // Record the message's full row span for click-to-select. Its top row
+            // is `bottom - cum - h`; pill/reaction clicks are resolved before this
+            // map, so spanning the whole item is safe.
+            if fully_visible {
+                let item_top = list_area.bottom().saturating_sub(cum).saturating_sub(h);
+                message_rows.push((
+                    Rect {
+                        x: list_area.x,
+                        y: item_top,
+                        width: list_area.width,
+                        height: h,
+                    },
+                    *msg_index,
+                ));
             }
 
             // Record the image rectangles. The strip begins at the item's top row
@@ -968,7 +1045,7 @@ impl Renderer {
 
         f.render_widget(list, rect);
 
-        (reaction_hits, image_draws)
+        (reaction_hits, image_draws, message_rows)
     }
 
     /// Draws the inline images recorded by [`Self::render_messages`] over the
@@ -1021,6 +1098,7 @@ impl Renderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_message(
         &self,
         lua: &mlua::Lua,
@@ -1029,6 +1107,7 @@ impl Renderer {
         target_name: &str,
         message: &StoredMessage,
         hovered_key: Option<&str>,
+        selected: bool,
     ) -> Option<RenderedMessage<'_>> {
         let event = to_lua_event(lua, message, backend, target, target_name).ok()?;
 
@@ -1052,7 +1131,13 @@ impl Renderer {
             return None;
         }
 
-        let reactions = self.render_reaction_pills(lua, &event, hovered_key);
+        let mut reactions = self.render_reaction_pills(lua, &event, hovered_key);
+        // For the selected message with a server id to react to, append the
+        // quick-reaction pills onto the same row so existing reactions and quick
+        // reactions read as one unified, uniformly styled strip.
+        if selected && message.event_id().is_some() {
+            reactions.extend(self.render_quick_reaction_pills(lua, &event, hovered_key));
+        }
         let (preview_images, preview_lines) = self.build_previews(lua, message);
 
         Some(RenderedMessage {
@@ -1081,6 +1166,45 @@ impl Renderer {
                 _ => return vec![],
             };
 
+        self.pills_from_lua_value(lua, value)
+    }
+
+    /// Calls the theme's `render_quick_reactions` formatter for the selected
+    /// message, passing the configured emoji set and the hovered key (so quick
+    /// pills get the same hover highlight as ordinary reactions), and converts the
+    /// returned pills like [`Self::render_reaction_pills`]. Empty when quick
+    /// reactions are disabled, no emoji are configured, or the theme has no
+    /// formatter.
+    fn render_quick_reaction_pills(
+        &self,
+        lua: &mlua::Lua,
+        event: &mlua::Table,
+        hovered_key: Option<&str>,
+    ) -> Vec<ReactionPill<'_>> {
+        if !self.quick_reactions_enabled || self.quick_reaction_emojis.is_empty() {
+            return vec![];
+        }
+        let Ok(emojis) = lua.create_sequence_from(self.quick_reaction_emojis.iter().cloned())
+        else {
+            return vec![];
+        };
+        let value = match crate::config::call_formatter(
+            lua,
+            "render_quick_reactions",
+            (event, emojis, hovered_key),
+        ) {
+            Some(Ok(value)) => value,
+            _ => return vec![],
+        };
+
+        self.pills_from_lua_value(lua, value)
+    }
+
+    /// Parses a theme formatter's returned pill list (`{ { key, spans }, ... }`)
+    /// into measured [`ReactionPill`]s. Zero-width pills are dropped so they never
+    /// produce an unclickable hit box. Shared by the reaction and quick-reaction
+    /// formatters, which return the same shape.
+    fn pills_from_lua_value(&self, lua: &mlua::Lua, value: mlua::Value) -> Vec<ReactionPill<'_>> {
         let mlua::Value::Table(list) = value else {
             return vec![];
         };
@@ -1225,6 +1349,7 @@ impl Renderer {
                 Mode::Normal => "normal",
                 Mode::Command => "command",
                 Mode::Insert => "insert",
+                Mode::Select => "select",
             },
         )?;
         tirc_mod.set("multi_backend", state.backends.len() > 1)?;
@@ -1400,6 +1525,7 @@ impl Renderer {
             Mode::Normal => "",
             Mode::Command => ":",
             Mode::Insert => "❯ ",
+            Mode::Select => "",
         };
         let prefix_len = prefix.chars().count() as u16;
         let width = f.area().width.max(3) - prefix_len;
@@ -1414,6 +1540,9 @@ impl Renderer {
         // input row. Drawn over the same rect after the input so it sits on the
         // text row (the block's top border is row `rect.y`).
         let mut hints: Vec<&str> = Vec::new();
+        if view.mode == Mode::Select {
+            hints.push("-- SELECT --");
+        }
         if view.debug_open {
             hints.push("-- DEBUG --");
         }
@@ -1439,7 +1568,7 @@ impl Renderer {
         }
 
         match view.mode {
-            Mode::Normal => {}
+            Mode::Normal | Mode::Select => {}
             Mode::Command | Mode::Insert => f.set_cursor_position((
                 rect.x + ((input.visual_cursor()).max(scroll) - scroll) as u16 + prefix_len,
                 rect.y + 1,
@@ -1561,7 +1690,8 @@ impl Renderer {
 
         view.viewport_height = msg_rect.height;
 
-        let (reaction_hits, image_draws) = self.render_messages(f, state, view, lua, msg_rect);
+        let (reaction_hits, image_draws, message_rows) =
+            self.render_messages(f, state, view, lua, msg_rect);
         self.draw_images(f, image_draws);
 
         // Compute horizontal scroll so the focused tab stays visible.
@@ -1604,6 +1734,7 @@ impl Renderer {
             userlist_first_member: 0,
             split_x,
             reactions: reaction_hits,
+            message_rows,
         };
 
         // Highlight the app-level selection by reversing the covered cells of the
@@ -1611,6 +1742,11 @@ impl Renderer {
         // stays on top. Line-granular for v1: the whole message-area width of
         // every selected row is reversed.
         self.render_selection_highlight(f, view);
+
+        // Highlight the message selected in message-select mode by reversing its
+        // first row, mirroring the text-selection highlight so it stays
+        // theme-agnostic. The quick-reaction bar drawn below it reinforces it.
+        self.render_selected_message_highlight(f, view);
 
         // The debug log pane floats over the frame (under the context menu, which
         // is drawn last so it stays on top).
@@ -1697,6 +1833,31 @@ impl Renderer {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_style(reversed);
                 }
+            }
+        }
+    }
+
+    /// Reverses the first row of the message selected in message-select mode,
+    /// clamped to the message area. A no-op when nothing is selected or the
+    /// selected message is scrolled off screen (absent from the row hit map).
+    fn render_selected_message_highlight(&self, f: &mut ratatui::Frame, view: &ViewState) {
+        let Some(index) = view.selected_message else {
+            return;
+        };
+        let Some((rect, _)) = view.layout.message_rows.iter().find(|(_, i)| *i == index) else {
+            return;
+        };
+
+        let area = view.layout.message_rect;
+        let y = rect.y;
+        if y < area.y || y >= area.y.saturating_add(area.height) {
+            return;
+        }
+        let reversed = Style::default().add_modifier(Modifier::REVERSED);
+        let buf = f.buffer_mut();
+        for x in area.x..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_style(reversed);
             }
         }
     }

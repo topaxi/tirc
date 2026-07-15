@@ -94,6 +94,36 @@ pub enum ImageProtocol {
     Iterm2,
 }
 
+/// The default emoji set offered as quick reactions on a selected message when
+/// the Lua config does not override `quick_reactions.emojis`.
+fn default_quick_reaction_emojis() -> Vec<String> {
+    ["👍", "❤️", "😂", "🎉", "😢", "🔥"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Quick-reaction affordance shown on the selected message. `enabled` gates the
+/// whole feature (message-select mode and the pill bar); `emojis` is the ordered
+/// set offered, bound to the number keys `1`..`9` in select mode.
+#[derive(Deserialize, Debug, Clone)]
+pub struct QuickReactions {
+    #[serde(default = "bool_true")]
+    pub enabled: bool,
+
+    #[serde(default = "default_quick_reaction_emojis")]
+    pub emojis: Vec<String>,
+}
+
+impl Default for QuickReactions {
+    fn default() -> Self {
+        QuickReactions {
+            enabled: true,
+            emojis: default_quick_reaction_emojis(),
+        }
+    }
+}
+
 #[derive(Deserialize, Debug)]
 pub struct TircConfig {
     pub servers: Box<[ServerConfig]>,
@@ -117,6 +147,10 @@ pub struct TircConfig {
     /// Enabled by default; set to `false` to avoid contacting linked servers.
     #[serde(default = "bool_true")]
     pub link_previews: bool,
+
+    /// Quick reactions offered on the selected message. See [`QuickReactions`].
+    #[serde(default)]
+    pub quick_reactions: QuickReactions,
 }
 
 fn get_default_config() -> &'static str {
@@ -731,6 +765,36 @@ mod tests {
         assert_eq!(native, SelectionMode::Native);
     }
 
+    #[test]
+    fn quick_reactions_default_is_enabled_with_emojis() {
+        let defaults = QuickReactions::default();
+        assert!(defaults.enabled);
+        assert_eq!(defaults.emojis, default_quick_reaction_emojis());
+        assert!(!defaults.emojis.is_empty());
+    }
+
+    #[test]
+    fn quick_reactions_deserialize_partial_and_disabled() {
+        let lua = Lua::new();
+
+        // A partial table fills the missing field from its default.
+        let partial: QuickReactions = lua
+            .from_value(lua.load("{ emojis = { '🚀', '👀' } }").eval().unwrap())
+            .unwrap();
+        assert!(partial.enabled, "enabled defaults to true when omitted");
+        assert_eq!(partial.emojis, vec!["🚀".to_string(), "👀".to_string()]);
+
+        let disabled: QuickReactions = lua
+            .from_value(lua.load("{ enabled = false }").eval().unwrap())
+            .unwrap();
+        assert!(!disabled.enabled);
+        assert_eq!(
+            disabled.emojis,
+            default_quick_reaction_emojis(),
+            "emojis default even when only `enabled` is set"
+        );
+    }
+
     fn stored(event: ChatEvent) -> StoredMessage {
         StoredMessage {
             time: chrono::Local::now(),
@@ -1107,5 +1171,124 @@ mod tests {
         }
         assert!(text.contains("👍 2"), "expected '👍 2' pill, got: {text:?}");
         assert!(text.contains("❤️ 1"), "expected '❤️ 1' pill, got: {text:?}");
+    }
+
+    #[test]
+    fn theme_renders_quick_reaction_pills() {
+        let lua = setup_theme();
+
+        let message = stored(ChatEvent::Message {
+            target: TargetId::from("#tirc"),
+            id: None,
+            sender: UserRef::new("alice"),
+            body: MessageBody::plain("hello"),
+            kind: MsgKind::Text,
+            echo_of: None,
+            time: None,
+        });
+
+        let table = to_lua_event(
+            &lua,
+            &message,
+            &backend(),
+            &TargetId::from("#tirc"),
+            "#tirc",
+        )
+        .expect("event table");
+        let emojis = lua
+            .create_sequence_from(["👍".to_string(), "🎉".to_string()])
+            .expect("emoji list");
+        let value = call_formatter(
+            &lua,
+            "render_quick_reactions",
+            (table, emojis, mlua::Value::Nil),
+        )
+        .expect("render_quick_reactions formatter registered")
+        .expect("render_quick_reactions formatter callback");
+
+        let pills = match &value {
+            mlua::Value::Table(t) => t,
+            _ => panic!("render_quick_reactions did not return a table"),
+        };
+        let mut text = String::new();
+        let mut keys = Vec::new();
+        for i in 1.. {
+            match pills.get::<mlua::Value>(i) {
+                Ok(mlua::Value::Table(pill)) => {
+                    keys.push(pill.get::<String>("key").expect("pill has key"));
+                    let spans: mlua::Value = pill.get("spans").expect("pill has spans");
+                    text.push_str(&collect_text(&spans));
+                }
+                _ => break,
+            }
+        }
+        // Quick pills are styled like ordinary reaction pills and prefixed with
+        // their number-key shortcut; `key` carries the emoji so a click toggles the
+        // right reaction.
+        assert!(text.contains("1 👍"), "expected '1 👍' pill, got: {text:?}");
+        assert!(text.contains("2 🎉"), "expected '2 🎉' pill, got: {text:?}");
+        assert_eq!(keys, vec!["👍".to_string(), "🎉".to_string()]);
+    }
+
+    #[test]
+    fn quick_reactions_skip_already_reacted_emojis() {
+        use crate::ui::ReactionState;
+        let lua = setup_theme();
+
+        let mut message = stored(ChatEvent::Message {
+            target: TargetId::from("#tirc"),
+            id: None,
+            sender: UserRef::new("alice"),
+            body: MessageBody::plain("hello"),
+            kind: MsgKind::Text,
+            echo_of: None,
+            time: None,
+        });
+        // 👍 already has a reaction, so the quick pills must not re-offer it.
+        message.reactions.insert(
+            "👍".to_string(),
+            ReactionState {
+                count: 1,
+                mine: false,
+            },
+        );
+
+        let table = to_lua_event(
+            &lua,
+            &message,
+            &backend(),
+            &TargetId::from("#tirc"),
+            "#tirc",
+        )
+        .expect("event table");
+        let emojis = lua
+            .create_sequence_from(["👍".to_string(), "🎉".to_string()])
+            .expect("emoji list");
+        let value = call_formatter(
+            &lua,
+            "render_quick_reactions",
+            (table, emojis, mlua::Value::Nil),
+        )
+        .expect("formatter registered")
+        .expect("formatter callback");
+
+        let pills = match &value {
+            mlua::Value::Table(t) => t,
+            _ => panic!("did not return a table"),
+        };
+        let mut keys = Vec::new();
+        for i in 1.. {
+            match pills.get::<mlua::Value>(i) {
+                Ok(mlua::Value::Table(pill)) => {
+                    keys.push(pill.get::<String>("key").expect("pill has key"));
+                }
+                _ => break,
+            }
+        }
+        assert_eq!(
+            keys,
+            vec!["🎉".to_string()],
+            "already-reacted 👍 is skipped by the quick pills"
+        );
     }
 }

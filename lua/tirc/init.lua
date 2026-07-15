@@ -117,6 +117,7 @@
 ---@field message_text? fun(event: TircEvent, nickname: string): TircSpans?
 ---@field link_preview? fun(preview: TircLinkPreview): TircSpans[]
 ---@field render_reactions? fun(event: TircEvent, hovered_key: string|nil): TircReactionPill[]
+---@field render_quick_reactions? fun(event: TircEvent, emojis: string[], hovered_key: string|nil): TircReactionPill[]
 ---@field user? fun(user: TircUser): TircSpans
 ---@field render_buffer_tab? fun(buffer: TircBufferTab): TircSpans
 ---@field render_buffer_bar? fun(buffers: TircBufferTab[]): TircBufferBar | TircSpans
@@ -127,7 +128,7 @@
 ---@field version string
 ---@field ui TircUi
 ---@field focused_buffer? string opaque id of the currently focused buffer, or nil
----@field mode 'normal' | 'command' | 'insert' current editor mode
+---@field mode 'normal' | 'command' | 'insert' | 'select' current editor mode
 ---@field multi_backend boolean whether more than one backend is connected
 ---@field buffers TircBufferTab[] all open buffers
 ---@field is_focused_buffer fun(buffer: TircBufferTab): boolean

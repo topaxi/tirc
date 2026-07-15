@@ -5,6 +5,13 @@
 ---@field selection_mode? 'app' | 'native' default mouse-drag selection: 'app' selects in-app for clipboard yank, 'native' relies on the copy-mode toggle (default 'app')
 ---@field image_protocol? 'auto' | 'kitty' | 'sixel' | 'iterm2' terminal graphics protocol for inline images; 'auto' queries the terminal, the others force a protocol (default 'auto')
 ---@field link_previews? boolean fetch Open Graph metadata for links and preview title/description/thumbnail inline (default true); set false to avoid contacting linked servers
+---@field quick_reactions? TircQuickReactions quick reactions offered on the selected message
+
+--- Quick reactions shown on the selected message (message-select mode, entered
+--- with `v`). The emojis are bound to number keys `1`..`9` in select mode.
+---@class TircQuickReactions
+---@field enabled? boolean enable message-select mode and the quick-reaction pill bar (default true)
+---@field emojis? string[] ordered emoji offered as quick reactions (default a small common set)
 
 --- A configured backend. `protocol` is required and selects the variant.
 ---@alias TircConfigServer TircIrcServer | TircMatrixServer
@@ -44,6 +51,10 @@ function M.create_config()
     selection_mode = 'app',
     image_protocol = 'auto',
     link_previews = true,
+    quick_reactions = {
+      enabled = true,
+      emojis = { '👍', '❤️', '😂', '🎉', '😢', '🔥' },
+    },
   }
 end
 

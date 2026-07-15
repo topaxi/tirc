@@ -146,6 +146,12 @@ impl Tui {
         self.renderer.set_focused(focused);
     }
 
+    /// Configures the quick-reaction affordance from the user config, forwarded to
+    /// the renderer which draws the selected-message pill bar.
+    pub fn set_quick_reactions(&mut self, config: &crate::config::QuickReactions) {
+        self.renderer.set_quick_reactions(config);
+    }
+
     /// Prepares the terminal and, if graphics are supported, returns the built
     /// [`Picker`] so the caller can spawn the background image-decode worker with
     /// it. `None` means inline images are disabled and media falls back to text.

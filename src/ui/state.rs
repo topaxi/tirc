@@ -16,6 +16,10 @@ pub enum Mode {
     Normal,
     Command,
     Insert,
+    /// Message-select mode: a message in the focused buffer is highlighted and
+    /// quick reactions can be applied to it with the number keys. Entered from
+    /// Normal mode and left with `Esc`.
+    Select,
 }
 
 /// A member of a buffer's roster. Ordered by `(role, name)` so the user list is
@@ -175,6 +179,31 @@ impl ChatBuffer {
     /// Return to the newest messages.
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_position = 0;
+    }
+
+    /// The message at `index` counting from the newest (0 = newest), or `None`
+    /// when out of range. Bridges the from-newest message selection used by the
+    /// UI to the oldest-first storage order.
+    pub fn message_from_newest(&self, index: usize) -> Option<&StoredMessage> {
+        let pos = self.messages.len().checked_sub(1)?.checked_sub(index)?;
+        self.messages.get(pos)
+    }
+
+    /// Scrolls just enough to keep the message at `index` (from newest) on screen
+    /// while navigating the message selection. `scroll_position` counts messages
+    /// skipped from the tail, so the visible window is roughly
+    /// `[scroll_position, scroll_position + viewport_height)`. `viewport_height` is
+    /// in rows and used as a message-count proxy; multi-row messages can leave the
+    /// selection a few rows from the edge, which self-corrects on the next step.
+    pub fn ensure_message_visible(&mut self, index: usize, viewport_height: usize) {
+        let vh = viewport_height.max(1);
+        if index < self.scroll_position {
+            self.scroll_position = index;
+        } else if index >= self.scroll_position + vh {
+            self.scroll_position = index + 1 - vh;
+        }
+        let max = self.messages.len().saturating_sub(1);
+        self.scroll_position = self.scroll_position.min(max);
     }
 
     /// Clears the unread and mention indicators. Does not touch `read_marker`
@@ -679,6 +708,10 @@ pub struct LayoutMap {
     /// Per-pill hit boxes for the reactions drawn this frame, paired with the
     /// message and key they toggle. Only the focused buffer's reactions appear.
     pub reactions: Vec<(Rect, ReactionHit)>,
+    /// Per-message hit boxes for the messages drawn this frame, paired with the
+    /// message's index-from-newest in the focused buffer. Used to turn a plain
+    /// (non-drag) click on a message into a selection.
+    pub message_rows: Vec<(Rect, usize)>,
 }
 
 /// Identifies one reaction pill: the message it belongs to and the emoji key.
@@ -721,6 +754,14 @@ impl LayoutMap {
         self.reactions
             .iter()
             .find_map(|(rect, hit)| rect_contains(rect, x, y).then_some(hit))
+    }
+
+    /// Returns the index-from-newest of the message whose row span contains
+    /// `(x, y)`, if any. Used to turn a plain click into a message selection.
+    pub fn message_at(&self, x: u16, y: u16) -> Option<usize> {
+        self.message_rows
+            .iter()
+            .find_map(|(rect, index)| rect_contains(rect, x, y).then_some(*index))
     }
 }
 
@@ -952,6 +993,11 @@ pub struct ViewState {
     /// The reaction pill currently under the mouse cursor, or `None`. Updated on
     /// mouse-move; read by the renderer to highlight that pill.
     pub hovered_reaction: Option<ReactionHit>,
+    /// The message selected for quick reactions in [`Mode::Select`], as an index
+    /// **from the newest** message (0 = newest) in the focused buffer, or `None`
+    /// when nothing is selected. Cleared on buffer switch. The renderer highlights
+    /// this message and draws its quick-reaction pill bar.
+    pub selected_message: Option<usize>,
     /// True while the `:debug` log pane is open. Toggled by the `:debug` command;
     /// read by the renderer to draw the log overlay and the `-- DEBUG --` hint.
     pub debug_open: bool,
@@ -1039,6 +1085,40 @@ impl ViewState {
         self.selection = None;
     }
 
+    /// Selects the newest message (index 0) when the focused buffer holds `len`
+    /// messages, or clears the selection when it is empty. Called on entering
+    /// [`Mode::Select`].
+    pub fn select_newest(&mut self, len: usize) {
+        self.selected_message = (len > 0).then_some(0);
+    }
+
+    /// Moves the message selection one message older (up the history), clamped to
+    /// the oldest message. Seeds from the newest message when nothing is selected.
+    pub fn select_older(&mut self, len: usize) {
+        if len == 0 {
+            self.selected_message = None;
+            return;
+        }
+        let last = len - 1;
+        self.selected_message = Some(match self.selected_message {
+            Some(index) => (index + 1).min(last),
+            None => 0,
+        });
+    }
+
+    /// Moves the message selection one message newer (toward the tail), clamped to
+    /// the newest message. A no-op when nothing is selected.
+    pub fn select_newer(&mut self) {
+        if let Some(index) = self.selected_message {
+            self.selected_message = Some(index.saturating_sub(1));
+        }
+    }
+
+    /// Drops the message selection. Paired with leaving [`Mode::Select`].
+    pub fn clear_message_selection(&mut self) {
+        self.selected_message = None;
+    }
+
     /// Focuses `buffer` if nothing is focused yet (e.g. the first backend's
     /// status buffer at startup).
     pub fn focus_if_unset(&mut self, buffer: BufferId) {
@@ -1049,6 +1129,7 @@ impl ViewState {
 
     pub fn focus(&mut self, buffer: BufferId) {
         self.focused = Some(buffer);
+        self.exit_message_selection();
     }
 
     fn focused_index(&self, state: &State) -> Option<usize> {
@@ -1059,6 +1140,17 @@ impl ViewState {
     fn focus_index(&mut self, state: &State, index: usize) {
         if let Some((id, _)) = state.buffers.get_index(index) {
             self.focused = Some(id.clone());
+            self.exit_message_selection();
+        }
+    }
+
+    /// Drops any message selection and leaves [`Mode::Select`] for Normal. Called
+    /// when the focused buffer changes so a stale selection or select mode never
+    /// outlives the buffer it belonged to.
+    fn exit_message_selection(&mut self) {
+        self.selected_message = None;
+        if self.mode == Mode::Select {
+            self.mode = Mode::Normal;
         }
     }
 
@@ -1825,6 +1917,162 @@ mod tests {
         // A zero-length selection covers exactly its row.
         let point = Selection::new(4, 7);
         assert_eq!(point.selected_rows(), 7..=7);
+    }
+
+    #[test]
+    fn message_selection_navigates_and_clamps() {
+        let mut view = ViewState::new();
+        assert_eq!(view.selected_message, None);
+
+        // Empty buffer: nothing to select.
+        view.select_newest(0);
+        assert_eq!(view.selected_message, None);
+
+        // Newest is index 0.
+        view.select_newest(5);
+        assert_eq!(view.selected_message, Some(0));
+
+        // Older increments, clamped at the oldest (len - 1).
+        view.select_older(5);
+        assert_eq!(view.selected_message, Some(1));
+        view.select_older(5);
+        view.select_older(5);
+        view.select_older(5);
+        assert_eq!(view.selected_message, Some(4));
+        view.select_older(5);
+        assert_eq!(view.selected_message, Some(4), "clamped at the oldest");
+
+        // Newer decrements, clamped at the newest (0).
+        view.select_newer();
+        assert_eq!(view.selected_message, Some(3));
+        for _ in 0..10 {
+            view.select_newer();
+        }
+        assert_eq!(view.selected_message, Some(0), "clamped at the newest");
+
+        // Clearing drops the selection.
+        view.clear_message_selection();
+        assert_eq!(view.selected_message, None);
+
+        // Older from nothing seeds at the newest.
+        view.select_older(3);
+        assert_eq!(view.selected_message, Some(0));
+        // Newer from nothing stays nothing.
+        view.clear_message_selection();
+        view.select_newer();
+        assert_eq!(view.selected_message, None);
+    }
+
+    #[test]
+    fn message_from_newest_resolves_the_reactable_event_id() {
+        let mut state = test_state();
+        // Oldest first: alice (no id), bob (id "$evt"), carol (no id).
+        state.apply(backend(), message("#tirc", "alice", None));
+        state.apply(
+            backend(),
+            ChatEvent::Message {
+                target: TargetId::from("#tirc"),
+                id: Some(EventId("$evt".to_string())),
+                sender: UserRef::new("bob"),
+                body: MessageBody::plain("hi"),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+        state.apply(backend(), message("#tirc", "carol", None));
+
+        let buffer = buffer(&state, "#tirc");
+        // Index 0 = newest (carol), index 1 = bob (the one with an id).
+        assert_eq!(
+            buffer
+                .message_from_newest(1)
+                .and_then(|m| m.event_id())
+                .map(|id| id.0.as_str()),
+            Some("$evt"),
+        );
+        assert!(
+            buffer.message_from_newest(0).unwrap().event_id().is_none(),
+            "newest message has no server id"
+        );
+        assert!(
+            buffer.message_from_newest(3).is_none(),
+            "index past the oldest is out of range"
+        );
+    }
+
+    #[test]
+    fn switching_buffer_clears_message_selection() {
+        let mut state = test_state();
+        state.apply(backend(), message("#a", "alice", None));
+        state.apply(backend(), message("#b", "bob", None));
+
+        let mut view = ViewState::new();
+        view.focus(BufferId::new(backend(), "#a"));
+        view.select_newest(1);
+        assert_eq!(view.selected_message, Some(0));
+
+        view.next_buffer(&state);
+        assert_eq!(
+            view.selected_message, None,
+            "selection resets when the focused buffer changes"
+        );
+    }
+
+    #[test]
+    fn ensure_message_visible_scrolls_selection_into_view() {
+        let mut buffer = ChatBuffer::default();
+        for _ in 0..20 {
+            buffer
+                .messages
+                .push(StoredMessage::new(message("#tirc", "alice", None), false));
+        }
+
+        // Selecting an older message than the bottom of a 5-row viewport scrolls up.
+        buffer.ensure_message_visible(8, 5);
+        assert_eq!(buffer.scroll_position, 8 + 1 - 5);
+
+        // A newer message than the current top pulls the scroll back down.
+        buffer.ensure_message_visible(2, 5);
+        assert_eq!(buffer.scroll_position, 2);
+
+        // A message already in view leaves the scroll untouched.
+        let before = buffer.scroll_position;
+        buffer.ensure_message_visible(3, 5);
+        assert_eq!(buffer.scroll_position, before);
+    }
+
+    #[test]
+    fn message_at_maps_points_to_message_index() {
+        let layout = LayoutMap {
+            message_rows: vec![
+                (
+                    Rect {
+                        x: 0,
+                        y: 4,
+                        width: 20,
+                        height: 2,
+                    },
+                    0,
+                ),
+                (
+                    Rect {
+                        x: 0,
+                        y: 2,
+                        width: 20,
+                        height: 2,
+                    },
+                    1,
+                ),
+            ],
+            ..LayoutMap::default()
+        };
+
+        assert_eq!(layout.message_at(5, 4), Some(0));
+        assert_eq!(layout.message_at(5, 5), Some(0), "spans its full height");
+        assert_eq!(layout.message_at(5, 2), Some(1));
+        assert_eq!(layout.message_at(5, 6), None, "below every message row");
+        assert_eq!(layout.message_at(25, 4), None, "right of the message area");
     }
 
     #[test]

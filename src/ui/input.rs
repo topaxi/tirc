@@ -10,11 +10,12 @@ use mlua::Lua;
 
 use crate::backends::BackendHandle;
 use crate::config::{
-    collect_user_watched_paths, emit_event, reload_lua_theme, EventName, SelectionMode,
+    collect_user_watched_paths, emit_event, reload_lua_theme, EventName, QuickReactions,
+    SelectionMode,
 };
 use crate::core::{
-    BackendEvent, BackendId, BackendMessage, ChatEvent, Command, MsgKind, TargetId, TxnAllocator,
-    VerifyAction,
+    BackendEvent, BackendId, BackendMessage, ChatEvent, Command, EventId, MsgKind, TargetId,
+    TxnAllocator, VerifyAction,
 };
 use crate::tui::lua::{create_lua_sender, to_lua_event};
 use crate::tui::{DecodedImage, PreviewResult, Tui};
@@ -58,10 +59,18 @@ pub struct InputHandler<'lua> {
     /// True while a left-button drag is extending a message-area text selection,
     /// so subsequent `Drag` events update the selection cursor.
     selecting: bool,
+    /// The message-area cell where the current left press began, or `None`. A
+    /// release on the same cell with no intervening drag is treated as a click
+    /// that selects the message under the cursor (enters [`Mode::Select`]).
+    /// Cleared when a drag starts or the press is consumed by a pill/split.
+    left_press: Option<(u16, u16)>,
     /// The configured default mouse-drag behaviour. In [`SelectionMode::Native`]
     /// a drag does not select in-app; the user relies on the always-available
     /// copy-mode toggle instead.
     selection_mode: SelectionMode,
+    /// Quick-reaction config: whether message-select mode is available and the
+    /// ordered emoji bound to the number keys `1`..`9` in that mode.
+    quick_reactions: QuickReactions,
 }
 
 impl<'lua> InputHandler<'lua> {
@@ -77,6 +86,7 @@ impl<'lua> InputHandler<'lua> {
         auto_reload: bool,
         extra_watch_files: Vec<String>,
         selection_mode: SelectionMode,
+        quick_reactions: QuickReactions,
     ) -> Self {
         let watched_files = if auto_reload {
             Self::build_watch_list_for(lua, &config_path, &extra_watch_files)
@@ -98,7 +108,9 @@ impl<'lua> InputHandler<'lua> {
             dirty: true,
             dragging_split: false,
             selecting: false,
+            left_press: None,
             selection_mode,
+            quick_reactions,
         }
     }
 
@@ -272,13 +284,23 @@ impl<'lua> InputHandler<'lua> {
                 // repaints away a stale highlight when the click does something
                 // else (a tab switch, a split-drag, an empty click).
                 let had_selection = view.selection.take().is_some();
-                // A press on the split boundary begins a resize drag; a press in
-                // the message area begins a text selection; otherwise fall
-                // through to tab/user-row handling. `had_selection` keeps the
-                // frame repainting when only the cleared highlight changed.
-                self.try_start_split_drag(view, event.column, event.row)
+                // A press on the split boundary begins a resize drag; a press on a
+                // reaction pill toggles it. Both consume the press and are never a
+                // click-to-select candidate.
+                if self.try_start_split_drag(view, event.column, event.row)
                     || self.try_reaction_click(state, view, event.column, event.row)
-                    || self.try_start_selection(view, event.column, event.row)
+                {
+                    self.left_press = None;
+                    return true;
+                }
+                // Remember the press cell so a release without a drag can be
+                // treated as a click that selects the message under the cursor. A
+                // press in the message area also begins a text selection;
+                // otherwise fall through to tab/user-row handling. `had_selection`
+                // keeps the frame repainting when only the cleared highlight
+                // changed.
+                self.left_press = Some((event.column, event.row));
+                self.try_start_selection(view, event.column, event.row)
                     || self.handle_left_click(state, view, event.column, event.row)
                     || had_selection
             }
@@ -289,6 +311,8 @@ impl<'lua> InputHandler<'lua> {
                 self.drag_split(view, event.column)
             }
             MouseEventKind::Drag(MouseButton::Left) if self.selecting => {
+                // Any movement makes this a drag, not a click.
+                self.left_press = None;
                 self.update_selection(view, event.column, event.row)
             }
             MouseEventKind::Up(MouseButton::Left) => {
@@ -297,6 +321,20 @@ impl<'lua> InputHandler<'lua> {
                 // can yank it. Repaint only if a drag was actually in progress.
                 let was_selecting = self.selecting;
                 self.selecting = false;
+                // A press+release on the same cell with no drag is a click: drop
+                // any zero-length text selection it created and select the message
+                // under the cursor (entering select mode), when there is one.
+                if self.left_press.take() == Some((event.column, event.row)) {
+                    if view
+                        .selection
+                        .map(|s| s.anchor == s.cursor)
+                        .unwrap_or(false)
+                    {
+                        view.clear_selection();
+                    }
+                    let selected = self.try_select_message(state, view, event.column, event.row);
+                    return selected || was_selecting;
+                }
                 was_selecting
             }
             MouseEventKind::Moved => self.handle_mouse_moved(view, event.column, event.row),
@@ -325,8 +363,17 @@ impl<'lua> InputHandler<'lua> {
         let Some(hit) = view.layout.reaction_at(x, y).cloned() else {
             return false;
         };
+        self.toggle_reaction(state, view, hit.event_id, hit.key);
+        true
+    }
+
+    /// Toggles the local user's `key` reaction on the message identified by
+    /// `event_id` in the focused buffer: removes it if already `mine`, otherwise
+    /// adds it, by sending [`Command::React`] to the focused backend. Shared by
+    /// reaction-pill clicks and the select-mode number keys.
+    fn toggle_reaction(&self, state: &State, view: &ViewState, event_id: EventId, key: String) {
         let Some(focused) = view.focused.clone() else {
-            return false;
+            return;
         };
         let mine = state
             .buffers
@@ -335,9 +382,9 @@ impl<'lua> InputHandler<'lua> {
                 buffer
                     .messages
                     .iter()
-                    .find(|m| m.event_id() == Some(&hit.event_id))
+                    .find(|m| m.event_id() == Some(&event_id))
             })
-            .and_then(|message| message.reactions.get(&hit.key))
+            .and_then(|message| message.reactions.get(&key))
             .map(|reaction| reaction.mine)
             .unwrap_or(false);
 
@@ -345,11 +392,117 @@ impl<'lua> InputHandler<'lua> {
             Some(focused.backend),
             Command::React {
                 target: focused.target,
-                id: hit.event_id,
-                key: hit.key,
+                id: event_id,
+                key,
                 add: !mine,
             },
         );
+    }
+
+    /// Number of messages in the focused buffer, or 0 when nothing is focused.
+    fn focused_message_count(&self, state: &State, view: &ViewState) -> usize {
+        view.focused
+            .as_ref()
+            .and_then(|id| state.buffers.get(id))
+            .map(|buffer| buffer.messages.len())
+            .unwrap_or(0)
+    }
+
+    /// Resolves the currently selected message's server event id, if any. `None`
+    /// when nothing is selected or the selected message has no id (e.g. IRC lines
+    /// or a not-yet-confirmed echo), in which case it cannot be reacted to.
+    fn selected_event_id(&self, state: &State, view: &ViewState) -> Option<EventId> {
+        let index = view.selected_message?;
+        let buffer = state.buffers.get(view.focused.as_ref()?)?;
+        buffer.message_from_newest(index)?.event_id().cloned()
+    }
+
+    /// Enters message-select mode with the newest message selected, scrolling it
+    /// into view. A no-op when quick reactions are disabled or the focused buffer
+    /// has no messages.
+    fn enter_select_mode(&mut self, state: &mut State, view: &mut ViewState) {
+        if !self.quick_reactions.enabled {
+            return;
+        }
+        let len = self.focused_message_count(state, view);
+        if len == 0 {
+            return;
+        }
+        view.select_newest(len);
+        view.mode = Mode::Select;
+        self.ensure_selection_visible(state, view);
+    }
+
+    /// Leaves message-select mode, dropping the selection and returning to Normal.
+    fn leave_select_mode(&mut self, view: &mut ViewState) {
+        view.mode = Mode::Normal;
+        view.clear_message_selection();
+    }
+
+    /// Moves the message selection one message older (`older`) or newer, then
+    /// scrolls so the selection stays visible.
+    fn select_move(&mut self, state: &mut State, view: &mut ViewState, older: bool) {
+        let len = self.focused_message_count(state, view);
+        if older {
+            view.select_older(len);
+        } else {
+            view.select_newer();
+        }
+        self.ensure_selection_visible(state, view);
+    }
+
+    /// Scrolls the focused buffer so the selected message is on screen. A no-op
+    /// when nothing is selected.
+    fn ensure_selection_visible(&mut self, state: &mut State, view: &ViewState) {
+        let Some(index) = view.selected_message else {
+            return;
+        };
+        let viewport = view.viewport_height as usize;
+        if let Some(buffer) = state.focused_buffer_mut(view) {
+            buffer.ensure_message_visible(index, viewport);
+        }
+    }
+
+    /// Applies the quick reaction bound to `digit` (`1`..`9`) to the selected
+    /// message, toggling it. A no-op for `0`, an out-of-range digit, or a selected
+    /// message that has no server event id to react to.
+    fn apply_quick_reaction(&mut self, state: &State, view: &ViewState, digit: u8) {
+        if digit == 0 {
+            return;
+        }
+        let Some(emoji) = self
+            .quick_reactions
+            .emojis
+            .get((digit - 1) as usize)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(event_id) = self.selected_event_id(state, view) else {
+            return;
+        };
+        self.toggle_reaction(state, view, event_id, emoji);
+    }
+
+    /// Selects the message under `(x, y)` (from the last render's hit map) and
+    /// enters select mode. Returns whether a message was selected. Inert when
+    /// quick reactions are disabled.
+    fn try_select_message(
+        &mut self,
+        state: &mut State,
+        view: &mut ViewState,
+        x: u16,
+        y: u16,
+    ) -> bool {
+        if !self.quick_reactions.enabled {
+            return false;
+        }
+        let Some(index) = view.layout.message_at(x, y) else {
+            return false;
+        };
+        view.selected_message = Some(index);
+        view.mode = Mode::Select;
+        self.ensure_selection_visible(state, view);
         true
     }
 
@@ -1048,6 +1201,9 @@ impl<'lua> InputHandler<'lua> {
             (Mode::Normal, KeyCode::Char('=')) => view.reset_sidebar_width(),
             (Mode::Normal, KeyCode::Char('i')) => view.mode = Mode::Insert,
             (Mode::Normal, KeyCode::Char(':')) => view.mode = Mode::Command,
+            // Enter message-select mode to react to a message with the quick
+            // reactions. Inert when the feature is disabled or the buffer is empty.
+            (Mode::Normal, KeyCode::Char('v')) => self.enter_select_mode(state, view),
             // Ctrl-s: toggle release-capture copy mode (mnemonic: select). Hands
             // text selection to the terminal and back; available in both
             // selection modes as the escape hatch.
@@ -1064,6 +1220,16 @@ impl<'lua> InputHandler<'lua> {
             {
                 self.yank_selection(state, view)
             }
+            // Message-select mode: navigate the highlight and react by number.
+            (Mode::Select, KeyCode::Char('k') | KeyCode::Up) => self.select_move(state, view, true),
+            (Mode::Select, KeyCode::Char('j') | KeyCode::Down) => {
+                self.select_move(state, view, false)
+            }
+            (Mode::Select, code) if Self::key_code_is_digit(code) => {
+                let digit = Self::get_key_code_as_digit(code);
+                self.apply_quick_reaction(state, view, digit);
+            }
+            (Mode::Select, KeyCode::Esc) => self.leave_select_mode(view),
             // Esc in Normal mode leaves copy mode, else clears a selection.
             (Mode::Normal, KeyCode::Esc) => {
                 if view.copy_mode {

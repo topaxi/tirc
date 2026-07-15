@@ -144,6 +144,7 @@ async fn root_task(
 
     let mut tui = Tui::new()?;
     let picker = tui.initialize_terminal(config.image_protocol)?;
+    tui.set_quick_reactions(&config.quick_reactions);
 
     // Inline images are decoded and encoded off the main loop: the renderer sends
     // decode requests over `decode_tx`, a background worker turns them into encoded
@@ -187,6 +188,7 @@ async fn root_task(
         config.auto_reload_config,
         config.watch_files.clone(),
         config.selection_mode,
+        config.quick_reactions.clone(),
     );
 
     let mut events = EventStream::new();

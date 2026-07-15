@@ -57,6 +57,7 @@ local Class = require('tirc.class')
 ---@field message_text? fun(self: TircTheme, event: TircEvent, nickname: string): TircSpans?
 ---@field link_preview? fun(self: TircTheme, preview: TircLinkPreview): TircSpans[]
 ---@field render_reactions? fun(self: TircTheme, event: TircEvent, hovered_key: string|nil): TircReactionPill[]
+---@field render_quick_reactions? fun(self: TircTheme, event: TircEvent, emojis: string[], hovered_key: string|nil): TircReactionPill[]
 ---@field user? fun(self: TircTheme, user: TircUser): TircSpans
 ---@field render_buffer_tab? fun(self: TircTheme, buffer: TircBufferTab): TircSpans
 ---@field render_buffer_bar? fun(self: TircTheme, buffers: TircBufferTab[]): TircBufferBar | TircSpans
@@ -506,6 +507,41 @@ function Theme:render_reactions(event, hovered_key)
         key = key,
         spans = {
           { ' ' .. key .. ' ' .. tostring(reaction.count) .. ' ', style },
+        },
+      }
+    end
+  end
+  return pills
+end
+
+--- Builds the quick-reaction pills for the selected message, appended onto the
+--- same row as `render_reactions` so both read as one unified strip. Each pill is
+--- styled exactly like an ordinary reaction pill (including the `reaction_hover`
+--- highlight when hovered), so they are visually indistinguishable. Emojis that
+--- already have a reaction are skipped here - `render_reactions` renders those
+--- (with their count) - to avoid a duplicate pill. `key` is the emoji so a click
+--- toggles that reaction. The number keys `1`..`9` map to `emojis` by position,
+--- so the first nine pills are prefixed with their shortcut number; the mapping
+--- follows the config index, which stays stable even when earlier emojis are
+--- skipped for already having a reaction.
+---@param event TircEvent
+---@param emojis string[]
+---@param hovered_key string|nil
+---@return TircReactionPill[]
+function Theme:render_quick_reactions(event, emojis, hovered_key)
+  local s = self.styles
+  local reactions = event.reactions or {}
+  local pills = {}
+  for i, emoji in ipairs(emojis) do
+    -- Skip emojis already shown as a counted reaction pill.
+    if not (reactions[emoji] and reactions[emoji].count > 0) then
+      local style = emoji == hovered_key and s.reaction_hover or s.reaction
+      -- Only the first nine positions have a number-key shortcut to label.
+      local label = i <= 9 and (tostring(i) .. ' ' .. emoji) or emoji
+      pills[#pills + 1] = {
+        key = emoji,
+        spans = {
+          { ' ' .. label .. ' ', style },
         },
       }
     end
