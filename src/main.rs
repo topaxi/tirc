@@ -139,7 +139,7 @@ async fn root_task(
     drop(event_tx);
 
     let mut tui = Tui::new()?;
-    tui.initialize_terminal()?;
+    tui.initialize_terminal(config.image_protocol)?;
 
     let mut input_handler = InputHandler::new(
         lua,
@@ -177,7 +177,14 @@ async fn root_task(
                     input_handler.mark_dirty();
                     continue;
                 }
-                Ok(_) => continue,
+                Ok(CrosstermEvent::FocusGained) => {
+                    input_handler.set_terminal_focus(true);
+                    continue;
+                }
+                Ok(CrosstermEvent::FocusLost) => {
+                    input_handler.set_terminal_focus(false);
+                    continue;
+                }
                 Err(_) => continue,
             },
             Some(message) = event_rx.recv() => Event::Backend(message),

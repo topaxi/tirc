@@ -107,6 +107,13 @@ impl<'lua> InputHandler<'lua> {
         self.dirty = true;
     }
 
+    /// Records terminal focus (drives whether inline images are emitted) and
+    /// requests a repaint so the change takes effect.
+    pub fn set_terminal_focus(&mut self, focused: bool) {
+        self.ui.set_focused(focused);
+        self.dirty = true;
+    }
+
     /// Returns whether a repaint is needed and clears the flag.
     pub fn take_dirty(&mut self) -> bool {
         std::mem::replace(&mut self.dirty, false)

@@ -28,8 +28,8 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::core::{
-    BackendEvent, BackendId, BackendMessage, ChatEvent, Command, EventId, MembershipChange,
-    MessageBody, MsgKind, Protocol, TargetId, TxnId, UserRef,
+    Attachment, AttachmentKind, BackendEvent, BackendId, BackendMessage, ChatEvent, Command,
+    EventId, MembershipChange, MessageBody, MsgKind, Protocol, TargetId, TxnId, UserRef,
 };
 
 use super::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
@@ -453,6 +453,7 @@ async fn connect_once(
                             &mut channel_names,
                             &session.user_id,
                             &username,
+                            &session.base_url,
                             &text,
                         ) {
                             log::warn!("WS frame error: {err}");
@@ -518,6 +519,7 @@ fn handle_ws_frame(
     channel_names: &mut HashMap<String, String>,
     my_user_id: &str,
     my_username: &str,
+    base_url: &str,
     text: &str,
 ) -> anyhow::Result<()> {
     let v: Value = serde_json::from_str(text)?;
@@ -579,6 +581,10 @@ fn handle_ws_frame(
                 Some(EventId(post_id))
             };
 
+            // File attachments are surfaced as a fallback line so a post that is
+            // only an upload (empty message) is never dropped.
+            let attachments = post_attachments(&post, base_url);
+
             send_event(
                 id,
                 events,
@@ -586,7 +592,7 @@ fn handle_ws_frame(
                     target: target.clone(),
                     id: event_id,
                     sender: UserRef::new(sender_name),
-                    body: MessageBody::plain(message),
+                    body: MessageBody::with_attachments(message, attachments),
                     kind: MsgKind::Text,
                     echo_of,
                     time,
@@ -743,16 +749,65 @@ fn handle_ws_frame(
             }
         }
 
-        _ => {}
+        // High-frequency ephemeral events carry no content and would flood the
+        // status buffer, so they stay silent (mirrors IRC PING/PONG).
+        "typing"
+        | "status_change"
+        | "hello"
+        | "channel_viewed"
+        | "multiple_channels_viewed"
+        | "preferences_changed"
+        | "sidebar_category_updated" => {}
+
+        // Any other event surfaces as a status line so a gap is visible rather
+        // than silently dropped.
+        other => send_event(id, events, ChatEvent::unsupported_event(other.to_string())),
     }
 
     Ok(())
+}
+
+/// Extracts file attachments from a post's `metadata.files`, classifying each by
+/// mime type and pairing it with the Mattermost file API URL (which needs the
+/// session token to fetch, but is a real link for the fallback line).
+fn post_attachments(post: &Value, base_url: &str) -> Vec<Attachment> {
+    let Some(files) = post["metadata"]["files"].as_array() else {
+        return Vec::new();
+    };
+
+    files
+        .iter()
+        .map(|file| {
+            let mime = file["mime_type"].as_str().map(str::to_string);
+            let kind = match mime.as_deref() {
+                Some(m) if m.starts_with("image/") => AttachmentKind::Image,
+                Some(m) if m.starts_with("video/") => AttachmentKind::Video,
+                Some(m) if m.starts_with("audio/") => AttachmentKind::Audio,
+                _ => AttachmentKind::File,
+            };
+            let file_id = file["id"].as_str().unwrap_or_default();
+            let name = file["name"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(file_id)
+                .to_string();
+            Attachment {
+                kind,
+                name,
+                url: Some(format!("{base_url}/api/v4/files/{file_id}")),
+                source: None,
+                mime,
+                local_path: None,
+            }
+        })
+        .collect()
 }
 
 // ---- Command handling ----
 
 type WsSink = futures::stream::SplitSink<WsStream, WsMessage>;
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_command(
     id: BackendId,
     session: &MmSession,
@@ -891,7 +946,34 @@ async fn apply_command(
 
 #[cfg(test)]
 mod tests {
-    use super::make_ws_url;
+    use super::{make_ws_url, post_attachments, AttachmentKind};
+
+    #[test]
+    fn post_attachments_classify_by_mime_and_build_urls() {
+        let post = serde_json::json!({
+            "metadata": { "files": [
+                { "id": "abc", "name": "cat.png", "mime_type": "image/png" },
+                { "id": "def", "name": "clip.mp4", "mime_type": "video/mp4" },
+                { "id": "ghi", "name": "doc.pdf", "mime_type": "application/pdf" },
+            ]}
+        });
+        let attachments = post_attachments(&post, "https://mm.example.com");
+        assert_eq!(attachments.len(), 3);
+        assert_eq!(attachments[0].kind, AttachmentKind::Image);
+        assert_eq!(attachments[0].name, "cat.png");
+        assert_eq!(
+            attachments[0].url.as_deref(),
+            Some("https://mm.example.com/api/v4/files/abc")
+        );
+        assert_eq!(attachments[1].kind, AttachmentKind::Video);
+        assert_eq!(attachments[2].kind, AttachmentKind::File);
+    }
+
+    #[test]
+    fn post_without_files_has_no_attachments() {
+        let post = serde_json::json!({ "message": "hi" });
+        assert!(post_attachments(&post, "https://mm.example.com").is_empty());
+    }
 
     #[test]
     fn ws_url_http() {

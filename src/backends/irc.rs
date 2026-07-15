@@ -632,7 +632,17 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
             text: numeric_text(args),
             raw: Some(raw()),
         }),
-        // PING/PONG/CAP/etc. carry no user-facing content.
+        // A command the library did not recognize: it may carry content, so
+        // surface it as a status line rather than dropping it silently.
+        IrcCommand::Raw(command, args) => Some(ChatEvent::ServerInfo {
+            target: None,
+            from: prefix_name(message),
+            code: Some(command.clone()),
+            text: format!("[unsupported event {}] {}", command, args.join(" ")),
+            raw: Some(raw()),
+        }),
+        // PING/PONG/CAP/etc. are transport housekeeping with no user-facing
+        // content; surfacing them would flood the status buffer.
         _ => None,
     }
 }

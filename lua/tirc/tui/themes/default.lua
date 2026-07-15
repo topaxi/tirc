@@ -410,12 +410,37 @@ function Theme:message_time(dt, _event)
   }
 end
 
+--- Appends non-image media attachments to a spans table in place, each as a
+--- `[kind: name] url` fallback. Image attachments are handled by the renderer
+--- (drawn inline when the terminal supports graphics, or shown as their own
+--- fallback line otherwise), so they are skipped here to avoid a duplicate label
+--- next to the inline picture.
+---@param spans table
+---@param event TircEvent
+function Theme:append_attachments(spans, event)
+  local attachments = event.body and event.body.attachments
+  if not attachments then
+    return
+  end
+  local s = self.styles
+  for _, attachment in ipairs(attachments) do
+    if attachment.kind ~= 'image' then
+      spans[#spans + 1] =
+        { ' [' .. attachment.kind .. ': ' .. attachment.name .. ']', s.blue }
+      if attachment.url then
+        spans[#spans + 1] = { ' ' .. attachment.url, s.darkgray }
+      end
+    end
+  end
+end
+
 --- Appends `(edited)` to a spans table in place. Reactions are no longer
 --- appended here; they render on their own row via `render_reactions`.
 ---@param spans table
 ---@param event TircEvent
 function Theme:append_message_meta(spans, event)
   local s = self.styles
+  self:append_attachments(spans, event)
   if event.edited then
     spans[#spans + 1] = { ' (edited)', s.darkgray }
   end

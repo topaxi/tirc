@@ -21,7 +21,7 @@
 //! outgoing [`Command`]s are applied directly to the client.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -33,6 +33,7 @@ use matrix_sdk::deserialized_responses::TimelineEvent;
 use matrix_sdk::encryption::verification::{
     SasState, SasVerification, Verification, VerificationRequest, VerificationRequestState,
 };
+use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
 use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::ruma::events::key::verification::request::ToDeviceKeyVerificationRequestEvent;
 use matrix_sdk::ruma::events::reaction::ReactionEventContent;
@@ -48,16 +49,18 @@ use matrix_sdk::ruma::events::room::message::{
 };
 use matrix_sdk::ruma::events::room::redaction::SyncRoomRedactionEvent;
 use matrix_sdk::ruma::events::room::topic::SyncRoomTopicEvent;
+use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::events::{
-    AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
+    AnySyncMessageLikeEvent, AnySyncStateEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
 };
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{OwnedRoomId, OwnedTransactionId, RoomId, UserId};
 use matrix_sdk::{Client, Room};
 
 use crate::core::{
-    BackendEvent, BackendId, BackendMessage, ChatEvent, Command, EventId, Formatted, MemberRole,
-    MembershipChange, MessageBody, MsgKind, Protocol, TargetId, TxnId, UserRef, VerifyAction,
+    Attachment, AttachmentKind, BackendEvent, BackendId, BackendMessage, ChatEvent, Command,
+    EventId, Formatted, MemberRole, MembershipChange, MessageBody, MsgKind, Protocol, TargetId,
+    TxnId, UserRef, VerifyAction,
 };
 
 use super::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
@@ -131,6 +134,11 @@ impl ChatBackend for MatrixBackend {
         let id = self.id;
         let store_path = self.store_path()?;
         let session_path = Self::session_path(&store_path);
+        // Cache directory for downloaded media (images shown inline). Best-effort:
+        // a failure here only means images are not fetched, not that the backend
+        // stops.
+        let media_dir = store_path.join("media");
+        let _ = std::fs::create_dir_all(&media_dir);
 
         let client = authenticate(&self.config, &store_path, &session_path).await?;
 
@@ -169,7 +177,7 @@ impl ChatBackend for MatrixBackend {
         let known_topics_path = store_path.join("known_topics.json");
         let mut known_topics = load_known_topics(&known_topics_path);
         for room in joined {
-            populate_room(&room, id, &events, &mut known_topics).await;
+            populate_room(&room, id, &events, &mut known_topics, &media_dir).await;
         }
         save_known_topics(&known_topics_path, &known_topics);
 
@@ -189,6 +197,7 @@ impl ChatBackend for MatrixBackend {
             reactions.clone(),
             known_topics,
             known_topics_path,
+            media_dir.clone(),
         );
 
         // Drive the SDK sync loop in the background; it resumes from the store's
@@ -317,6 +326,7 @@ impl ReactionIndex {
 }
 
 /// Registers sync handlers translating Matrix events into [`ChatEvent`]s.
+#[allow(clippy::too_many_arguments)]
 fn register_handlers(
     client: &Client,
     id: BackendId,
@@ -325,16 +335,41 @@ fn register_handlers(
     reactions: ReactionIndex,
     known_topics: Arc<Mutex<HashMap<String, String>>>,
     known_topics_path: PathBuf,
+    media_dir: PathBuf,
 ) {
     let message_events = events.clone();
+    let message_media_dir = media_dir.clone();
     client.add_event_handler(move |event: SyncRoomMessageEvent, room: Room| {
         let events = message_events.clone();
+        let media_dir = message_media_dir.clone();
         async move {
             if let SyncRoomMessageEvent::Original(event) = event {
-                if let Some(chat) = message_event_to_chat(event, &room).await {
-                    emit(&events, id, chat);
-                }
+                emit(
+                    &events,
+                    id,
+                    message_event_to_chat(event, &room, &media_dir).await,
+                );
             }
+        }
+    });
+
+    // Catch-all for timeline events not handled by a specific handler above, so
+    // an unmapped event surfaces as a line instead of being dropped. This fires
+    // for every timeline event (in addition to the specific handlers), hence the
+    // explicit skip-list of variants already handled. Ephemeral events (typing,
+    // receipts) are not timeline events and never reach this path.
+    let catch_all_events = events.clone();
+    client.add_event_handler(move |event: AnySyncTimelineEvent, room: Room| {
+        let events = catch_all_events.clone();
+        async move {
+            if is_handled_timeline_event(&event) {
+                return;
+            }
+            emit(
+                &events,
+                id,
+                unsupported_room_event(&room, event.event_type().to_string()),
+            );
         }
     });
 
@@ -1063,6 +1098,7 @@ async fn populate_room(
     id: BackendId,
     events: &EventSender,
     known_topics: &mut HashMap<String, String>,
+    media_dir: &Path,
 ) {
     let target = room_target(room);
 
@@ -1129,7 +1165,7 @@ async fn populate_room(
         }
     }
 
-    backfill_room(room, id, events).await;
+    backfill_room(room, id, events, media_dir).await;
 }
 
 /// Maps a Matrix power level to a member role (100 = admin, 50 = moderator).
@@ -1190,42 +1226,159 @@ fn message_body(
     MessageBody {
         text: body,
         formatted: formatted.map(|f| Formatted::Html(f.body)),
+        attachments: Vec::new(),
     }
 }
 
-/// Translates a room message event into a normalized [`ChatEvent::Message`].
-/// Shared by the live sync handler and history backfill so both render
-/// identically. `echo_of` is recovered from the homeserver-echoed transaction id
-/// (the Matrix analogue of IRC's labeled-response), so our own sends de-duplicate
-/// against their optimistic local copy in [`State`](crate::ui::State).
-async fn message_event_to_chat(
-    event: OriginalSyncRoomMessageEvent,
+/// Media larger than this is still surfaced as a fallback line, but not
+/// downloaded, so a huge upload cannot stall the backend or fill the cache.
+const MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
+
+/// Whether a timeline event is already handled by a dedicated handler, so the
+/// catch-all in [`register_handlers`] must not also emit a line for it.
+fn is_handled_timeline_event(event: &AnySyncTimelineEvent) -> bool {
+    matches!(
+        event,
+        AnySyncTimelineEvent::MessageLike(
+            AnySyncMessageLikeEvent::RoomMessage(_)
+                | AnySyncMessageLikeEvent::RoomEncrypted(_)
+                | AnySyncMessageLikeEvent::Reaction(_)
+                | AnySyncMessageLikeEvent::RoomRedaction(_)
+        ) | AnySyncTimelineEvent::State(
+            AnySyncStateEvent::RoomMember(_) | AnySyncStateEvent::RoomTopic(_)
+        )
+    )
+}
+
+/// A room-scoped line for an event we received but do not map to a normalized
+/// variant, so protocol gaps surface in the room instead of vanishing.
+fn unsupported_room_event(room: &Room, type_name: String) -> ChatEvent {
+    ChatEvent::ServerInfo {
+        target: Some(room_target(room)),
+        from: None,
+        code: Some(type_name.clone()),
+        text: format!("[unsupported event {type_name}]"),
+        raw: None,
+    }
+}
+
+/// Downloads a media source into the cache directory and returns its path. A raw
+/// homeserver media URL is not browser-openable (authenticated media requires a
+/// bearer token), so the SDK-authenticated download to a local file is what makes
+/// the attachment reachable. Skips oversized media per [`MAX_MEDIA_BYTES`].
+async fn download_media(
     room: &Room,
-) -> Option<ChatEvent> {
-    // An m.replace relation means this is an edit of an earlier event.
-    if let Some(Relation::Replacement(replacement)) = event.content.relates_to {
-        let (_, body) = match replacement.new_content.msgtype {
-            MessageType::Text(content) => {
-                (MsgKind::Text, message_body(content.body, content.formatted))
-            }
-            MessageType::Emote(content) => (
-                MsgKind::Action,
-                message_body(content.body, content.formatted),
-            ),
-            MessageType::Notice(content) => (
-                MsgKind::Notice,
-                message_body(content.body, content.formatted),
-            ),
-            _ => return None,
-        };
-        return Some(ChatEvent::Edit {
-            target: room_target(room),
-            id: EventId(replacement.event_id.to_string()),
-            body,
-        });
+    source: &MediaSource,
+    size: Option<usize>,
+    ext: Option<&str>,
+    media_dir: &Path,
+) -> Option<PathBuf> {
+    if size.is_some_and(|size| size > MAX_MEDIA_BYTES) {
+        return None;
     }
 
-    let (kind, body) = match event.content.msgtype {
+    let path = media_dir.join(media_cache_key(source, ext));
+    if path.exists() {
+        return Some(path);
+    }
+
+    let request = MediaRequestParameters {
+        source: source.clone(),
+        format: MediaFormat::File,
+    };
+    match room
+        .client()
+        .media()
+        .get_media_content(&request, true)
+        .await
+    {
+        Ok(bytes) if bytes.len() <= MAX_MEDIA_BYTES => match tokio::fs::write(&path, bytes).await {
+            Ok(()) => Some(path),
+            Err(err) => {
+                log::warn!("failed to cache media at {path:?}: {err}");
+                None
+            }
+        },
+        Ok(_) => None,
+        Err(err) => {
+            log::warn!("failed to download media: {err}");
+            None
+        }
+    }
+}
+
+/// A filesystem-safe cache filename derived from the media's mxc id, with the
+/// original file extension appended so the cached file opens in the right viewer.
+fn media_cache_key(source: &MediaSource, ext: Option<&str>) -> String {
+    let raw = match source {
+        MediaSource::Plain(mxc) => mxc.to_string(),
+        MediaSource::Encrypted(file) => file.url.to_string(),
+    };
+    let mut key: String = raw
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    if let Some(ext) = ext {
+        key.push('.');
+        key.push_str(ext);
+    }
+    key
+}
+
+/// Picks a file extension for the cache filename, preferring the one on the
+/// original filename and falling back to the mime subtype (e.g. `image/png` ->
+/// `png`).
+fn media_extension(name: &str, mime: Option<&str>) -> Option<String> {
+    if let Some(ext) = Path::new(name).extension().and_then(|e| e.to_str()) {
+        return Some(ext.to_ascii_lowercase());
+    }
+    mime.and_then(|m| m.split('/').nth(1))
+        .map(|sub| sub.to_ascii_lowercase())
+}
+
+/// Builds an [`Attachment`] for a media message, downloading the content into the
+/// cache so it is reachable via its local path (and so images can render inline).
+async fn media_attachment(
+    room: &Room,
+    kind: AttachmentKind,
+    name: String,
+    source: &MediaSource,
+    mime: Option<String>,
+    size: Option<usize>,
+    media_dir: &Path,
+) -> Attachment {
+    let source_ref = match source {
+        MediaSource::Plain(mxc) => mxc.to_string(),
+        MediaSource::Encrypted(file) => file.url.to_string(),
+    };
+
+    let ext = media_extension(&name, mime.as_deref());
+    let local_path = download_media(room, source, size, ext.as_deref(), media_dir).await;
+    // The openable link is the cached file itself; a raw homeserver URL would
+    // 401/404 in a browser without the access token.
+    let url = local_path
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
+
+    Attachment {
+        kind,
+        name,
+        url,
+        source: Some(source_ref),
+        mime,
+        local_path,
+    }
+}
+
+/// Translates a message payload into a body, surfacing media as attachments and
+/// unknown message types as a placeholder line so nothing is silently dropped.
+/// Returns the presentation kind alongside the body.
+async fn msgtype_to_body(
+    room: &Room,
+    msgtype: MessageType,
+    media_dir: &Path,
+) -> (MsgKind, MessageBody) {
+    match msgtype {
         MessageType::Text(content) => {
             (MsgKind::Text, message_body(content.body, content.formatted))
         }
@@ -1237,8 +1390,127 @@ async fn message_event_to_chat(
             MsgKind::Notice,
             message_body(content.body, content.formatted),
         ),
-        _ => return None,
-    };
+        MessageType::Image(content) => {
+            let mime = content.info.as_ref().and_then(|i| i.mimetype.clone());
+            let size = content
+                .info
+                .as_ref()
+                .and_then(|i| i.size)
+                .map(|s| u64::from(s) as usize);
+            let caption = content.caption().unwrap_or_default().to_string();
+            let attachment = media_attachment(
+                room,
+                AttachmentKind::Image,
+                content.filename().to_string(),
+                &content.source,
+                mime,
+                size,
+                media_dir,
+            )
+            .await;
+            (
+                MsgKind::Text,
+                MessageBody::with_attachments(caption, vec![attachment]),
+            )
+        }
+        MessageType::File(content) => {
+            let mime = content.info.as_ref().and_then(|i| i.mimetype.clone());
+            let size = content
+                .info
+                .as_ref()
+                .and_then(|i| i.size)
+                .map(|s| u64::from(s) as usize);
+            let caption = content.caption().unwrap_or_default().to_string();
+            let attachment = media_attachment(
+                room,
+                AttachmentKind::File,
+                content.filename().to_string(),
+                &content.source,
+                mime,
+                size,
+                media_dir,
+            )
+            .await;
+            (
+                MsgKind::Text,
+                MessageBody::with_attachments(caption, vec![attachment]),
+            )
+        }
+        MessageType::Video(content) => {
+            let mime = content.info.as_ref().and_then(|i| i.mimetype.clone());
+            let size = content
+                .info
+                .as_ref()
+                .and_then(|i| i.size)
+                .map(|s| u64::from(s) as usize);
+            let caption = content.caption().unwrap_or_default().to_string();
+            let attachment = media_attachment(
+                room,
+                AttachmentKind::Video,
+                content.filename().to_string(),
+                &content.source,
+                mime,
+                size,
+                media_dir,
+            )
+            .await;
+            (
+                MsgKind::Text,
+                MessageBody::with_attachments(caption, vec![attachment]),
+            )
+        }
+        MessageType::Audio(content) => {
+            let mime = content.info.as_ref().and_then(|i| i.mimetype.clone());
+            let size = content
+                .info
+                .as_ref()
+                .and_then(|i| i.size)
+                .map(|s| u64::from(s) as usize);
+            let caption = content.caption().unwrap_or_default().to_string();
+            let attachment = media_attachment(
+                room,
+                AttachmentKind::Audio,
+                content.filename().to_string(),
+                &content.source,
+                mime,
+                size,
+                media_dir,
+            )
+            .await;
+            (
+                MsgKind::Text,
+                MessageBody::with_attachments(caption, vec![attachment]),
+            )
+        }
+        other => (
+            MsgKind::Notice,
+            MessageBody::plain(format!("[unsupported message of type {}]", other.msgtype())),
+        ),
+    }
+}
+
+/// Translates a room message event into a normalized [`ChatEvent`]. Shared by the
+/// live sync handler and history backfill so both render identically. `echo_of`
+/// is recovered from the homeserver-echoed transaction id (the Matrix analogue of
+/// IRC's labeled-response), so our own sends de-duplicate against their optimistic
+/// local copy in [`State`](crate::ui::State). Never drops a message: unknown types
+/// surface as a placeholder line.
+async fn message_event_to_chat(
+    event: OriginalSyncRoomMessageEvent,
+    room: &Room,
+    media_dir: &Path,
+) -> ChatEvent {
+    // An m.replace relation means this is an edit of an earlier event.
+    if let Some(Relation::Replacement(replacement)) = event.content.relates_to {
+        let (_, body) = msgtype_to_body(room, replacement.new_content.msgtype, media_dir).await;
+        return ChatEvent::Edit {
+            target: room_target(room),
+            id: EventId(replacement.event_id.to_string()),
+            body,
+        };
+    }
+
+    let (kind, body) = msgtype_to_body(room, event.content.msgtype, media_dir).await;
 
     let echo_of = event
         .unsigned
@@ -1249,7 +1521,7 @@ async fn message_event_to_chat(
 
     let time = server_ts(event.origin_server_ts);
 
-    Some(ChatEvent::Message {
+    ChatEvent::Message {
         target: room_target(room),
         id: Some(EventId(event.event_id.to_string())),
         sender: sender_ref(room, &event.sender).await,
@@ -1257,12 +1529,12 @@ async fn message_event_to_chat(
         kind,
         echo_of,
         time,
-    })
+    }
 }
 
 /// Backfills the most recent messages of a room (oldest-first) so freshly-opened
 /// buffers show history instead of being empty until new activity.
-async fn backfill_room(room: &Room, id: BackendId, events: &EventSender) {
+async fn backfill_room(room: &Room, id: BackendId, events: &EventSender, media_dir: &Path) {
     let mut options = MessagesOptions::backward();
     options.limit = 30u32.into();
 
@@ -1273,7 +1545,7 @@ async fn backfill_room(room: &Room, id: BackendId, events: &EventSender) {
     // `chunk` is newest-first; collect translated messages then emit oldest-first.
     let mut chats = Vec::new();
     for timeline_event in messages.chunk {
-        if let Some(chat) = backfill_event_to_chat(timeline_event, room).await {
+        if let Some(chat) = backfill_event_to_chat(timeline_event, room, media_dir).await {
             chats.push(chat);
         }
     }
@@ -1286,16 +1558,22 @@ async fn backfill_room(room: &Room, id: BackendId, events: &EventSender) {
 /// Translates a single backfilled timeline event into a [`ChatEvent`]. Unlike
 /// the live sync path, `room.messages` returns raw events without decrypting, so
 /// encrypted ones are decrypted here (falling back to a placeholder when the keys
-/// are unavailable).
-async fn backfill_event_to_chat(timeline_event: TimelineEvent, room: &Room) -> Option<ChatEvent> {
+/// are unavailable). Message-like events that map to nothing else surface as an
+/// unsupported-event line rather than being dropped.
+async fn backfill_event_to_chat(
+    timeline_event: TimelineEvent,
+    room: &Room,
+    media_dir: &Path,
+) -> Option<ChatEvent> {
     let raw = timeline_event.raw();
-    match raw.deserialize() {
+    let deserialized = raw.deserialize();
+    match deserialized {
         Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
             SyncMessageLikeEvent::Original(event),
-        ))) => message_event_to_chat(event, room).await,
+        ))) => Some(message_event_to_chat(event, room, media_dir).await),
         Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomEncrypted(
             SyncMessageLikeEvent::Original(event),
-        ))) => Some(decrypt_backfill_event(event, raw, room).await),
+        ))) => Some(decrypt_backfill_event(event, raw, room, media_dir).await),
         Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomRedaction(
             SyncRoomRedactionEvent::Original(event),
         ))) => {
@@ -1318,7 +1596,12 @@ async fn backfill_event_to_chat(timeline_event: TimelineEvent, room: &Room) -> O
             key: event.content.relates_to.key,
             add: true,
         }),
-        _ => None,
+        // Events handled elsewhere (membership/topic seeded by populate_room) are
+        // skipped; anything else surfaces as an unsupported-event line so a gap is
+        // visible rather than silent.
+        Ok(other) if is_handled_timeline_event(&other) => None,
+        Ok(other) => Some(unsupported_room_event(room, other.event_type().to_string())),
+        Err(_) => None,
     }
 }
 
@@ -1330,15 +1613,14 @@ async fn decrypt_backfill_event(
     encrypted: OriginalSyncRoomEncryptedEvent,
     raw: &Raw<AnySyncTimelineEvent>,
     room: &Room,
+    media_dir: &Path,
 ) -> ChatEvent {
     if let Ok(decrypted) = room.decrypt_event(raw.cast_ref_unchecked(), None).await {
         if let Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
             SyncMessageLikeEvent::Original(event),
         ))) = decrypted.raw().deserialize()
         {
-            if let Some(chat) = message_event_to_chat(event, room).await {
-                return chat;
-            }
+            return message_event_to_chat(event, room, media_dir).await;
         }
     }
 
@@ -1535,6 +1817,16 @@ mod tests {
     use crate::core::TxnId;
     use std::time::Duration;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn media_extension_prefers_filename_then_mime() {
+        assert_eq!(media_extension("cat.PNG", None).as_deref(), Some("png"));
+        assert_eq!(
+            media_extension("report", Some("application/pdf")).as_deref(),
+            Some("pdf")
+        );
+        assert_eq!(media_extension("noext", None), None);
+    }
 
     /// End-to-end check against a live homeserver (see `dev/matrix`). Logs in,
     /// joins a room, sends a message, and asserts it comes back through sync as a

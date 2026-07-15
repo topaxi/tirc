@@ -80,6 +80,20 @@ pub enum SelectionMode {
     Native,
 }
 
+/// Which terminal graphics protocol to use for inline images. `Auto` queries the
+/// terminal; the others force a specific protocol for terminals that misreport or
+/// do not answer the query.
+#[derive(Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageProtocol {
+    /// Detect the protocol (and font size) by querying the terminal. The default.
+    #[default]
+    Auto,
+    Kitty,
+    Sixel,
+    Iterm2,
+}
+
 #[derive(Deserialize, Debug)]
 pub struct TircConfig {
     pub servers: Box<[ServerConfig]>,
@@ -93,6 +107,10 @@ pub struct TircConfig {
     /// Default mouse-drag selection behaviour. See [`SelectionMode`].
     #[serde(default)]
     pub selection_mode: SelectionMode,
+
+    /// Terminal graphics protocol for inline images. See [`ImageProtocol`].
+    #[serde(default)]
+    pub image_protocol: ImageProtocol,
 }
 
 fn get_default_config() -> &'static str {

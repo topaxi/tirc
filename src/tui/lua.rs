@@ -7,8 +7,8 @@ use tokio::sync::mpsc;
 
 use crate::backends::BackendInfo;
 use crate::core::{
-    ChatEvent, Command, MemberRole, MembershipChange, MessageBody, MsgKind, Protocol, TargetId,
-    TxnAllocator, UserRef,
+    Attachment, ChatEvent, Command, MemberRole, MembershipChange, MessageBody, MsgKind, Protocol,
+    TargetId, TxnAllocator, UserRef,
 };
 use crate::lua::get_or_create_module;
 use crate::ui::{Member, StoredMessage};
@@ -107,11 +107,27 @@ fn user_table(lua: &mlua::Lua, user: &UserRef) -> mlua::Result<mlua::Table> {
     Ok(table)
 }
 
+fn attachment_table(lua: &mlua::Lua, attachment: &Attachment) -> mlua::Result<mlua::Table> {
+    let table = lua.create_table()?;
+    table.set("kind", attachment.kind.label())?;
+    table.set("name", attachment.name.as_str())?;
+    table.set("url", attachment.url.clone())?;
+    table.set("mime", attachment.mime.clone())?;
+    Ok(table)
+}
+
 fn body_table(lua: &mlua::Lua, body: &MessageBody) -> mlua::Result<mlua::Table> {
     let table = lua.create_table()?;
     table.set("text", body.text.as_str())?;
     if let Some(crate::core::Formatted::Html(html)) = &body.formatted {
         table.set("html", html.as_str())?;
+    }
+    if !body.attachments.is_empty() {
+        let attachments = lua.create_table()?;
+        for attachment in &body.attachments {
+            attachments.push(attachment_table(lua, attachment)?)?;
+        }
+        table.set("attachments", attachments)?;
     }
     Ok(table)
 }

@@ -47,3 +47,5 @@ matrix-sdk = { version = "0.18.0", default-features = false, features = [
   "e2e-encryption",
   "automatic-room-key-forwarding",
 ] }
+ratatui-image = { version = "11", default-features = false, features = ["crossterm", "image-defaults"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }

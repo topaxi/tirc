@@ -34,10 +34,20 @@
 ---@field display? string
 ---@field name string
 
---- A message body: plain `text` plus optional rich `html` (Matrix).
+--- A media attachment on a message (image, file, ...). `kind` is one of
+--- 'image' | 'video' | 'audio' | 'file'; `url` is a resolvable link when known.
+---@class TircAttachment
+---@field kind 'image' | 'video' | 'audio' | 'file'
+---@field name string
+---@field url? string
+---@field mime? string
+
+--- A message body: plain `text` plus optional rich `html` (Matrix) and media
+--- `attachments`.
 ---@class TircBody
 ---@field text string
 ---@field html? string
+---@field attachments? TircAttachment[]
 
 --- A normalized chat event, as passed to the `message_text` formatter and the
 --- `event` callback. `type` selects which fields are present.

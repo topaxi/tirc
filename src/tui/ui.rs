@@ -1,5 +1,6 @@
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, Clear, ClearType,
@@ -14,9 +15,54 @@ use std::ops::RangeInclusive;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
+use ratatui_image::picker::{Picker, ProtocolType};
+
+use crate::config::ImageProtocol;
 use crate::ui::{State, ViewState};
 
 use super::renderer::Renderer;
+
+/// Maps the configured [`ImageProtocol`] to a forced [`ProtocolType`], or `None`
+/// for auto-detection.
+fn forced_protocol(image_protocol: ImageProtocol) -> Option<ProtocolType> {
+    match image_protocol {
+        ImageProtocol::Auto => None,
+        ImageProtocol::Kitty => Some(ProtocolType::Kitty),
+        ImageProtocol::Sixel => Some(ProtocolType::Sixel),
+        ImageProtocol::Iterm2 => Some(ProtocolType::Iterm2),
+    }
+}
+
+/// Builds the image [`Picker`] honoring the configured protocol. Auto-detection
+/// queries the terminal for both protocol and font size. A forced protocol still
+/// queries for the font size, but overrides the protocol; if the query fails
+/// entirely, it falls back to an assumed font size so forcing still works on
+/// terminals that do not answer.
+fn build_picker(image_protocol: ImageProtocol) -> Option<Picker> {
+    let forced = forced_protocol(image_protocol);
+    match Picker::from_query_stdio() {
+        Ok(mut picker) => {
+            if let Some(protocol) = forced {
+                picker.set_protocol_type(protocol);
+            }
+            Some(picker)
+        }
+        Err(err) => match forced {
+            Some(protocol) => {
+                // `halfblocks()` assumes a font size (and detects tmux) without a
+                // query, so a forced protocol still renders on terminals that do
+                // not answer the query, only at an approximate scale.
+                let mut picker = Picker::halfblocks();
+                picker.set_protocol_type(protocol);
+                Some(picker)
+            }
+            None => {
+                log::warn!("terminal image support unavailable: {err}");
+                None
+            }
+        },
+    }
+}
 
 pub struct Tui {
     terminal: ratatui::Terminal<CrosstermBackend<Stdout>>,
@@ -59,7 +105,8 @@ impl Tui {
             io::stdout(),
             LeaveAlternateScreen,
             DisableMouseCapture,
-            DisableBracketedPaste
+            DisableBracketedPaste,
+            DisableFocusChange
         )?;
 
         Ok(())
@@ -81,8 +128,25 @@ impl Tui {
         self.input.handle_event(event);
     }
 
-    pub fn initialize_terminal(&mut self) -> Result<(), anyhow::Error> {
+    /// Records terminal focus so inline images are only emitted while our pane is
+    /// active (see [`Renderer::set_focused`](super::renderer::Renderer::set_focused)).
+    pub fn set_focused(&mut self, focused: bool) {
+        self.renderer.set_focused(focused);
+    }
+
+    pub fn initialize_terminal(
+        &mut self,
+        image_protocol: crate::config::ImageProtocol,
+    ) -> Result<(), anyhow::Error> {
         enable_raw_mode()?;
+
+        // Set up terminal graphics for inline images. Must run before the async
+        // stdin reader starts (it reads the query reply) and while raw mode is on.
+        // Best-effort: on failure, inline images are disabled and media falls back
+        // to its textual line.
+        if let Some(picker) = build_picker(image_protocol) {
+            self.renderer.set_picker(picker);
+        }
 
         self.terminal.clear()?;
 
@@ -90,7 +154,8 @@ impl Tui {
             self.terminal.backend_mut(),
             EnterAlternateScreen,
             EnableMouseCapture,
-            EnableBracketedPaste
+            EnableBracketedPaste,
+            EnableFocusChange
         )?;
 
         Ok(())
@@ -217,7 +282,8 @@ impl Drop for Tui {
             self.terminal.backend_mut(),
             LeaveAlternateScreen,
             DisableMouseCapture,
-            DisableBracketedPaste
+            DisableBracketedPaste,
+            DisableFocusChange
         );
     }
 }
