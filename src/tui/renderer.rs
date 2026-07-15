@@ -710,6 +710,17 @@ impl Renderer {
             messages.push(ListItem::new(text));
         }
 
+        // The loop only emits a separator when the day changes between two
+        // messages, so the oldest day's block has none at its top. Push a final
+        // separator labelled with the oldest message's date; rendered
+        // bottom-to-top it lands above the first message. (Dropped by `List` when
+        // the oldest message is scrolled out of view.)
+        if let Some(sep_time) = prev_msg_time {
+            messages.push(ListItem::new(
+                self.render_date_separator(lua, &sep_time, rect.width),
+            ));
+        }
+
         let list = List::new(messages)
             .block(block)
             .direction(ListDirection::BottomToTop);
@@ -2071,6 +2082,85 @@ mod tests {
         assert!(
             text.contains("30 Jun 2026"),
             "expected '30 Jun 2026' in separator, got: {text:?}"
+        );
+        Ok(())
+    }
+
+    /// The oldest day's block gets a date separator at the very top of the list,
+    /// not just between day changes, so restored/scrolled-in history is always
+    /// dated. Two messages on consecutive days must yield separators for both.
+    #[test]
+    fn oldest_message_has_date_separator_at_top() -> anyhow::Result<(), anyhow::Error> {
+        use crate::backends::BackendInfo;
+        use crate::core::{BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef};
+        use crate::ui::{State, ViewState};
+        use chrono::TimeZone;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default'):setup({})")
+            .exec()?;
+
+        let backend = BackendId(0);
+        let mut state = State::new();
+        state.register_backend(BackendInfo {
+            id: backend,
+            protocol: Protocol::Irc,
+            name: "irc.example.com".to_string(),
+        });
+
+        // Noon UTC on two consecutive days: local dates stay one day apart under
+        // any timezone offset, so the two messages always land on different days.
+        let older = chrono::Utc.with_ymd_and_hms(2026, 6, 29, 12, 0, 0).unwrap();
+        let newer = chrono::Utc.with_ymd_and_hms(2026, 6, 30, 12, 0, 0).unwrap();
+        for (time, text) in [(older, "first"), (newer, "second")] {
+            state.apply(
+                backend,
+                ChatEvent::Message {
+                    target: TargetId::from("#chan"),
+                    id: None,
+                    sender: UserRef::new("alice"),
+                    body: MessageBody::plain(text),
+                    kind: MsgKind::Text,
+                    echo_of: None,
+                    time: Some(time),
+                },
+            );
+        }
+
+        let mut view = ViewState::new();
+        view.focus(BufferId::new(backend, "#chan"));
+
+        let mut renderer = Renderer::new();
+        let mut terminal = Terminal::new(TestBackend::new(60, 12))?;
+        terminal.draw(|f| renderer.render(f, &state, &mut view, &lua, &Input::default()))?;
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        // The theme formats separators as `%-d %b %Y`; assert both days appear -
+        // the newer one as a between-days separator and the older one at the top.
+        let older_label = older
+            .with_timezone(&chrono::Local)
+            .format("%-d %b %Y")
+            .to_string();
+        let newer_label = newer
+            .with_timezone(&chrono::Local)
+            .format("%-d %b %Y")
+            .to_string();
+        assert!(
+            rendered.contains(&older_label),
+            "expected oldest date {older_label:?} as a top separator, got: {rendered:?}"
+        );
+        assert!(
+            rendered.contains(&newer_label),
+            "expected newer date {newer_label:?} as a between-days separator, got: {rendered:?}"
         );
         Ok(())
     }
