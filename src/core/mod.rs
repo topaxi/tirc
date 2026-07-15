@@ -453,6 +453,17 @@ impl ChatEvent {
             ChatEvent::Rename { .. } | ChatEvent::Quit { .. } => None,
         }
     }
+
+    /// Whether this event only mutates buffer metadata, with no chat line and no
+    /// Lua representation. Such events must not be forwarded to the Lua `event`
+    /// callback nor stored as a rendered message - `to_lua_event` treats them as
+    /// [`unreachable!`]. Keep this in sync with the silent arms there.
+    pub fn is_silent_state_update(&self) -> bool {
+        matches!(
+            self,
+            ChatEvent::BufferTopic { .. } | ChatEvent::BufferKind { .. }
+        )
+    }
 }
 
 /// Backend connection lifecycle and normalized events, as delivered to the core.
@@ -574,6 +585,38 @@ mod tests {
         let buffer = BufferId::status(BackendId(0));
         assert!(buffer.target.is_status());
         assert_eq!(buffer.target.as_str(), TargetId::STATUS);
+    }
+
+    #[test]
+    fn silent_state_updates_are_not_forwarded_to_lua() {
+        // These carry no chat line and hit `unreachable!` in to_lua_event, so
+        // emit_lua_event must skip them. Regression guard for the BufferKind panic.
+        let target = TargetId::from("!room:m.org");
+        assert!(ChatEvent::BufferTopic {
+            target: target.clone(),
+            topic: "t".into(),
+        }
+        .is_silent_state_update());
+        assert!(ChatEvent::BufferKind {
+            target: target.clone(),
+            kind: BufferKind::System,
+        }
+        .is_silent_state_update());
+
+        // Events that do render / reach Lua must not be classified as silent.
+        assert!(!ChatEvent::BufferName {
+            target: target.clone(),
+            name: "Room".into(),
+        }
+        .is_silent_state_update());
+        assert!(!ChatEvent::ServerInfo {
+            target: None,
+            from: None,
+            code: None,
+            text: "hi".into(),
+            raw: None,
+        }
+        .is_silent_state_update());
     }
 
     #[test]

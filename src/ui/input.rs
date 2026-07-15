@@ -1155,7 +1155,7 @@ impl<'lua> InputHandler<'lua> {
     /// on it, so failures are ignored.
     fn emit_lua_event(&mut self, state: &State, backend: BackendId, event: &ChatEvent) {
         // Silent state-only events have no Lua representation and no chat line.
-        if matches!(event, ChatEvent::BufferTopic { .. }) {
+        if event.is_silent_state_update() {
             return;
         }
 
