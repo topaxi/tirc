@@ -17,7 +17,7 @@ use crate::core::{
     VerifyAction,
 };
 use crate::tui::lua::{create_lua_sender, to_lua_event};
-use crate::tui::Tui;
+use crate::tui::{DecodedImage, Tui};
 use crate::ui::ConnectionStatus;
 
 use super::state::StoredMessage;
@@ -112,6 +112,12 @@ impl<'lua> InputHandler<'lua> {
     pub fn set_terminal_focus(&mut self, focused: bool) {
         self.ui.set_focused(focused);
         self.dirty = true;
+    }
+
+    /// Feeds a finished background image decode into the renderer's cache. The
+    /// caller marks the frame dirty so the newly decoded image is drawn.
+    pub fn insert_decoded_image(&mut self, decoded: DecodedImage) {
+        self.ui.insert_decoded_image(decoded);
     }
 
     /// Returns whether a repaint is needed and clears the flag.

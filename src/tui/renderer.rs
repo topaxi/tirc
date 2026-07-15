@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use mlua::LuaSerdeExt;
@@ -9,7 +9,8 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListDirection, ListItem, ListState, Paragraph},
 };
-use ratatui_image::{picker::Picker, protocol::Protocol, Image, Resize};
+use ratatui_image::{protocol::Protocol, Image};
+use tokio::sync::mpsc::UnboundedSender;
 use tui_input::Input;
 
 use tracing::Level;
@@ -110,11 +111,37 @@ struct ImageAttachment {
     url: Option<String>,
 }
 
+/// A request to decode and encode one image off the main loop. Sent by the
+/// renderer (during draw) to the background decode worker; `avail` is the cell
+/// area the protocol must fit into.
+#[derive(Debug, Clone)]
+pub struct DecodeRequest {
+    pub path: PathBuf,
+    pub avail: Size,
+}
+
+/// The result of a background decode, handed back to the main loop and then into
+/// the renderer's cache. `protocol` is `None` when the file could not be
+/// decoded/encoded, so the renderer can stop re-requesting it.
+pub struct DecodedImage {
+    pub path: PathBuf,
+    pub protocol: Option<Protocol>,
+}
+
 pub struct Renderer {
-    /// Terminal graphics capabilities (protocol + font size), detected once at
-    /// startup. `None` when detection failed or the terminal has no graphics
-    /// protocol; inline images are skipped and only the textual fallback shows.
-    picker: Option<Picker>,
+    /// Whether inline images can be rendered at all. `false` when graphics
+    /// detection failed or the terminal has no graphics protocol; then images
+    /// only show their textual fallback and no decodes are requested.
+    images_enabled: bool,
+    /// Channel to the background decode worker. `None` until wired at startup (or
+    /// permanently when images are disabled); without it, images fall back to text.
+    decode_tx: Option<UnboundedSender<DecodeRequest>>,
+    /// Paths with a decode request already in flight, so the renderer does not
+    /// re-send the same request on every frame while the worker is busy.
+    pending: RefCell<HashSet<PathBuf>>,
+    /// Paths whose decode failed; shown as the textual fallback permanently rather
+    /// than re-requested each frame.
+    failed: RefCell<HashSet<PathBuf>>,
     /// Encoded image protocols keyed by their cache-file path, so an image is
     /// decoded and encoded once and re-emitted cheaply each frame. Stateless
     /// protocols are used (rather than the diffing stateful ones) because the
@@ -232,16 +259,40 @@ fn image_fallback_line(indent: u16, image: &ImageAttachment) -> Line<'static> {
 impl Renderer {
     pub fn new() -> Self {
         Self {
-            picker: None,
+            images_enabled: false,
+            decode_tx: None,
+            pending: RefCell::new(HashSet::new()),
+            failed: RefCell::new(HashSet::new()),
             image_cache: RefCell::new(HashMap::new()),
             focused: true,
         }
     }
 
-    /// Stores the detected terminal graphics capabilities, enabling inline image
-    /// rendering. Called once after the terminal is initialized.
-    pub fn set_picker(&mut self, picker: Picker) {
-        self.picker = Some(picker);
+    /// Enables inline image rendering. Called once after the terminal is
+    /// initialized when graphics support was detected.
+    pub fn enable_images(&mut self) {
+        self.images_enabled = true;
+    }
+
+    /// Wires the channel used to request background image decodes. Called once at
+    /// startup after the decode worker is spawned.
+    pub fn set_decode_sender(&mut self, tx: UnboundedSender<DecodeRequest>) {
+        self.decode_tx = Some(tx);
+    }
+
+    /// Consumes a finished background decode: caches the encoded protocol so the
+    /// next frame draws it inline, or records the failure so it is not requested
+    /// again. Either way the path is no longer in flight.
+    pub fn insert_decoded(&mut self, decoded: DecodedImage) {
+        self.pending.borrow_mut().remove(&decoded.path);
+        match decoded.protocol {
+            Some(protocol) => {
+                self.image_cache.borrow_mut().insert(decoded.path, protocol);
+            }
+            None => {
+                self.failed.borrow_mut().insert(decoded.path);
+            }
+        }
     }
 
     /// Records terminal focus. While unfocused, inline images are not drawn so
@@ -360,31 +411,40 @@ impl Renderer {
         )
     }
 
-    /// Encodes (once, or again if `avail` shrank below it) an image fitted to the
-    /// available cell area and returns the cell size it occupies. `None` when
-    /// graphics are disabled or the file cannot be decoded/encoded.
-    fn image_cell_size(&self, path: &Path, avail: Size) -> Option<Size> {
-        let picker = self.picker.as_ref()?;
-        let mut cache = self.image_cache.borrow_mut();
-        // Re-encode when the previously fitted image no longer fits (terminal
-        // narrowed); growth keeps the smaller size, which is fine.
-        let needs_encode = match cache.get(path) {
-            Some(protocol) => {
-                protocol.size().width > avail.width || protocol.size().height > avail.height
-            }
-            None => true,
-        };
-        if needs_encode {
-            let image = image::ImageReader::open(path)
-                .ok()?
-                .with_guessed_format()
-                .ok()?
-                .decode()
-                .ok()?;
-            let protocol = picker.new_protocol(image, avail, Resize::Fit(None)).ok()?;
-            cache.insert(path.to_path_buf(), protocol);
+    /// Returns the cell size a decoded image occupies, or `None` when it is not
+    /// ready to draw inline this frame (graphics disabled, decode failed, or still
+    /// being decoded in the background). A miss - or a cached image that no longer
+    /// fits `avail` because the terminal narrowed - triggers a background decode
+    /// via [`Self::request_decode`]; the textual fallback shows until it lands.
+    fn image_size(&self, path: &Path, avail: Size) -> Option<Size> {
+        if !self.images_enabled || self.failed.borrow().contains(path) {
+            return None;
         }
-        Some(cache.get(path)?.size())
+        if let Some(size) = self.image_cache.borrow().get(path).map(Protocol::size) {
+            // Growth keeps the smaller size (fine); only a shrink below the fitted
+            // size needs a re-encode, which happens off-thread.
+            if size.width <= avail.width && size.height <= avail.height {
+                return Some(size);
+            }
+        }
+        self.request_decode(path, avail);
+        None
+    }
+
+    /// Queues a background decode+encode for `path` at `avail`, unless one is
+    /// already in flight. Non-blocking: the worker sends the result back and the
+    /// main loop hands it to [`Self::insert_decoded`].
+    fn request_decode(&self, path: &Path, avail: Size) {
+        let Some(tx) = &self.decode_tx else {
+            return;
+        };
+        if !self.pending.borrow_mut().insert(path.to_path_buf()) {
+            return;
+        }
+        let _ = tx.send(DecodeRequest {
+            path: path.to_path_buf(),
+            avail,
+        });
     }
 
     /// Draws the message list and returns the reaction-pill hit boxes recorded
@@ -553,11 +613,11 @@ impl Renderer {
             // the picture.
             let mut inline_images: Vec<(PathBuf, Size)> = Vec::new();
             for image in &rm.images {
-                let inline = if self.picker.is_some() && image_avail_width > 0 {
+                let inline = if self.images_enabled && image_avail_width > 0 {
                     image
                         .path
                         .as_ref()
-                        .and_then(|path| self.image_cell_size(path, avail).map(|size| (path, size)))
+                        .and_then(|path| self.image_size(path, avail).map(|size| (path, size)))
                         .filter(|(_, size)| size.width > 0 && size.height > 0)
                 } else {
                     None
@@ -2083,6 +2143,116 @@ mod tests {
             text.contains("[image: cat.png]"),
             "expected image fallback line, got: {text:?}"
         );
+        Ok(())
+    }
+
+    /// The first render of an image whose bytes are downloaded but not yet decoded
+    /// shows the textual fallback and enqueues one background `DecodeRequest`
+    /// (never blocking the frame). Once the decoded protocol is handed back via
+    /// `insert_decoded`, a second render draws it inline and the fallback is gone.
+    #[test]
+    fn image_decode_is_requested_then_rendered_inline() -> anyhow::Result<(), anyhow::Error> {
+        use crate::backends::BackendInfo;
+        use crate::core::{
+            Attachment, AttachmentKind, BackendId, ChatEvent, EventId, MessageBody, MsgKind,
+            Protocol, TargetId, UserRef,
+        };
+        use crate::ui::{State, ViewState};
+        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui_image::{picker::Picker, Resize};
+
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default'):setup({})")
+            .exec()?;
+
+        let backend = BackendId(0);
+        let mut state = State::new();
+        state.register_backend(BackendInfo {
+            id: backend,
+            protocol: Protocol::Matrix,
+            name: "matrix.example.com".to_string(),
+        });
+
+        let path = PathBuf::from("/cache/cat.png");
+        state.apply(
+            backend,
+            ChatEvent::Message {
+                target: TargetId::from("#chan"),
+                id: Some(EventId("$1".to_string())),
+                sender: UserRef::new("alice"),
+                body: MessageBody::with_attachments(
+                    "",
+                    vec![Attachment {
+                        kind: AttachmentKind::Image,
+                        name: "cat.png".to_string(),
+                        url: Some("/cache/cat.png".to_string()),
+                        source: None,
+                        mime: Some("image/png".to_string()),
+                        local_path: Some(path.clone()),
+                    }],
+                ),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+
+        let mut view = ViewState::new();
+        view.focus(BufferId::new(backend, "#chan"));
+
+        // Simulate a terminal with graphics support, wiring the decode channel the
+        // main loop would own.
+        let mut renderer = Renderer::new();
+        renderer.enable_images();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DecodeRequest>();
+        renderer.set_decode_sender(tx);
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 12))?;
+        terminal.draw(|f| renderer.render(f, &state, &mut view, &lua, &Input::default()))?;
+
+        let rendered = |terminal: &Terminal<TestBackend>| -> String {
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect()
+        };
+
+        // First frame: fallback shown, exactly one decode requested for our path.
+        assert!(
+            rendered(&terminal).contains("[image: cat.png]"),
+            "expected fallback while decode is pending"
+        );
+        let request = rx.try_recv().expect("a decode request was enqueued");
+        assert_eq!(request.path, path);
+        assert!(rx.try_recv().is_err(), "only one request should be enqueued");
+
+        // Hand back a decoded protocol fitted to the same area the renderer asked
+        // for (halfblocks needs no terminal query, so it works headless).
+        let picker = Picker::halfblocks();
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 4));
+        let protocol = picker
+            .new_protocol(image, request.avail, Resize::Fit(None))
+            .expect("encode stub protocol");
+        renderer.insert_decoded(DecodedImage {
+            path: path.clone(),
+            protocol: Some(protocol),
+        });
+
+        // Second frame: drawn inline, no fallback line, and no further request.
+        terminal.draw(|f| renderer.render(f, &state, &mut view, &lua, &Input::default()))?;
+        assert!(
+            !rendered(&terminal).contains("[image: cat.png]"),
+            "expected inline image after decode, not the fallback"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no re-request once the image is cached"
+        );
+
         Ok(())
     }
 }

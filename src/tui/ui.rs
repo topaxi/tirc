@@ -21,6 +21,8 @@ use crate::config::ImageProtocol;
 use crate::ui::{State, ViewState};
 
 use super::renderer::Renderer;
+use super::{DecodeRequest, DecodedImage};
+use tokio::sync::mpsc::UnboundedSender;
 
 /// Maps the configured [`ImageProtocol`] to a forced [`ProtocolType`], or `None`
 /// for auto-detection.
@@ -144,18 +146,22 @@ impl Tui {
         self.renderer.set_focused(focused);
     }
 
+    /// Prepares the terminal and, if graphics are supported, returns the built
+    /// [`Picker`] so the caller can spawn the background image-decode worker with
+    /// it. `None` means inline images are disabled and media falls back to text.
     pub fn initialize_terminal(
         &mut self,
         image_protocol: crate::config::ImageProtocol,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<Option<Picker>, anyhow::Error> {
         enable_raw_mode()?;
 
         // Set up terminal graphics for inline images. Must run before the async
         // stdin reader starts (it reads the query reply) and while raw mode is on.
         // Best-effort: on failure, inline images are disabled and media falls back
         // to its textual line.
-        if let Some(picker) = build_picker(image_protocol) {
-            self.renderer.set_picker(picker);
+        let picker = build_picker(image_protocol);
+        if picker.is_some() {
+            self.renderer.enable_images();
         }
 
         self.terminal.clear()?;
@@ -168,7 +174,17 @@ impl Tui {
             EnableFocusChange
         )?;
 
-        Ok(())
+        Ok(picker)
+    }
+
+    /// Wires the channel the renderer uses to request background image decodes.
+    pub fn set_decode_sender(&mut self, tx: UnboundedSender<DecodeRequest>) {
+        self.renderer.set_decode_sender(tx);
+    }
+
+    /// Feeds a finished background decode into the renderer's image cache.
+    pub fn insert_decoded_image(&mut self, decoded: DecodedImage) {
+        self.renderer.insert_decoded(decoded);
     }
 
     /// Queues a full repaint that takes effect on the next [`Self::render`]:

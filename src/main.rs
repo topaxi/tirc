@@ -14,8 +14,11 @@ use tirc::backends::mattermost::{MattermostBackend, MattermostBackendConfig};
 use tirc::backends::{self, ChatBackend};
 use tirc::config::{load_config, ServerConfig, TircConfig};
 use tirc::core::{BackendId, BackendMessage, BufferId, Protocol, TxnAllocator};
-use tirc::tui::Tui;
+use tirc::tui::{DecodeRequest, DecodedImage, Tui};
 use tirc::ui::{Event, InputHandler, State, ViewState};
+
+use ratatui::layout::Size;
+use ratatui_image::{picker::Picker, protocol::Protocol as EncodedImage, Resize};
 
 const TICK_RATE: Duration = Duration::from_millis(1000);
 
@@ -139,7 +142,19 @@ async fn root_task(
     drop(event_tx);
 
     let mut tui = Tui::new()?;
-    tui.initialize_terminal(config.image_protocol)?;
+    let picker = tui.initialize_terminal(config.image_protocol)?;
+
+    // Inline images are decoded and encoded off the main loop: the renderer sends
+    // decode requests over `decode_tx`, a background worker turns them into encoded
+    // protocols, and the results come back over `decoded_rx` to be cached. Both
+    // channels stay unused (the worker is never spawned) when graphics are
+    // unavailable, so media falls back to its textual line.
+    let (decode_tx, decode_rx) = tokio::sync::mpsc::unbounded_channel::<DecodeRequest>();
+    let (decoded_tx, mut decoded_rx) = tokio::sync::mpsc::unbounded_channel::<DecodedImage>();
+    if let Some(picker) = picker {
+        tui.set_decode_sender(decode_tx);
+        tokio::spawn(image_decode_worker(picker, decode_rx, decoded_tx));
+    }
 
     let mut input_handler = InputHandler::new(
         lua,
@@ -188,6 +203,11 @@ async fn root_task(
                 Err(_) => continue,
             },
             Some(message) = event_rx.recv() => Event::Backend(message),
+            Some(decoded) = decoded_rx.recv() => {
+                input_handler.insert_decoded_image(decoded);
+                input_handler.mark_dirty();
+                continue;
+            }
             _ = tick.tick() => {
                 idle_ticks += 1;
                 if idle_ticks >= RENDER_HEARTBEAT_TICKS {
@@ -222,6 +242,42 @@ async fn root_task(
     }
 
     Ok(())
+}
+
+/// Background image-decode worker. Owns the terminal graphics [`Picker`] and turns
+/// decode requests into encoded protocols off the main loop: each request is
+/// decoded and encoded on the blocking pool, so several images in a freshly-opened
+/// buffer decode concurrently, and the result is sent back for the main loop to
+/// cache. The `Picker` is cheap to clone and its `new_protocol` takes `&self`, so
+/// cloning it per job is safe.
+async fn image_decode_worker(
+    picker: Picker,
+    mut requests: tokio::sync::mpsc::UnboundedReceiver<DecodeRequest>,
+    decoded: tokio::sync::mpsc::UnboundedSender<DecodedImage>,
+) {
+    while let Some(request) = requests.recv().await {
+        let picker = picker.clone();
+        let decoded = decoded.clone();
+        tokio::task::spawn_blocking(move || {
+            let protocol = decode_image(&picker, &request.path, request.avail);
+            let _ = decoded.send(DecodedImage {
+                path: request.path,
+                protocol,
+            });
+        });
+    }
+}
+
+/// Opens, decodes, and encodes one image fitted to `avail`. Returns `None` on any
+/// failure so the caller records the path as unrenderable rather than retrying it.
+fn decode_image(picker: &Picker, path: &std::path::Path, avail: Size) -> Option<EncodedImage> {
+    let image = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
+    picker.new_protocol(image, avail, Resize::Fit(None)).ok()
 }
 
 /// Resolves when the process receives a termination signal, so the main loop
