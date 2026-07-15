@@ -821,6 +821,13 @@ impl Renderer {
                 Box::new([Span::raw(""), Span::raw("")])
             };
 
+            // Preview rows sit below the message body, so they are indented like
+            // its wrapped continuation rows: the timestamp separator (last span of
+            // `subsequent_indent`, e.g. `▏`) continues down through the whole
+            // preview rather than leaving that column blank. Cloned before
+            // `subsequent_indent` is consumed by the message-body wrap below.
+            let preview_base_indent = subsequent_indent.clone();
+
             let mut text = wrap_line(
                 &rm.message,
                 super::wrap::Options {
@@ -909,19 +916,16 @@ impl Renderer {
             // Wrap the preview title/description rows the same way the message
             // body is wrapped, so long previews break within the message area
             // instead of overflowing. Done before measuring so `preview_extra`
-            // reflects the rows actually pushed below. Each continuation row
-            // repeats the row's leading decoration (the theme's gutter glyph,
-            // its first span), so the gutter runs unbroken down the whole
-            // preview instead of appearing on the first row only - mirroring how
-            // the message body repeats its timestamp separator on wrapped rows.
-            let preview_indent: Box<[Span<'_>]> =
-                Box::new([Span::raw(" ".repeat(indent_width as usize))]);
+            // reflects the rows actually pushed below. The base indent
+            // (`preview_base_indent`) carries the message's timestamp separator,
+            // so `▏` continues down every preview row; each row additionally
+            // repeats its own leading decoration (the theme's `▎` gutter, its
+            // first span), so both bars run unbroken down the whole preview.
             let wrapped_preview_lines: Vec<Line<'_>> = rm
                 .preview_lines
                 .iter()
                 .flat_map(|line| {
-                    let mut subsequent: Vec<Span<'_>> =
-                        vec![Span::raw(" ".repeat(indent_width as usize))];
+                    let mut subsequent: Vec<Span<'_>> = preview_base_indent.to_vec();
                     if let Some(gutter) = line.spans.first() {
                         subsequent.push(gutter.clone());
                     }
@@ -929,7 +933,7 @@ impl Renderer {
                         line,
                         super::wrap::Options {
                             width: rect.width as usize,
-                            initial_indent: preview_indent.clone(),
+                            initial_indent: preview_base_indent.clone(),
                             subsequent_indent: subsequent.into_boxed_slice(),
                             break_words: true,
                         },
@@ -2885,6 +2889,12 @@ mod tests {
         assert!(
             rows[head].contains('\u{258e}') && rows[tail].contains('\u{258e}'),
             "expected the gutter glyph on both wrapped description rows, got:\n{full}"
+        );
+        // The message's timestamp separator continues down the preview rows too,
+        // so `▏` is present alongside the `▎` gutter on both wrapped rows.
+        assert!(
+            rows[head].contains('\u{258f}') && rows[tail].contains('\u{258f}'),
+            "expected the timestamp separator on both wrapped description rows, got:\n{full}"
         );
         Ok(())
     }
