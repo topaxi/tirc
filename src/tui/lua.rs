@@ -223,6 +223,9 @@ pub fn to_lua_event(
         ChatEvent::BufferKind { .. } => {
             unreachable!("BufferKind is never stored as a chat message")
         }
+        ChatEvent::BufferPostPolicy { .. } => {
+            unreachable!("BufferPostPolicy is never stored as a chat message")
+        }
         ChatEvent::Rename { who, new_display } => {
             table.set("type", "rename")?;
             table.set("who", user_table(lua, who)?)?;
@@ -443,6 +446,7 @@ mod tests {
             code: Some("RPL_WELCOME".to_string()),
             text: "Welcome".to_string(),
             raw: None,
+            time: None,
         });
 
         let table =

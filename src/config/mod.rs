@@ -852,6 +852,7 @@ mod tests {
                 code: Some("RPL_WELCOME".to_string()),
                 text: "Welcome to the network".to_string(),
                 raw: None,
+                time: None,
             },
             ChatEvent::ServerInfo {
                 target: Some(TargetId::from("#tirc")),
@@ -859,6 +860,7 @@ mod tests {
                 code: Some("MODE".to_string()),
                 text: "#tirc +o-v alice bob".to_string(),
                 raw: None,
+                time: None,
             },
         ];
 

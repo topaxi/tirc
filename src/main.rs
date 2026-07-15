@@ -234,6 +234,7 @@ async fn root_task(
                             code: None,
                             text: format!("Error: {err}"),
                             raw: None,
+                            time: None,
                         },
                     );
                 }

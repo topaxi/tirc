@@ -257,6 +257,7 @@ impl ChatBackend for IrcBackend {
                     code: None,
                     text: format!("Reconnecting in {}s...", backoff.as_secs()),
                     raw: None,
+                    time: None,
                 }),
             });
 
@@ -516,6 +517,7 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
                     code: Some("PRIVMSG".to_string()),
                     text: text.clone(),
                     raw: Some(raw()),
+                    time: server_time(message),
                 });
             }
 
@@ -555,6 +557,7 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
                     code: Some("NOTICE".to_string()),
                     text: text.clone(),
                     raw: Some(raw()),
+                    time: server_time(message),
                 }),
             }
         }
@@ -615,6 +618,7 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
             // render it structurally, e.g. `cmode/#c +nt`.
             text: mode_text(message),
             raw: Some(raw()),
+            time: server_time(message),
         }),
         IrcCommand::UserMODE(_, _) => Some(ChatEvent::ServerInfo {
             target: None,
@@ -622,6 +626,7 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
             code: Some("MODE".to_string()),
             text: mode_text(message),
             raw: Some(raw()),
+            time: server_time(message),
         }),
         IrcCommand::Response(response, args) => Some(ChatEvent::ServerInfo {
             target: None,
@@ -631,6 +636,7 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
             // replies like ISUPPORT (005) carry the actual tokens.
             text: numeric_text(args),
             raw: Some(raw()),
+            time: server_time(message),
         }),
         // A command the library did not recognize: it may carry content, so
         // surface it as a status line rather than dropping it silently.
@@ -640,6 +646,7 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
             code: Some(command.clone()),
             text: format!("[unsupported event {}] {}", command, args.join(" ")),
             raw: Some(raw()),
+            time: server_time(message),
         }),
         // PING/PONG/CAP/etc. are transport housekeeping with no user-facing
         // content; surfacing them would flood the status buffer.

@@ -173,6 +173,7 @@ impl<'lua> InputHandler<'lua> {
                     code: None,
                     text: notice_text,
                     raw: None,
+                    time: None,
                 },
             );
         }
@@ -1314,6 +1315,7 @@ fn server_info(text: String) -> ChatEvent {
         code: None,
         text,
         raw: None,
+        time: None,
     }
 }
 

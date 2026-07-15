@@ -383,6 +383,10 @@ pub enum ChatEvent {
     /// [`System`](BufferKind::System)) without rendering a line. Creates the buffer
     /// if it does not exist yet, like [`BufferName`](ChatEvent::BufferName).
     BufferKind { target: TargetId, kind: BufferKind },
+    /// Records whether the local user may post to a buffer (Matrix power levels),
+    /// so the UI can hint that the room is read-only. Metadata only - renders no
+    /// line. Creates the buffer if it does not exist yet.
+    BufferPostPolicy { target: TargetId, can_post: bool },
     /// Server-originated or otherwise un-normalized line. `target` of `None`
     /// routes to the backend's status buffer. `from` is the originating server
     /// or nick, when known. `code` is a protocol-specific classifier (IRC numeric
@@ -395,6 +399,11 @@ pub enum ChatEvent {
         code: Option<String>,
         text: String,
         raw: Option<String>,
+        /// Server-assigned timestamp, so a backfilled notice (e.g. a Matrix room
+        /// state change replayed from history) sorts at the time it happened rather
+        /// than when it was received. `None` for live lines, which are stamped with
+        /// the local receive time.
+        time: Option<DateTime<Utc>>,
     },
 }
 
@@ -432,6 +441,7 @@ impl ChatEvent {
             code: Some(type_name.clone()),
             text: format!("[unsupported event {type_name}]"),
             raw: None,
+            time: None,
         }
     }
 
@@ -448,7 +458,8 @@ impl ChatEvent {
             | ChatEvent::Topic { target, .. }
             | ChatEvent::BufferName { target, .. }
             | ChatEvent::BufferTopic { target, .. }
-            | ChatEvent::BufferKind { target, .. } => Some(target),
+            | ChatEvent::BufferKind { target, .. }
+            | ChatEvent::BufferPostPolicy { target, .. } => Some(target),
             ChatEvent::ServerInfo { target, .. } => target.as_ref(),
             ChatEvent::Rename { .. } | ChatEvent::Quit { .. } => None,
         }
@@ -461,7 +472,9 @@ impl ChatEvent {
     pub fn is_silent_state_update(&self) -> bool {
         matches!(
             self,
-            ChatEvent::BufferTopic { .. } | ChatEvent::BufferKind { .. }
+            ChatEvent::BufferTopic { .. }
+                | ChatEvent::BufferKind { .. }
+                | ChatEvent::BufferPostPolicy { .. }
         )
     }
 }
@@ -602,6 +615,11 @@ mod tests {
             kind: BufferKind::System,
         }
         .is_silent_state_update());
+        assert!(ChatEvent::BufferPostPolicy {
+            target: target.clone(),
+            can_post: false,
+        }
+        .is_silent_state_update());
 
         // Events that do render / reach Lua must not be classified as silent.
         assert!(!ChatEvent::BufferName {
@@ -615,6 +633,7 @@ mod tests {
             code: None,
             text: "hi".into(),
             raw: None,
+            time: None,
         }
         .is_silent_state_update());
     }

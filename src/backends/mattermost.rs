@@ -885,6 +885,7 @@ async fn apply_command(
                             code: None,
                             text: format!("Join failed: {err}"),
                             raw: None,
+                            time: None,
                         },
                     );
                 }

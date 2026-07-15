@@ -1149,6 +1149,7 @@ impl Renderer {
         f: &mut ratatui::Frame,
         view: &ViewState,
         input: &Input,
+        can_post: bool,
         rect: Rect,
     ) {
         let prefix = match view.mode {
@@ -1174,6 +1175,12 @@ impl Renderer {
         }
         if view.copy_mode {
             hints.push("-- COPY --");
+        }
+        // Read-only room: hint that typed input will not be delivered. Shown while
+        // composing (Insert mode), where the user would otherwise get no feedback
+        // until a send silently fails.
+        if !can_post && view.mode == Mode::Insert {
+            hints.push("-- no permission to post --");
         }
         if !hints.is_empty() {
             let hint = Paragraph::new(Line::from(Span::styled(
@@ -1332,7 +1339,13 @@ impl Renderer {
                 .scroll((0, view.bar_x_scroll)),
             chunks[2],
         );
-        self.render_input(f, view, input, chunks[1]);
+        let can_post = view
+            .focused
+            .as_ref()
+            .and_then(|id| state.buffers.get(id))
+            .map(|buffer| buffer.can_post)
+            .unwrap_or(true);
+        self.render_input(f, view, input, can_post, chunks[1]);
 
         // Record this frame's hit regions so the input handler can resolve mouse
         // clicks without re-deriving the layout. Built last, after the bar's Lua
@@ -2092,7 +2105,9 @@ mod tests {
     #[test]
     fn oldest_message_has_date_separator_at_top() -> anyhow::Result<(), anyhow::Error> {
         use crate::backends::BackendInfo;
-        use crate::core::{BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef};
+        use crate::core::{
+            BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef,
+        };
         use crate::ui::{State, ViewState};
         use chrono::TimeZone;
         use ratatui::{backend::TestBackend, Terminal};
@@ -2236,6 +2251,82 @@ mod tests {
         Ok(())
     }
 
+    /// A read-only room (BufferPostPolicy can_post=false) shows the input hint while
+    /// composing, and a postable room does not, so the user gets feedback before a
+    /// send would silently fail.
+    #[test]
+    fn read_only_room_hints_in_insert_mode() -> anyhow::Result<(), anyhow::Error> {
+        use crate::backends::BackendInfo;
+        use crate::core::{BackendId, ChatEvent, Protocol, TargetId};
+        use crate::ui::{Mode, State, ViewState};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default'):setup({})")
+            .exec()?;
+
+        let backend = BackendId(0);
+        let mut state = State::new();
+        state.register_backend(BackendInfo {
+            id: backend,
+            protocol: Protocol::Matrix,
+            name: "matrix.example.com".to_string(),
+        });
+        state.apply(
+            backend,
+            ChatEvent::BufferPostPolicy {
+                target: TargetId::from("#chan"),
+                can_post: false,
+            },
+        );
+
+        fn render_to_text(
+            state: &State,
+            lua: &mlua::Lua,
+            backend: BackendId,
+            mode: Mode,
+        ) -> anyhow::Result<String, anyhow::Error> {
+            let mut view = ViewState::new();
+            view.focus(BufferId::new(backend, "#chan"));
+            view.mode = mode;
+            let mut renderer = Renderer::new();
+            let mut terminal = Terminal::new(TestBackend::new(60, 12))?;
+            terminal.draw(|f| renderer.render(f, state, &mut view, lua, &Input::default()))?;
+            Ok(terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect())
+        }
+
+        assert!(
+            render_to_text(&state, &lua, backend, Mode::Insert)?.contains("no permission to post"),
+            "expected the read-only hint while composing in a non-postable room"
+        );
+        // The hint is scoped to composing: Normal mode does not show it.
+        assert!(
+            !render_to_text(&state, &lua, backend, Mode::Normal)?.contains("no permission to post"),
+            "did not expect the read-only hint outside Insert mode"
+        );
+
+        // A postable buffer never shows the hint, even in Insert mode.
+        state.apply(
+            backend,
+            ChatEvent::BufferPostPolicy {
+                target: TargetId::from("#chan"),
+                can_post: true,
+            },
+        );
+        assert!(
+            !render_to_text(&state, &lua, backend, Mode::Insert)?.contains("no permission to post"),
+            "did not expect the hint in a postable room"
+        );
+        Ok(())
+    }
+
     /// The first render of an image whose bytes are downloaded but not yet decoded
     /// shows the textual fallback and enqueues one background `DecodeRequest`
     /// (never blocking the frame). Once the decoded protocol is handed back via
@@ -2318,7 +2409,10 @@ mod tests {
         );
         let request = rx.try_recv().expect("a decode request was enqueued");
         assert_eq!(request.path, path);
-        assert!(rx.try_recv().is_err(), "only one request should be enqueued");
+        assert!(
+            rx.try_recv().is_err(),
+            "only one request should be enqueued"
+        );
 
         // Hand back a decoded protocol fitted to the same area the renderer asked
         // for (halfblocks needs no terminal query, so it works headless).

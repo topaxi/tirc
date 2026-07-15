@@ -47,12 +47,15 @@ use matrix_sdk::ruma::events::room::message::{
     MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
     SyncRoomMessageEvent,
 };
+use matrix_sdk::ruma::events::room::name::SyncRoomNameEvent;
+use matrix_sdk::ruma::events::room::power_levels::SyncRoomPowerLevelsEvent;
 use matrix_sdk::ruma::events::room::redaction::SyncRoomRedactionEvent;
 use matrix_sdk::ruma::events::room::topic::SyncRoomTopicEvent;
 use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::events::tag::TagName;
 use matrix_sdk::ruma::events::{
     AnySyncMessageLikeEvent, AnySyncStateEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
+    SyncStateEvent,
 };
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{OwnedRoomId, OwnedTransactionId, RoomId, UserId};
@@ -366,11 +369,7 @@ fn register_handlers(
             if is_handled_timeline_event(&event) {
                 return;
             }
-            emit(
-                &events,
-                id,
-                unsupported_room_event(&room, event.event_type().to_string()),
-            );
+            emit(&events, id, room_event_line(&room, &event).await);
         }
     });
 
@@ -444,6 +443,58 @@ fn register_handlers(
                 let mut map = known_topics.lock().await;
                 map.insert(room.room_id().to_string(), topic);
                 save_known_topics(&known_topics_path, &map);
+            }
+        }
+    });
+
+    // Keep the buffer's tab label in sync when the room is renamed. The descriptive
+    // "changed the room name" line is still emitted by the catch-all; this only
+    // updates the tab name (silently), mirroring how the topic handler both renders
+    // a line and persists the new topic. An empty name clears the room name, so the
+    // canonical display name (member-derived) is recomputed instead.
+    let name_events = events.clone();
+    client.add_event_handler(move |event: SyncRoomNameEvent, room: Room| {
+        let events = name_events.clone();
+        async move {
+            if let SyncRoomNameEvent::Original(event) = event {
+                let name = event.content.name;
+                let name = if name.is_empty() {
+                    room.display_name()
+                        .await
+                        .map(|name| name.to_string())
+                        .unwrap_or_else(|_| room_target(&room).0)
+                } else {
+                    name
+                };
+                emit(
+                    &events,
+                    id,
+                    ChatEvent::BufferName {
+                        target: room_target(&room),
+                        name,
+                    },
+                );
+            }
+        }
+    });
+
+    // Recompute the local user's post permission when a room's power levels
+    // change, so the read-only input hint appears/clears live rather than only at
+    // startup (populate_room seeds the initial value). The descriptive
+    // "changed the power levels" line is still emitted by the catch-all.
+    let power_events = events.clone();
+    client.add_event_handler(move |event: SyncRoomPowerLevelsEvent, room: Room| {
+        let events = power_events.clone();
+        async move {
+            if let SyncRoomPowerLevelsEvent::Original(_) = event {
+                emit(
+                    &events,
+                    id,
+                    ChatEvent::BufferPostPolicy {
+                        target: room_target(&room),
+                        can_post: room_can_post(&room).await,
+                    },
+                );
             }
         }
     });
@@ -1089,6 +1140,7 @@ fn status_line(text: String) -> ChatEvent {
         code: None,
         text,
         raw: None,
+        time: None,
     }
 }
 
@@ -1114,6 +1166,15 @@ async fn populate_room(
         ChatEvent::BufferName {
             target: target.clone(),
             name,
+        },
+    );
+
+    emit(
+        events,
+        id,
+        ChatEvent::BufferPostPolicy {
+            target: target.clone(),
+            can_post: room_can_post(room).await,
         },
     );
 
@@ -1205,6 +1266,19 @@ fn role_from_power(
     }
 }
 
+/// Whether the local user is allowed to post messages in `room`, per its power
+/// levels. Absent or unreadable power levels are treated as postable, so a read
+/// failure never wrongly locks the user out of a room they can actually write to.
+async fn room_can_post(room: &Room) -> bool {
+    match room.power_levels().await {
+        Ok(power_levels) => power_levels.user_can_send_message(
+            room.own_user_id(),
+            matrix_sdk::ruma::events::MessageLikeEventType::RoomMessage,
+        ),
+        Err(_) => true,
+    }
+}
+
 /// Whether we are already a joined member of `room` (a room id), so a join can
 /// be skipped.
 fn already_joined(client: &Client, room: &str) -> bool {
@@ -1272,15 +1346,136 @@ fn is_handled_timeline_event(event: &AnySyncTimelineEvent) -> bool {
 }
 
 /// A room-scoped line for an event we received but do not map to a normalized
-/// variant, so protocol gaps surface in the room instead of vanishing.
-fn unsupported_room_event(room: &Room, type_name: String) -> ChatEvent {
+/// variant, so protocol gaps surface in the room instead of vanishing. `time` is
+/// the event's server timestamp, so a backfilled line sorts in place.
+fn unsupported_room_event(
+    room: &Room,
+    type_name: String,
+    time: Option<chrono::DateTime<chrono::Utc>>,
+) -> ChatEvent {
     ChatEvent::ServerInfo {
         target: Some(room_target(room)),
         from: None,
         code: Some(type_name.clone()),
         text: format!("[unsupported event {type_name}]"),
         raw: None,
+        time,
     }
+}
+
+/// A recognized room state change, extracted from its ruma event so the wording
+/// in [`describe_room_state_change`] can be built (and unit-tested) without a
+/// [`Room`] or a live homeserver.
+enum RoomStateChange<'a> {
+    Created,
+    Renamed(&'a str),
+    PowerLevels,
+    JoinRule(&'a str),
+    HistoryVisibility(&'a str),
+    GuestAccess(&'a str),
+    Avatar { removed: bool },
+}
+
+/// Human-readable notice text for a room state change, attributed to `actor`.
+/// The wording mirrors Element's timeline strings for consistency; unrecognized
+/// enum values (the content enums are `#[non_exhaustive]`) fall back to a plain
+/// "set X to <value>" form using the raw value.
+fn describe_room_state_change(actor: &str, change: &RoomStateChange) -> String {
+    match change {
+        RoomStateChange::Created => format!("{actor} created the room"),
+        RoomStateChange::Renamed("") => format!("{actor} removed the room name"),
+        RoomStateChange::Renamed(name) => {
+            format!("{actor} changed the room name to {name}")
+        }
+        RoomStateChange::PowerLevels => format!("{actor} changed the power levels"),
+        RoomStateChange::JoinRule(rule) => match *rule {
+            "invite" => format!("{actor} made the room invite only"),
+            "public" => format!("{actor} made the room public to whoever knows the link"),
+            "knock" => format!("{actor} allowed users to knock on the room"),
+            other => format!("{actor} changed the join rule to {other}"),
+        },
+        RoomStateChange::HistoryVisibility(vis) => match *vis {
+            "world_readable" => format!("{actor} made future room history visible to anyone"),
+            "shared" => {
+                format!("{actor} made future room history visible to all room members")
+            }
+            "invited" => format!(
+                "{actor} made future room history visible to all room members, from the point they are invited"
+            ),
+            "joined" => format!(
+                "{actor} made future room history visible to all room members, from the point they joined"
+            ),
+            other => format!("{actor} set history visibility to {other}"),
+        },
+        RoomStateChange::GuestAccess(access) => match *access {
+            "can_join" => format!("{actor} has allowed guests to join the room"),
+            "forbidden" => format!("{actor} has prevented guests from joining the room"),
+            other => format!("{actor} set guest access to {other}"),
+        },
+        RoomStateChange::Avatar { removed: true } => format!("{actor} removed the room avatar"),
+        RoomStateChange::Avatar { removed: false } => format!("{actor} changed the room avatar"),
+    }
+}
+
+/// Extracts the event type and a [`RoomStateChange`] from a recognized room state
+/// event, or `None` for events we do not describe (including redacted ones), which
+/// then fall back to [`unsupported_room_event`]. The content enums are
+/// `#[non_exhaustive]`, so their values are stringified via `as_str` rather than
+/// matched arm-by-arm.
+fn room_state_change(state: &AnySyncStateEvent) -> Option<(&'static str, RoomStateChange<'_>)> {
+    match state {
+        AnySyncStateEvent::RoomCreate(SyncStateEvent::Original(_)) => {
+            Some(("m.room.create", RoomStateChange::Created))
+        }
+        AnySyncStateEvent::RoomName(SyncStateEvent::Original(event)) => {
+            Some(("m.room.name", RoomStateChange::Renamed(&event.content.name)))
+        }
+        AnySyncStateEvent::RoomPowerLevels(SyncStateEvent::Original(_)) => {
+            Some(("m.room.power_levels", RoomStateChange::PowerLevels))
+        }
+        AnySyncStateEvent::RoomJoinRules(SyncStateEvent::Original(event)) => Some((
+            "m.room.join_rules",
+            RoomStateChange::JoinRule(event.content.join_rule.as_str()),
+        )),
+        AnySyncStateEvent::RoomHistoryVisibility(SyncStateEvent::Original(event)) => Some((
+            "m.room.history_visibility",
+            RoomStateChange::HistoryVisibility(event.content.history_visibility.as_str()),
+        )),
+        AnySyncStateEvent::RoomGuestAccess(SyncStateEvent::Original(event)) => Some((
+            "m.room.guest_access",
+            RoomStateChange::GuestAccess(event.content.guest_access.as_str()),
+        )),
+        AnySyncStateEvent::RoomAvatar(SyncStateEvent::Original(event)) => Some((
+            "m.room.avatar",
+            RoomStateChange::Avatar {
+                removed: event.content.url.is_none(),
+            },
+        )),
+        _ => None,
+    }
+}
+
+/// Maps a timeline event to a room line: a descriptive notice for a recognized
+/// room state change (attributed to the actor), otherwise the generic
+/// [`unsupported_room_event`] fallback so unmapped events still surface. Shared by
+/// the live catch-all handler and the backfill path.
+async fn room_event_line(room: &Room, event: &AnySyncTimelineEvent) -> ChatEvent {
+    let time = server_ts(event.origin_server_ts());
+    if let AnySyncTimelineEvent::State(state) = event {
+        if let Some((code, change)) = room_state_change(state) {
+            let actor = sender_ref(room, state.sender()).await;
+            let name = actor.display.unwrap_or(actor.id);
+            return ChatEvent::ServerInfo {
+                target: Some(room_target(room)),
+                from: Some(name.clone()),
+                code: Some(code.to_string()),
+                text: describe_room_state_change(&name, &change),
+                raw: None,
+                time,
+            };
+        }
+    }
+    unsupported_room_event(room, event.event_type().to_string(), time)
 }
 
 /// Downloads a media source into the cache directory and returns its path. A raw
@@ -1619,10 +1814,10 @@ async fn backfill_event_to_chat(
             add: true,
         }),
         // Events handled elsewhere (membership/topic seeded by populate_room) are
-        // skipped; anything else surfaces as an unsupported-event line so a gap is
-        // visible rather than silent.
+        // skipped; anything else (including recognized room state changes) surfaces
+        // as a line, timestamped from the event so it sorts in place in history.
         Ok(other) if is_handled_timeline_event(&other) => None,
-        Ok(other) => Some(unsupported_room_event(room, other.event_type().to_string())),
+        Ok(other) => Some(room_event_line(room, &other).await),
         Err(_) => None,
     }
 }
@@ -1848,6 +2043,57 @@ mod tests {
             Some("pdf")
         );
         assert_eq!(media_extension("noext", None), None);
+    }
+
+    #[test]
+    fn describe_room_state_change_wording() {
+        let describe = |change| describe_room_state_change("alice", &change);
+
+        assert_eq!(describe(RoomStateChange::Created), "alice created the room");
+        assert_eq!(
+            describe(RoomStateChange::Renamed("Lounge")),
+            "alice changed the room name to Lounge"
+        );
+        assert_eq!(
+            describe(RoomStateChange::Renamed("")),
+            "alice removed the room name"
+        );
+        assert_eq!(
+            describe(RoomStateChange::PowerLevels),
+            "alice changed the power levels"
+        );
+        assert_eq!(
+            describe(RoomStateChange::JoinRule("invite")),
+            "alice made the room invite only"
+        );
+        assert_eq!(
+            describe(RoomStateChange::JoinRule("public")),
+            "alice made the room public to whoever knows the link"
+        );
+        assert_eq!(
+            describe(RoomStateChange::JoinRule("restricted")),
+            "alice changed the join rule to restricted"
+        );
+        assert_eq!(
+            describe(RoomStateChange::HistoryVisibility("shared")),
+            "alice made future room history visible to all room members"
+        );
+        assert_eq!(
+            describe(RoomStateChange::GuestAccess("can_join")),
+            "alice has allowed guests to join the room"
+        );
+        assert_eq!(
+            describe(RoomStateChange::GuestAccess("forbidden")),
+            "alice has prevented guests from joining the room"
+        );
+        assert_eq!(
+            describe(RoomStateChange::Avatar { removed: false }),
+            "alice changed the room avatar"
+        );
+        assert_eq!(
+            describe(RoomStateChange::Avatar { removed: true }),
+            "alice removed the room avatar"
+        );
     }
 
     /// End-to-end check against a live homeserver (see `dev/matrix`). Logs in,

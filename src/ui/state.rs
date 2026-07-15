@@ -101,7 +101,7 @@ impl StoredMessage {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ChatBuffer {
     pub messages: Vec<StoredMessage>,
     pub members: Vec<Member>,
@@ -110,6 +110,10 @@ pub struct ChatBuffer {
     pub display_name: Option<String>,
     /// Classification of this buffer (e.g. a homeserver server-notices room).
     pub kind: BufferKind,
+    /// Whether the local user may post here. `false` for read-only rooms (e.g. a
+    /// Matrix room whose power levels forbid the user from sending messages), so
+    /// the UI can hint that input will not be delivered. Defaults to `true`.
+    pub can_post: bool,
     pub scroll_position: usize,
     /// True when messages have arrived that the user has not yet seen.
     pub has_unread: bool,
@@ -119,6 +123,25 @@ pub struct ChatBuffer {
     /// viewing this buffer. Messages newer than this marker are shown below a
     /// visual "new messages" separator in the message list.
     pub read_marker: Option<DateTime<Local>>,
+}
+
+impl Default for ChatBuffer {
+    fn default() -> Self {
+        ChatBuffer {
+            messages: Vec::new(),
+            members: Vec::new(),
+            topic: None,
+            display_name: None,
+            kind: BufferKind::default(),
+            // Postable unless a backend says otherwise, so IRC and unknown backends
+            // are never wrongly hinted as read-only.
+            can_post: true,
+            scroll_position: 0,
+            has_unread: false,
+            has_mention: false,
+            read_marker: None,
+        }
+    }
 }
 
 impl ChatBuffer {
@@ -385,12 +408,20 @@ impl State {
             ChatEvent::BufferKind { ref target, kind } => {
                 self.buffer_mut(backend, target.clone()).kind = kind;
             }
+            ChatEvent::BufferPostPolicy {
+                ref target,
+                can_post,
+            } => {
+                self.buffer_mut(backend, target.clone()).can_post = can_post;
+            }
             ChatEvent::Rename { .. } => self.apply_rename(backend, event),
             ChatEvent::Quit { .. } => self.apply_quit(backend, event),
-            ChatEvent::ServerInfo { ref target, .. } => {
+            ChatEvent::ServerInfo {
+                ref target, time, ..
+            } => {
                 let target = target.clone().unwrap_or_else(TargetId::status);
                 self.buffer_mut(backend, target)
-                    .insert_message(StoredMessage::new(event, false));
+                    .insert_message(StoredMessage::new_at(event, time));
             }
         }
     }
