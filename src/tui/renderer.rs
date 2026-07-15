@@ -905,7 +905,39 @@ impl Renderer {
                 }
             }
             let preview_thumbs_h: u16 = preview_thumbs.iter().map(|(_, size)| size.height).sum();
-            let preview_extra = rm.preview_lines.len() as u16 + preview_thumbs_h;
+
+            // Wrap the preview title/description rows the same way the message
+            // body is wrapped, so long previews break within the message area
+            // instead of overflowing. Done before measuring so `preview_extra`
+            // reflects the rows actually pushed below. Each continuation row
+            // repeats the row's leading decoration (the theme's gutter glyph,
+            // its first span), so the gutter runs unbroken down the whole
+            // preview instead of appearing on the first row only - mirroring how
+            // the message body repeats its timestamp separator on wrapped rows.
+            let preview_indent: Box<[Span<'_>]> =
+                Box::new([Span::raw(" ".repeat(indent_width as usize))]);
+            let wrapped_preview_lines: Vec<Line<'_>> = rm
+                .preview_lines
+                .iter()
+                .flat_map(|line| {
+                    let mut subsequent: Vec<Span<'_>> =
+                        vec![Span::raw(" ".repeat(indent_width as usize))];
+                    if let Some(gutter) = line.spans.first() {
+                        subsequent.push(gutter.clone());
+                    }
+                    wrap_line(
+                        line,
+                        super::wrap::Options {
+                            width: rect.width as usize,
+                            initial_indent: preview_indent.clone(),
+                            subsequent_indent: subsequent.into_boxed_slice(),
+                            break_words: true,
+                        },
+                    )
+                    .lines
+                })
+                .collect();
+            let preview_extra = wrapped_preview_lines.len() as u16 + preview_thumbs_h;
 
             // Core height is the message (already in `text.lines`) plus the reaction
             // row appended below. Include the preview only if the whole item still
@@ -921,11 +953,8 @@ impl Renderer {
             if include_preview {
                 // Title/description rows on new lines below the message body, then
                 // the thumbnail on its own reserved rows beneath them.
-                for line in &rm.preview_lines {
-                    let mut spans: Vec<Span<'_>> =
-                        vec![Span::raw(" ".repeat(indent_width as usize))];
-                    spans.extend(line.spans.iter().cloned());
-                    text.lines.push(Line::from(spans));
+                for line in &wrapped_preview_lines {
+                    text.lines.push(line.clone());
                 }
                 preview_thumb_row = text.lines.len() as u16;
                 for _ in 0..preview_thumbs_h {
@@ -2760,6 +2789,102 @@ mod tests {
         assert!(
             rendered.contains(&newer_label),
             "expected newer date {newer_label:?} as a between-days separator, got: {rendered:?}"
+        );
+        Ok(())
+    }
+
+    /// A long link-preview description wraps within the message area (across
+    /// several rows) instead of overflowing off the right edge on a single row.
+    #[test]
+    fn link_preview_text_wraps() -> anyhow::Result<(), anyhow::Error> {
+        use crate::backends::BackendInfo;
+        use crate::core::{BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef};
+        use crate::tui::preview::{LinkPreview, PreviewResult};
+        use crate::ui::{State, ViewState};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default'):setup({})")
+            .exec()?;
+
+        let backend = BackendId(0);
+        let mut state = State::new();
+        state.register_backend(BackendInfo {
+            id: backend,
+            protocol: Protocol::Irc,
+            name: "irc.example.com".to_string(),
+        });
+
+        let url = "https://example.com/page";
+        state.apply(
+            backend,
+            ChatEvent::Message {
+                target: TargetId::from("#chan"),
+                id: None,
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain(format!("look at {url}")),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+
+        let mut view = ViewState::new();
+        view.focus(BufferId::new(backend, "#chan"));
+
+        let mut renderer = Renderer::new();
+        // Seed the preview cache with a description long enough to wrap several
+        // times inside a narrow message area. Distinct head/tail tokens let us
+        // assert they land on different rows.
+        renderer.insert_link_preview(PreviewResult {
+            url: url.to_string(),
+            preview: Some(LinkPreview {
+                title: Some("Example Title".to_string()),
+                description: Some(
+                    "HEADSTART one two three four five six seven eight nine ten TAILEND"
+                        .to_string(),
+                ),
+                site_name: None,
+                image_path: None,
+            }),
+        });
+
+        let width = 40u16;
+        let height = 20u16;
+        let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+        terminal.draw(|f| renderer.render(f, &state, &mut view, &lua, &Input::default()))?;
+
+        // Reconstruct the screen rows so we can compare where tokens landed.
+        let buffer = terminal.backend().buffer();
+        let symbols: Vec<String> = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_string())
+            .collect();
+        let rows: Vec<String> = symbols
+            .chunks(width as usize)
+            .map(|row| row.concat())
+            .collect();
+
+        let head_row = rows.iter().position(|r| r.contains("HEADSTART"));
+        let tail_row = rows.iter().position(|r| r.contains("TAILEND"));
+
+        let full: String = rows.join("\n");
+        assert!(
+            head_row.is_some() && tail_row.is_some(),
+            "expected both HEADSTART and TAILEND to be visible, got:\n{full}"
+        );
+        assert_ne!(
+            head_row, tail_row,
+            "description did not wrap: HEADSTART and TAILEND share a row, got:\n{full}"
+        );
+        // The gutter decoration (theme's left glyph) is repeated on the wrapped
+        // continuation row, not just the first row of the description.
+        let (head, tail) = (head_row.unwrap(), tail_row.unwrap());
+        assert!(
+            rows[head].contains('\u{258e}') && rows[tail].contains('\u{258e}'),
+            "expected the gutter glyph on both wrapped description rows, got:\n{full}"
         );
         Ok(())
     }
