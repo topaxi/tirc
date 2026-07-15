@@ -797,16 +797,11 @@ impl Renderer {
                 text.lines.push(Line::from(""));
             }
 
-            // Link-preview block: the title/description rows and the thumbnail go
-            // on new lines *below* the message (never overlapping its text), left-
-            // aligned under the message body. Text first, then the thumbnail on its
-            // own reserved rows beneath it.
-            for line in &rm.preview_lines {
-                let mut spans: Vec<Span<'_>> = vec![Span::raw(" ".repeat(indent_width as usize))];
-                spans.extend(line.spans.iter().cloned());
-                text.lines.push(Line::from(spans));
-            }
-
+            // Measure the link-preview block (title/description rows + thumbnail)
+            // before committing it. The preview is supplementary: if appending it
+            // would push the item past the remaining space - so `List` (which drops
+            // any not-fully-visible item) would hide the message itself - we skip
+            // the preview and still render the message.
             let preview_x = list_area.x.saturating_add(indent_width);
             let preview_avail_width = list_area.right().saturating_sub(preview_x);
             let preview_avail = Size {
@@ -829,12 +824,36 @@ impl Renderer {
                     }
                 }
             }
-            // Row (relative to the item's top) where the thumbnail strip begins,
-            // captured before reserving its blank rows to draw over.
-            let preview_thumb_row = text.lines.len() as u16;
             let preview_thumbs_h: u16 = preview_thumbs.iter().map(|(_, size)| size.height).sum();
-            for _ in 0..preview_thumbs_h {
-                text.lines.push(Line::from(""));
+            let preview_extra = rm.preview_lines.len() as u16 + preview_thumbs_h;
+
+            // Core height is the message (already in `text.lines`) plus the reaction
+            // row appended below. Include the preview only if the whole item still
+            // fully fits the remaining space.
+            let reaction_rows: u16 = if rm.reactions.is_empty() { 0 } else { 1 };
+            let core_h = text.lines.len() as u16 + reaction_rows;
+            let include_preview = preview_extra > 0
+                && cum.saturating_add(core_h.saturating_add(preview_extra)) <= list_area.height;
+
+            // Row (relative to the item's top) where the thumbnail strip begins;
+            // only meaningful when the preview is included.
+            let mut preview_thumb_row = 0u16;
+            if include_preview {
+                // Title/description rows on new lines below the message body, then
+                // the thumbnail on its own reserved rows beneath them.
+                for line in &rm.preview_lines {
+                    let mut spans: Vec<Span<'_>> =
+                        vec![Span::raw(" ".repeat(indent_width as usize))];
+                    spans.extend(line.spans.iter().cloned());
+                    text.lines.push(Line::from(spans));
+                }
+                preview_thumb_row = text.lines.len() as u16;
+                for _ in 0..preview_thumbs_h {
+                    text.lines.push(Line::from(""));
+                }
+            } else {
+                // Dropped for lack of space: draw no thumbnail for this item.
+                preview_thumbs.clear();
             }
 
             // Append the reaction pills on their own trailing row, aligned under
@@ -2221,6 +2240,83 @@ mod tests {
         assert!(
             row_text(title_row).starts_with(' '),
             "preview title is indented"
+        );
+
+        Ok(())
+    }
+
+    /// When the viewport is too short to fit the message together with its
+    /// preview, the preview is dropped but the message is still rendered (rather
+    /// than `List` dropping the whole over-tall item and hiding the message).
+    #[test]
+    fn link_preview_dropped_when_it_would_not_fit() -> anyhow::Result<(), anyhow::Error> {
+        use crate::backends::BackendInfo;
+        use crate::core::{
+            BackendId, ChatEvent, EventId, MessageBody, MsgKind, Protocol, TargetId, UserRef,
+        };
+        use crate::ui::{State, ViewState};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default'):setup({})")
+            .exec()?;
+
+        let backend = BackendId(0);
+        let mut state = State::new();
+        state.register_backend(BackendInfo {
+            id: backend,
+            protocol: Protocol::Irc,
+            name: "irc.example.com".to_string(),
+        });
+        state.set_nickname(backend, "me".to_string());
+
+        let url = "https://example.com/x";
+        state.apply(
+            backend,
+            ChatEvent::Message {
+                target: TargetId::from("#chan"),
+                id: Some(EventId("$1".to_string())),
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain(format!("look {url}")),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+
+        let mut view = ViewState::new();
+        view.focus(BufferId::new(backend, "#chan"));
+
+        let mut renderer = Renderer::new();
+        renderer.preview_cache.borrow_mut().insert(
+            url.to_string(),
+            LinkPreview {
+                title: Some("Example Title".to_string()),
+                description: Some("Example description".to_string()),
+                site_name: Some("Example".to_string()),
+                image_path: None,
+            },
+        );
+
+        // Very short viewport: room for the message line but not the two preview
+        // rows below it.
+        let mut terminal = Terminal::new(TestBackend::new(60, 6))?;
+        terminal.draw(|f| renderer.render(f, &state, &mut view, &lua, &Input::default()))?;
+
+        let buffer = terminal.backend().buffer().clone();
+        let area = buffer.area;
+        let mut all = String::new();
+        for y in area.top()..area.bottom() {
+            for x in 0..area.width {
+                all.push_str(buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(""));
+            }
+        }
+
+        assert!(all.contains("example.com"), "message is still rendered");
+        assert!(
+            !all.contains("Example Title") && !all.contains("Example description"),
+            "preview is dropped when it does not fit"
         );
 
         Ok(())
