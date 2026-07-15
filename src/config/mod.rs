@@ -111,6 +111,12 @@ pub struct TircConfig {
     /// Terminal graphics protocol for inline images. See [`ImageProtocol`].
     #[serde(default)]
     pub image_protocol: ImageProtocol,
+
+    /// Fetch Open Graph metadata for links in messages and render an inline
+    /// preview (title/description, and a thumbnail when graphics are available).
+    /// Enabled by default; set to `false` to avoid contacting linked servers.
+    #[serde(default = "bool_true")]
+    pub link_previews: bool,
 }
 
 fn get_default_config() -> &'static str {

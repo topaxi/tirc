@@ -21,7 +21,7 @@ use crate::config::ImageProtocol;
 use crate::ui::{State, ViewState};
 
 use super::renderer::Renderer;
-use super::{DecodeRequest, DecodedImage};
+use super::{DecodeRequest, DecodedImage, PreviewRequest, PreviewResult};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Maps the configured [`ImageProtocol`] to a forced [`ProtocolType`], or `None`
@@ -185,6 +185,16 @@ impl Tui {
     /// Feeds a finished background decode into the renderer's image cache.
     pub fn insert_decoded_image(&mut self, decoded: DecodedImage) {
         self.renderer.insert_decoded(decoded);
+    }
+
+    /// Wires the channel the renderer uses to request background link previews.
+    pub fn set_preview_sender(&mut self, tx: UnboundedSender<PreviewRequest>) {
+        self.renderer.set_preview_sender(tx);
+    }
+
+    /// Feeds a finished link-preview fetch into the renderer's preview cache.
+    pub fn insert_link_preview(&mut self, result: PreviewResult) {
+        self.renderer.insert_link_preview(result);
     }
 
     /// Queues a full repaint that takes effect on the next [`Self::render`]:

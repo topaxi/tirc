@@ -17,7 +17,7 @@ use crate::core::{
     VerifyAction,
 };
 use crate::tui::lua::{create_lua_sender, to_lua_event};
-use crate::tui::{DecodedImage, Tui};
+use crate::tui::{DecodedImage, PreviewResult, Tui};
 use crate::ui::ConnectionStatus;
 
 use super::state::StoredMessage;
@@ -118,6 +118,12 @@ impl<'lua> InputHandler<'lua> {
     /// caller marks the frame dirty so the newly decoded image is drawn.
     pub fn insert_decoded_image(&mut self, decoded: DecodedImage) {
         self.ui.insert_decoded_image(decoded);
+    }
+
+    /// Feeds a finished link-preview fetch into the renderer's cache. The caller
+    /// marks the frame dirty so the newly available preview is drawn.
+    pub fn insert_link_preview(&mut self, result: PreviewResult) {
+        self.ui.insert_link_preview(result);
     }
 
     /// Returns whether a repaint is needed and clears the flag.

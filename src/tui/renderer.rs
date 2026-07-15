@@ -25,6 +25,7 @@ use crate::ui::{
 };
 
 use super::lua::{to_lua_event, to_lua_user, STYLE_MARKER};
+use super::preview::{extract_urls, LinkPreview, PreviewRequest, PreviewResult};
 use super::wrap::wrap_line;
 
 /// How the buffer bar scrolls to keep the focused tab visible.
@@ -94,6 +95,14 @@ pub fn buffer_bar_scroll(
 /// cannot push everything else off-screen. Width is bounded by the message area.
 const MAX_IMAGE_ROWS: u16 = 12;
 
+/// Upper bound on how many link previews are fetched/rendered per message, so a
+/// message pasting many URLs cannot spawn unbounded fetches or dominate layout.
+const MAX_PREVIEWS_PER_MESSAGE: usize = 2;
+
+/// Upper bound on the cell-height of a link-preview thumbnail. Smaller than
+/// [`MAX_IMAGE_ROWS`] since a preview is supplementary, not the message itself.
+const MAX_PREVIEW_ROWS: u16 = 8;
+
 /// One inline image to draw after the message list is rendered: the encoded
 /// protocol is looked up by `path`, drawn into `rect`.
 struct ImageDraw {
@@ -149,6 +158,18 @@ pub struct Renderer {
     /// image must be re-placed from scratch each render. Behind a `RefCell`
     /// because rendered messages borrow `&self` while the cache is populated.
     image_cache: RefCell<HashMap<PathBuf, Protocol>>,
+    /// Channel to the background link-preview worker. `None` until wired at
+    /// startup (or permanently when link previews are disabled in config).
+    preview_tx: Option<UnboundedSender<PreviewRequest>>,
+    /// URLs with a preview fetch already in flight, so the renderer does not
+    /// re-send the same request every frame while the worker is busy.
+    preview_pending: RefCell<HashSet<String>>,
+    /// URLs whose preview fetch found nothing usable (or failed); never retried.
+    preview_failed: RefCell<HashSet<String>>,
+    /// Fetched previews keyed by their source URL, so a URL is fetched once and
+    /// re-rendered cheaply each frame. Its thumbnail (`image_path`) flows through
+    /// the same `image_cache` pipeline as any other inline image.
+    preview_cache: RefCell<HashMap<String, LinkPreview>>,
     /// Whether the terminal/pane currently has focus. Inline images are re-emitted
     /// on every repaint, but graphics-protocol escapes (especially under tmux's
     /// passthrough) leak into whatever pane is active, so image drawing is
@@ -169,6 +190,14 @@ pub struct RenderedMessage<'a> {
     pub reactions: Vec<ReactionPill<'a>>,
     /// Image attachments to render inline (or as a text fallback) below the message.
     images: Vec<ImageAttachment>,
+    /// Link-preview thumbnails to render inline below the message. Unlike
+    /// `images`, these have no textual fallback: the preview's title/description
+    /// lines (`preview_lines`) already stand in when the thumbnail can't render.
+    preview_images: Vec<ImageAttachment>,
+    /// Preformatted link-preview text rows (title/description/site), already
+    /// styled by the `link_preview` theme formatter. Indented and appended below
+    /// the message body during layout.
+    preview_lines: Vec<Line<'a>>,
 }
 
 /// One reaction pill: its emoji key, the styled spans to draw, and the measured
@@ -212,6 +241,17 @@ fn image_attachments(message: &StoredMessage) -> Vec<ImageAttachment> {
             url: attachment.url.clone(),
         })
         .collect()
+}
+
+/// The http(s) URLs in a message's body worth previewing, capped at
+/// [`MAX_PREVIEWS_PER_MESSAGE`]. Empty for non-message events.
+fn message_urls(message: &StoredMessage) -> Vec<String> {
+    let ChatEvent::Message { body, .. } = &message.event else {
+        return Vec::new();
+    };
+    let mut urls = extract_urls(&body.text);
+    urls.truncate(MAX_PREVIEWS_PER_MESSAGE);
+    urls
 }
 
 /// Formats one captured log record as a styled line for the debug pane:
@@ -264,6 +304,10 @@ impl Renderer {
             pending: RefCell::new(HashSet::new()),
             failed: RefCell::new(HashSet::new()),
             image_cache: RefCell::new(HashMap::new()),
+            preview_tx: None,
+            preview_pending: RefCell::new(HashSet::new()),
+            preview_failed: RefCell::new(HashSet::new()),
+            preview_cache: RefCell::new(HashMap::new()),
             focused: true,
         }
     }
@@ -293,6 +337,46 @@ impl Renderer {
                 self.failed.borrow_mut().insert(decoded.path);
             }
         }
+    }
+
+    /// Wires the channel used to request background link-preview fetches. Called
+    /// once at startup after the preview worker is spawned (only when link
+    /// previews are enabled in config).
+    pub fn set_preview_sender(&mut self, tx: UnboundedSender<PreviewRequest>) {
+        self.preview_tx = Some(tx);
+    }
+
+    /// Consumes a finished preview fetch: caches a usable preview so the next
+    /// frame renders it, or records the failure so it is not requested again.
+    /// Either way the URL is no longer in flight.
+    pub fn insert_link_preview(&mut self, result: PreviewResult) {
+        self.preview_pending.borrow_mut().remove(&result.url);
+        match result.preview {
+            Some(preview) => {
+                self.preview_cache.borrow_mut().insert(result.url, preview);
+            }
+            None => {
+                self.preview_failed.borrow_mut().insert(result.url);
+            }
+        }
+    }
+
+    /// Queues a background preview fetch for `url`, unless one is already in
+    /// flight or the URL already failed. Non-blocking; the worker sends the
+    /// result back for the main loop to hand to [`Self::insert_link_preview`].
+    fn request_preview(&self, url: &str) {
+        let Some(tx) = &self.preview_tx else {
+            return;
+        };
+        if self.preview_failed.borrow().contains(url) {
+            return;
+        }
+        if !self.preview_pending.borrow_mut().insert(url.to_string()) {
+            return;
+        }
+        let _ = tx.send(PreviewRequest {
+            url: url.to_string(),
+        });
     }
 
     /// Records terminal focus. While unfocused, inline images are not drawn so
@@ -391,6 +475,83 @@ impl Renderer {
                 Some(Style::default().fg(Color::Red)),
             )]),
         }
+    }
+
+    /// Collects the ready link previews for a message: the thumbnails to draw
+    /// inline and the styled title/description rows to append. URLs not yet
+    /// fetched are queued (via [`Self::request_preview`]) and skipped this frame;
+    /// they appear once their result lands and the frame repaints.
+    fn build_previews(
+        &self,
+        lua: &mlua::Lua,
+        message: &StoredMessage,
+    ) -> (Vec<ImageAttachment>, Vec<Line<'_>>) {
+        let mut images = Vec::new();
+        let mut lines = Vec::new();
+        for url in message_urls(message) {
+            let cached = self.preview_cache.borrow().get(&url).cloned();
+            let Some(preview) = cached else {
+                self.request_preview(&url);
+                continue;
+            };
+            if let Some(path) = &preview.image_path {
+                images.push(ImageAttachment {
+                    path: Some(path.clone()),
+                    name: preview.title.clone().unwrap_or_default(),
+                    url: Some(url.clone()),
+                });
+            }
+            if let Ok(table) = self.preview_table(lua, &url, &preview) {
+                lines.extend(self.format_preview_lines(lua, table));
+            }
+        }
+        (images, lines)
+    }
+
+    /// Builds the Lua table handed to the `link_preview` formatter for one
+    /// preview: `{ url, title?, description?, site_name? }`.
+    fn preview_table(
+        &self,
+        lua: &mlua::Lua,
+        url: &str,
+        preview: &LinkPreview,
+    ) -> mlua::Result<mlua::Table> {
+        let table = lua.create_table()?;
+        table.set("url", url)?;
+        if let Some(title) = &preview.title {
+            table.set("title", title.as_str())?;
+        }
+        if let Some(description) = &preview.description {
+            // Passed verbatim: the theme owns display truncation/decoration.
+            table.set("description", description.as_str())?;
+        }
+        if let Some(site_name) = &preview.site_name {
+            table.set("site_name", site_name.as_str())?;
+        }
+        Ok(table)
+    }
+
+    /// Calls the `link_preview` formatter and converts its result - an array of
+    /// rows, each row an array of spans - into styled [`Line`]s. A missing
+    /// formatter or non-table result yields no rows.
+    fn format_preview_lines(&self, lua: &mlua::Lua, preview: mlua::Table) -> Vec<Line<'_>> {
+        let value = match crate::config::call_formatter(lua, "link_preview", preview) {
+            Some(Ok(value)) => value,
+            _ => return Vec::new(),
+        };
+        let mlua::Value::Table(rows) = value else {
+            return Vec::new();
+        };
+        let mut lines = Vec::new();
+        for row in rows.sequence_values::<mlua::Value>() {
+            let Ok(row) = row else { continue };
+            if let Ok(spans) = self.lua_value_to_spans(lua, row) {
+                if !spans.is_empty() {
+                    lines.push(Line::from(spans));
+                }
+            }
+        }
+        lines
     }
 
     fn render_buffer_title(
@@ -627,12 +788,52 @@ impl Renderer {
                     None => text.lines.push(image_fallback_line(indent_width, image)),
                 }
             }
-            // The inline images form a vertical strip starting at the first row.
-            // Ensure the item has enough rows for the whole strip (the first rows
-            // overlap the message text to its left).
+            // The message-attachment images form a vertical strip starting at the
+            // first row. Reserve its rows now (before the preview block below) so
+            // the preview sits under both the message text and any attachments.
             let images_total_h: u16 = inline_images.iter().map(|(_, size)| size.height).sum();
             let base_lines = text.lines.len() as u16;
             for _ in base_lines..images_total_h {
+                text.lines.push(Line::from(""));
+            }
+
+            // Link-preview block: the title/description rows and the thumbnail go
+            // on new lines *below* the message (never overlapping its text), left-
+            // aligned under the message body. Text first, then the thumbnail on its
+            // own reserved rows beneath it.
+            for line in &rm.preview_lines {
+                let mut spans: Vec<Span<'_>> = vec![Span::raw(" ".repeat(indent_width as usize))];
+                spans.extend(line.spans.iter().cloned());
+                text.lines.push(Line::from(spans));
+            }
+
+            let preview_x = list_area.x.saturating_add(indent_width);
+            let preview_avail_width = list_area.right().saturating_sub(preview_x);
+            let preview_avail = Size {
+                width: preview_avail_width,
+                height: MAX_PREVIEW_ROWS,
+            };
+            let mut preview_thumbs: Vec<(PathBuf, Size)> = Vec::new();
+            if self.images_enabled && preview_avail_width > 0 {
+                for image in &rm.preview_images {
+                    if let Some((path, size)) = image
+                        .path
+                        .as_ref()
+                        .and_then(|path| {
+                            self.image_size(path, preview_avail)
+                                .map(|size| (path, size))
+                        })
+                        .filter(|(_, size)| size.width > 0 && size.height > 0)
+                    {
+                        preview_thumbs.push((path.clone(), size));
+                    }
+                }
+            }
+            // Row (relative to the item's top) where the thumbnail strip begins,
+            // captured before reserving its blank rows to draw over.
+            let preview_thumb_row = text.lines.len() as u16;
+            let preview_thumbs_h: u16 = preview_thumbs.iter().map(|(_, size)| size.height).sum();
+            for _ in 0..preview_thumbs_h {
                 text.lines.push(Line::from(""));
             }
 
@@ -697,6 +898,27 @@ impl Renderer {
                         path,
                         rect: Rect {
                             x: image_x,
+                            y,
+                            width,
+                            height: size.height,
+                        },
+                    });
+                    y = y.saturating_add(size.height);
+                }
+            }
+
+            // Record the preview thumbnail rectangles: their own vertical strip on
+            // the rows reserved below the message/preview text, left-aligned under
+            // the message body (`item_top + preview_thumb_row`).
+            if fully_visible && !preview_thumbs.is_empty() && preview_x < list_area.right() {
+                let item_top = list_area.bottom().saturating_sub(cum).saturating_sub(h);
+                let mut y = item_top.saturating_add(preview_thumb_row);
+                for (path, size) in preview_thumbs {
+                    let width = size.width.min(list_area.right() - preview_x);
+                    image_draws.push(ImageDraw {
+                        path,
+                        rect: Rect {
+                            x: preview_x,
                             y,
                             width,
                             height: size.height,
@@ -812,6 +1034,7 @@ impl Renderer {
         }
 
         let reactions = self.render_reaction_pills(lua, &event, hovered_key);
+        let (preview_images, preview_lines) = self.build_previews(lua, message);
 
         Some(RenderedMessage {
             time: time_spans.into_boxed_slice(),
@@ -819,6 +1042,8 @@ impl Renderer {
             event_id: message.event_id().cloned(),
             reactions,
             images: image_attachments(message),
+            preview_images,
+            preview_lines,
         })
     }
 
@@ -1896,6 +2121,108 @@ mod tests {
                 "reaction_at resolves the pill it recorded"
             );
         }
+        Ok(())
+    }
+
+    /// A ready link preview renders its title/description on new lines *below*
+    /// the message that contains the URL, indented under the message body - never
+    /// on the message's own line.
+    #[test]
+    fn link_preview_renders_below_message() -> anyhow::Result<(), anyhow::Error> {
+        use crate::backends::BackendInfo;
+        use crate::core::{
+            BackendId, ChatEvent, EventId, MessageBody, MsgKind, Protocol, TargetId, UserRef,
+        };
+        use crate::ui::{State, ViewState};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default'):setup({})")
+            .exec()?;
+
+        let backend = BackendId(0);
+        let mut state = State::new();
+        state.register_backend(BackendInfo {
+            id: backend,
+            protocol: Protocol::Irc,
+            name: "irc.example.com".to_string(),
+        });
+        state.set_nickname(backend, "me".to_string());
+
+        let url = "https://example.com/x";
+        state.apply(
+            backend,
+            ChatEvent::Message {
+                target: TargetId::from("#chan"),
+                id: Some(EventId("$1".to_string())),
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain(format!("look {url}")),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+
+        let mut view = ViewState::new();
+        view.focus(BufferId::new(backend, "#chan"));
+
+        let mut renderer = Renderer::new();
+        // Simulate a completed fetch: seed the cache the way the worker would.
+        renderer.preview_cache.borrow_mut().insert(
+            url.to_string(),
+            LinkPreview {
+                title: Some("Example Title".to_string()),
+                description: Some("Example description".to_string()),
+                site_name: Some("Example".to_string()),
+                image_path: None,
+            },
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 12))?;
+        terminal.draw(|f| renderer.render(f, &state, &mut view, &lua, &Input::default()))?;
+
+        let buffer = terminal.backend().buffer().clone();
+        let area = buffer.area;
+        let row_text = |y: u16| -> String {
+            (0..area.width)
+                .map(|x| buffer.cell((x, y)).map(|cell| cell.symbol()).unwrap_or(""))
+                .collect()
+        };
+
+        let mut msg_row = None;
+        let mut title_row = None;
+        let mut desc_row = None;
+        for y in area.top()..area.bottom() {
+            let line = row_text(y);
+            if line.contains("example.com") {
+                msg_row = Some(y);
+            }
+            if line.contains("Example Title") {
+                title_row = Some(y);
+            }
+            if line.contains("Example description") {
+                desc_row = Some(y);
+            }
+        }
+
+        let msg_row = msg_row.expect("message with the URL is drawn");
+        let title_row = title_row.expect("preview title is drawn");
+        let desc_row = desc_row.expect("preview description is drawn");
+
+        // The preview rows sit strictly below the message (greater y), in order.
+        assert!(title_row > msg_row, "title below message");
+        assert!(desc_row > title_row, "description below title");
+
+        // The message line does not itself carry the preview text.
+        assert!(!row_text(msg_row).contains("Example Title"));
+
+        // Preview rows are indented under the message body (not at column 0).
+        assert!(
+            row_text(title_row).starts_with(' '),
+            "preview title is indented"
+        );
+
         Ok(())
     }
 

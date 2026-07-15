@@ -14,7 +14,8 @@ use tirc::backends::mattermost::{MattermostBackend, MattermostBackendConfig};
 use tirc::backends::{self, ChatBackend};
 use tirc::config::{load_config, ServerConfig, TircConfig};
 use tirc::core::{BackendId, BackendMessage, BufferId, Protocol, TxnAllocator};
-use tirc::tui::{DecodeRequest, DecodedImage, Tui};
+use tirc::tui::preview::{build_client, link_preview_worker};
+use tirc::tui::{DecodeRequest, DecodedImage, PreviewRequest, PreviewResult, Tui};
 use tirc::ui::{Event, InputHandler, State, ViewState};
 
 use ratatui::layout::Size;
@@ -156,6 +157,27 @@ async fn root_task(
         tokio::spawn(image_decode_worker(picker, decode_rx, decoded_tx));
     }
 
+    // Link previews follow the same off-loop model as images: the renderer sends
+    // a fetch request per URL it draws, a background worker fetches/parses the
+    // Open Graph metadata, and results come back over `preview_result_rx` to be
+    // cached in the renderer. Gated by config; both channels stay unused when
+    // disabled so no URLs are ever contacted.
+    let (preview_tx, preview_rx) = tokio::sync::mpsc::unbounded_channel::<PreviewRequest>();
+    let (preview_result_tx, mut preview_result_rx) =
+        tokio::sync::mpsc::unbounded_channel::<PreviewResult>();
+    if config.link_previews {
+        let cache_dir = xdg::BaseDirectories::with_prefix("tirc")
+            .create_cache_directory("previews")
+            .unwrap_or_else(|_| std::env::temp_dir().join("tirc-previews"));
+        tui.set_preview_sender(preview_tx);
+        tokio::spawn(link_preview_worker(
+            build_client(),
+            cache_dir,
+            preview_rx,
+            preview_result_tx,
+        ));
+    }
+
     let mut input_handler = InputHandler::new(
         lua,
         tui,
@@ -205,6 +227,11 @@ async fn root_task(
             Some(message) = event_rx.recv() => Event::Backend(message),
             Some(decoded) = decoded_rx.recv() => {
                 input_handler.insert_decoded_image(decoded);
+                input_handler.mark_dirty();
+                continue;
+            }
+            Some(result) = preview_result_rx.recv() => {
+                input_handler.insert_link_preview(result);
                 input_handler.mark_dirty();
                 continue;
             }

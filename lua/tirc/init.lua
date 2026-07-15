@@ -1,5 +1,5 @@
 ---@alias EventName 'event'
----@alias FormatterName 'buffer_title' | 'userlist_title' | 'message_time' | 'message_text' | 'user' | 'render_buffer_tab'
+---@alias FormatterName 'buffer_title' | 'userlist_title' | 'message_time' | 'message_text' | 'link_preview' | 'user' | 'render_buffer_tab'
 
 --- A buffer entry passed to the `render_buffer_tab` formatter.
 ---@class TircBufferTab
@@ -81,6 +81,14 @@
 ---@field count integer number of people who reacted with this key
 ---@field mine boolean whether the local user is one of them
 
+--- A fetched Open Graph link preview passed to the `link_preview` formatter.
+--- Any field except `url` may be absent.
+---@class TircLinkPreview
+---@field url string the previewed link
+---@field title? string og:title (or the page <title>)
+---@field description? string og:description, truncated for display
+---@field site_name? string og:site_name (e.g. 'YouTube')
+
 --- One clickable reaction pill returned by the `render_reactions` formatter.
 ---@class TircReactionPill
 ---@field key string emoji key this pill toggles
@@ -107,6 +115,7 @@
 ---@field userlist_title? fun(buffer: string): TircSpans
 ---@field message_time? fun(date_time: TircDateTime, event: TircEvent): TircSpans
 ---@field message_text? fun(event: TircEvent, nickname: string): TircSpans?
+---@field link_preview? fun(preview: TircLinkPreview): TircSpans[]
 ---@field render_reactions? fun(event: TircEvent, hovered_key: string|nil): TircReactionPill[]
 ---@field user? fun(user: TircUser): TircSpans
 ---@field render_buffer_tab? fun(buffer: TircBufferTab): TircSpans

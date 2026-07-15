@@ -55,6 +55,7 @@ local Class = require('tirc.class')
 ---@field userlist_title? fun(self: TircTheme, buffer: string): TircSpans
 ---@field message_time? fun(self: TircTheme, date_time: TircDateTime, event: TircEvent): TircSpans
 ---@field message_text? fun(self: TircTheme, event: TircEvent, nickname: string): TircSpans?
+---@field link_preview? fun(self: TircTheme, preview: TircLinkPreview): TircSpans[]
 ---@field render_reactions? fun(self: TircTheme, event: TircEvent, hovered_key: string|nil): TircReactionPill[]
 ---@field user? fun(self: TircTheme, user: TircUser): TircSpans
 ---@field render_buffer_tab? fun(self: TircTheme, buffer: TircBufferTab): TircSpans
@@ -376,6 +377,33 @@ end
 ---@param buffer_name string
 function Theme:userlist_title(buffer_name)
   return { buffer_name, self.styles.green }
+end
+
+--- Renders a fetched Open Graph link preview as up to two indented rows: a title
+--- row (optional site name, then title) and an optional description row. Returns
+--- an array of rows, one TircSpans per row. Return an empty table to hide a
+--- preview.
+---@param preview TircLinkPreview
+---@return TircSpans[]
+function Theme:link_preview(preview)
+  local s = self.styles
+  local rows = {}
+
+  if preview.title and preview.title ~= '' then
+    local title_row = { { '\u{258e} ', s.darkgray } }
+    if preview.site_name and preview.site_name ~= '' then
+      title_row[#title_row + 1] = { preview.site_name .. '  ', s.green }
+    end
+    title_row[#title_row + 1] = { preview.title, s.white }
+    rows[#rows + 1] = title_row
+  end
+
+  if preview.description and preview.description ~= '' then
+    local description = utils.truncate(preview.description, 200)
+    rows[#rows + 1] = { { '\u{258e} ', s.darkgray }, { description, s.gray } }
+  end
+
+  return rows
 end
 
 ---@param dt TircDateTime

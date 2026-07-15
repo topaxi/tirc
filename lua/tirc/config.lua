@@ -4,6 +4,7 @@
 ---@field watch_files? string[] extra config-dir-relative paths to watch for auto-reload
 ---@field selection_mode? 'app' | 'native' default mouse-drag selection: 'app' selects in-app for clipboard yank, 'native' relies on the copy-mode toggle (default 'app')
 ---@field image_protocol? 'auto' | 'kitty' | 'sixel' | 'iterm2' terminal graphics protocol for inline images; 'auto' queries the terminal, the others force a protocol (default 'auto')
+---@field link_previews? boolean fetch Open Graph metadata for links and preview title/description/thumbnail inline (default true); set false to avoid contacting linked servers
 
 --- A configured backend. `protocol` is required and selects the variant.
 ---@alias TircConfigServer TircIrcServer | TircMatrixServer
@@ -42,6 +43,7 @@ function M.create_config()
     watch_files = {},
     selection_mode = 'app',
     image_protocol = 'auto',
+    link_previews = true,
   }
 end
 

@@ -96,4 +96,27 @@ function M.split(str, sep)
   return tbl
 end
 
+--- Truncates `str` to at most `max` bytes without splitting a UTF-8 multibyte
+--- sequence, appending an ellipsis when it was shortened. Returns `str` unchanged
+--- when already short enough.
+---@param str string
+---@param max integer maximum byte length before the ellipsis
+---@return string
+function M.truncate(str, max)
+  if #str <= max then
+    return str
+  end
+  -- Back off while the next byte is a UTF-8 continuation byte (0x80-0xBF), so we
+  -- never cut through the middle of a multibyte character.
+  local cut = max
+  while cut > 0 do
+    local b = string.byte(str, cut + 1)
+    if not b or b < 0x80 or b >= 0xC0 then
+      break
+    end
+    cut = cut - 1
+  end
+  return string.sub(str, 1, cut) .. '…'
+end
+
 return M
