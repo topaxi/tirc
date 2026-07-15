@@ -40,28 +40,38 @@ fn forced_protocol(image_protocol: ImageProtocol) -> Option<ProtocolType> {
 /// terminals that do not answer.
 fn build_picker(image_protocol: ImageProtocol) -> Option<Picker> {
     let forced = forced_protocol(image_protocol);
-    match Picker::from_query_stdio() {
-        Ok(mut picker) => {
-            if let Some(protocol) = forced {
-                picker.set_protocol_type(protocol);
-            }
-            Some(picker)
-        }
+    let (mut picker, source) = match Picker::from_query_stdio() {
+        Ok(picker) => (
+            picker,
+            if forced.is_some() {
+                "forced"
+            } else {
+                "auto-detected"
+            },
+        ),
         Err(err) => match forced {
-            Some(protocol) => {
-                // `halfblocks()` assumes a font size (and detects tmux) without a
-                // query, so a forced protocol still renders on terminals that do
-                // not answer the query, only at an approximate scale.
-                let mut picker = Picker::halfblocks();
-                picker.set_protocol_type(protocol);
-                Some(picker)
-            }
+            // `halfblocks()` assumes a font size (and detects tmux) without a
+            // query, so a forced protocol still renders on terminals that do not
+            // answer the query, only at an approximate scale.
+            Some(_) => (Picker::halfblocks(), "forced (font size assumed)"),
             None => {
                 log::warn!("terminal image support unavailable: {err}");
-                None
+                return None;
             }
         },
+    };
+
+    if let Some(protocol) = forced {
+        picker.set_protocol_type(protocol);
     }
+
+    log::info!(
+        "inline image protocol: {:?} ({source}), font {:?}",
+        picker.protocol_type(),
+        picker.font_size()
+    );
+
+    Some(picker)
 }
 
 pub struct Tui {

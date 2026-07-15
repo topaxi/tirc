@@ -166,6 +166,20 @@ impl EventName {
     }
 }
 
+/// Backs the `tirc.log.*` helpers: routes a message from Lua through the `log`
+/// facade (captured by the `:debug` pane). The `tirc::lua` target keeps Lua
+/// output at the same verbosity as the rest of the crate under the default filter.
+fn lua_log(_: &Lua, (level, message): (String, String)) -> mlua::Result<()> {
+    match level.as_str() {
+        "error" => log::error!(target: "tirc::lua", "{message}"),
+        "warn" => log::warn!(target: "tirc::lua", "{message}"),
+        "info" => log::info!(target: "tirc::lua", "{message}"),
+        "debug" => log::debug!(target: "tirc::lua", "{message}"),
+        _ => log::trace!(target: "tirc::lua", "{message}"),
+    }
+    Ok(())
+}
+
 fn register_event(lua: &Lua, (name, func): (String, mlua::Function)) -> mlua::Result<()> {
     let event = EventName::parse(&name)
         .ok_or_else(|| mlua::Error::external(anyhow!("unknown event name: {name}")))?;
@@ -482,6 +496,7 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
 
     tirc_mod.set("version", get_version_lua_value(lua))?;
     tirc_mod.set("on", lua.create_function(register_event)?)?;
+    tirc_mod.set("__log", lua.create_function(lua_log)?)?;
     tirc_mod.set("__get_ui", lua.create_function(get_ui)?)?;
     tirc_mod.set("__set_ui", lua.create_function(set_ui)?)?;
 

@@ -12,8 +12,11 @@ use ratatui::{
 use ratatui_image::{picker::Picker, protocol::Protocol, Image, Resize};
 use tui_input::Input;
 
+use tracing::Level;
+
 use crate::backends::BackendInfo;
 use crate::core::{AttachmentKind, BufferId, ChatEvent, EventId, TargetId};
+use crate::logging::LogLine;
 use crate::lua::date_time::date_time_to_table;
 use crate::ui::{
     ChatBuffer, ConnectionStatus, LayoutMap, Member, Mode, ReactionHit, State, StoredMessage,
@@ -182,6 +185,29 @@ fn image_attachments(message: &StoredMessage) -> Vec<ImageAttachment> {
             url: attachment.url.clone(),
         })
         .collect()
+}
+
+/// Formats one captured log record as a styled line for the debug pane:
+/// `HH:MM:SS LEVEL target: message`, colored by severity.
+fn debug_log_line(line: &LogLine) -> Line<'static> {
+    let level_style = match line.level {
+        Level::ERROR => Style::default().fg(Color::Red),
+        Level::WARN => Style::default().fg(Color::Yellow),
+        Level::INFO => Style::default(),
+        _ => Style::default().fg(Color::DarkGray),
+    };
+    Line::from(vec![
+        Span::styled(
+            line.time.format("%H:%M:%S ").to_string(),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(format!("{:<5} ", line.level), level_style),
+        Span::styled(
+            format!("{}: ", line.target),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(line.message.clone(), level_style),
+    ])
 }
 
 /// A `[image: name] url` fallback line, shown for an image that could not be
@@ -1067,13 +1093,20 @@ impl Renderer {
             .block(Block::default().borders(Borders::TOP));
         f.render_widget(p, rect);
 
-        // While copy mode is active, terminal-native selection is live and the
-        // app ignores the mouse; surface a right-aligned hint on the input row so
-        // the state is visible. Drawn over the same rect after the input so it
-        // sits on the text row (the block's top border is row `rect.y`).
+        // Surface active mode indicators (copy mode releases mouse capture for
+        // native selection; the debug pane is open) as a right-aligned hint on the
+        // input row. Drawn over the same rect after the input so it sits on the
+        // text row (the block's top border is row `rect.y`).
+        let mut hints: Vec<&str> = Vec::new();
+        if view.debug_open {
+            hints.push("-- DEBUG --");
+        }
         if view.copy_mode {
+            hints.push("-- COPY --");
+        }
+        if !hints.is_empty() {
             let hint = Paragraph::new(Line::from(Span::styled(
-                "-- COPY --",
+                hints.join("  "),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
@@ -1251,6 +1284,12 @@ impl Renderer {
         // every selected row is reversed.
         self.render_selection_highlight(f, view);
 
+        // The debug log pane floats over the frame (under the context menu, which
+        // is drawn last so it stays on top).
+        if view.debug_open {
+            self.render_debug_pane(f);
+        }
+
         // The context menu is drawn last so it floats over everything. The full
         // synchronized repaint each frame (see `ui.rs`) means a `Clear` plus the
         // bordered list is all that is needed - there is no incremental diff to
@@ -1259,6 +1298,49 @@ impl Renderer {
         if view.menu.open {
             self.render_context_menu(f, view);
         }
+    }
+
+    /// Draws the `:debug` log overlay: a centered bordered pane showing the most
+    /// recent captured log lines (oldest at top, newest at bottom), colored by
+    /// level. Reads the shared in-memory buffer directly, so no view state beyond
+    /// the open flag is needed.
+    fn render_debug_pane(&self, f: &mut ratatui::Frame) {
+        let area = f.area();
+        // Centered, leaving a 2-cell margin on each side.
+        let width = area.width.saturating_sub(4);
+        let height = area.height.saturating_sub(4);
+        if width == 0 || height == 0 {
+            return;
+        }
+        let rect = Rect {
+            x: area.x + (area.width - width) / 2,
+            y: area.y + (area.height - height) / 2,
+            width,
+            height,
+        };
+
+        let block = Block::default()
+            .title("Debug log (:debug to close)")
+            .borders(Borders::ALL);
+        let inner = block.inner(rect);
+
+        // Request exactly as many lines as fit, so the visible window always shows
+        // the most recent output.
+        let lines = crate::logging::recent(inner.height as usize);
+        let items: Vec<ListItem> = if lines.is_empty() {
+            vec![ListItem::new(Line::from(Span::styled(
+                "(no log output yet)",
+                Style::default().fg(Color::DarkGray),
+            )))]
+        } else {
+            lines
+                .iter()
+                .map(|line| ListItem::new(debug_log_line(line)))
+                .collect()
+        };
+
+        f.render_widget(Clear, rect);
+        f.render_widget(List::new(items).block(block), rect);
     }
 
     /// Reverses the cells of every row the selection covers, clamped to the

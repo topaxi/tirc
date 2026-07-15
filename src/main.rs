@@ -252,6 +252,10 @@ async fn terminate_signal() {
 }
 
 fn main() -> Result<(), anyhow::Error> {
+    // Install log capture first so config loading and everything after is
+    // recorded for the `:debug` pane.
+    tirc::logging::init();
+
     let lua = mlua::Lua::new();
     let (config, config_path) = load_config(&lua)?;
 

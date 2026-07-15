@@ -837,6 +837,9 @@ impl<'lua> InputHandler<'lua> {
             ["redraw"] => {
                 self.ui.redraw()?;
             }
+            ["debug"] => {
+                view.debug_open = !view.debug_open;
+            }
             ["reload"] => {
                 self.do_reload(state, backend);
             }

@@ -123,6 +123,7 @@
 ---@field buffers TircBufferTab[] all open buffers
 ---@field is_focused_buffer fun(buffer: TircBufferTab): boolean
 ---@field on fun(event_name: EventName, callback: fun(event: TircEvent, sender: TircSender))
+---@field log TircLog logging helpers that write to the `:debug` pane
 local M = {}
 
 local _tirc = require('_tirc')
@@ -148,6 +149,30 @@ end
 ---@return boolean
 function M.is_focused_buffer(buffer)
   return _tirc.focused_buffer == buffer.id
+end
+
+--- Joins varargs into one message, stringifying each part (like `print`).
+local function format_log(...)
+  local parts = {}
+  for i = 1, select('#', ...) do
+    parts[i] = tostring((select(i, ...)))
+  end
+  return table.concat(parts, ' ')
+end
+
+--- Logging from Lua into the `:debug` pane. Each level accepts any number of
+--- arguments, stringified and space-joined like `print`.
+---@class TircLog
+---@field error fun(...)
+---@field warn fun(...)
+---@field info fun(...)
+---@field debug fun(...)
+---@field trace fun(...)
+M.log = {}
+for _, level in ipairs { 'error', 'warn', 'info', 'debug', 'trace' } do
+  M.log[level] = function(...)
+    _tirc.__log(level, format_log(...))
+  end
 end
 
 setmetatable(M, {

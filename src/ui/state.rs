@@ -921,6 +921,9 @@ pub struct ViewState {
     /// The reaction pill currently under the mouse cursor, or `None`. Updated on
     /// mouse-move; read by the renderer to highlight that pill.
     pub hovered_reaction: Option<ReactionHit>,
+    /// True while the `:debug` log pane is open. Toggled by the `:debug` command;
+    /// read by the renderer to draw the log overlay and the `-- DEBUG --` hint.
+    pub debug_open: bool,
 }
 
 /// Minimum sidebar width in columns. Narrow enough for short nicks while still
