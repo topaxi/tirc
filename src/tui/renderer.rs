@@ -1,14 +1,19 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
 use mlua::LuaSerdeExt;
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Rect, Size},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListDirection, ListItem, ListState, Paragraph},
 };
+use ratatui_image::{picker::Picker, protocol::Protocol, Image, Resize};
 use tui_input::Input;
 
 use crate::backends::BackendInfo;
-use crate::core::{BufferId, EventId, TargetId};
+use crate::core::{AttachmentKind, BufferId, ChatEvent, EventId, TargetId};
 use crate::lua::date_time::date_time_to_table;
 use crate::ui::{
     ChatBuffer, ConnectionStatus, LayoutMap, Member, Mode, ReactionHit, State, StoredMessage,
@@ -81,8 +86,46 @@ pub fn buffer_bar_scroll(
     }
 }
 
-#[derive(Debug)]
-pub struct Renderer {}
+/// Upper bound on the terminal-cell height of an inline image, so a tall image
+/// cannot push everything else off-screen. Width is bounded by the message area.
+const MAX_IMAGE_ROWS: u16 = 12;
+
+/// One inline image to draw after the message list is rendered: the encoded
+/// protocol is looked up by `path`, drawn into `rect`.
+struct ImageDraw {
+    path: PathBuf,
+    rect: Rect,
+}
+
+/// An image attachment as needed by the renderer: its cache path (when the
+/// backend downloaded it), plus name/url for the textual fallback shown when the
+/// image cannot be rendered inline.
+#[derive(Debug, Clone)]
+struct ImageAttachment {
+    path: Option<PathBuf>,
+    name: String,
+    url: Option<String>,
+}
+
+pub struct Renderer {
+    /// Terminal graphics capabilities (protocol + font size), detected once at
+    /// startup. `None` when detection failed or the terminal has no graphics
+    /// protocol; inline images are skipped and only the textual fallback shows.
+    picker: Option<Picker>,
+    /// Encoded image protocols keyed by their cache-file path, so an image is
+    /// decoded and encoded once and re-emitted cheaply each frame. Stateless
+    /// protocols are used (rather than the diffing stateful ones) because the
+    /// message list fully repaints every frame and its content scrolls, so an
+    /// image must be re-placed from scratch each render. Behind a `RefCell`
+    /// because rendered messages borrow `&self` while the cache is populated.
+    image_cache: RefCell<HashMap<PathBuf, Protocol>>,
+    /// Whether the terminal/pane currently has focus. Inline images are re-emitted
+    /// on every repaint, but graphics-protocol escapes (especially under tmux's
+    /// passthrough) leak into whatever pane is active, so image drawing is
+    /// suppressed while unfocused. Assumed focused until a focus event says
+    /// otherwise.
+    focused: bool,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct RenderedMessage<'a> {
@@ -94,6 +137,8 @@ pub struct RenderedMessage<'a> {
     /// Reaction pills to draw on a dedicated row below the message, left to
     /// right in the order the theme returned them.
     pub reactions: Vec<ReactionPill<'a>>,
+    /// Image attachments to render inline (or as a text fallback) below the message.
+    images: Vec<ImageAttachment>,
 }
 
 /// One reaction pill: its emoji key, the styled spans to draw, and the measured
@@ -121,22 +166,72 @@ fn is_style_table(table: &mlua::Table) -> bool {
         .unwrap_or(false)
 }
 
+/// A message's image attachments, in order, with the data the renderer needs to
+/// show each inline or (failing that) as a text fallback. Empty for non-message
+/// events.
+fn image_attachments(message: &StoredMessage) -> Vec<ImageAttachment> {
+    let ChatEvent::Message { body, .. } = &message.event else {
+        return Vec::new();
+    };
+    body.attachments
+        .iter()
+        .filter(|attachment| attachment.kind == AttachmentKind::Image)
+        .map(|attachment| ImageAttachment {
+            path: attachment.local_path.clone(),
+            name: attachment.name.clone(),
+            url: attachment.url.clone(),
+        })
+        .collect()
+}
+
+/// A `[image: name] url` fallback line, shown for an image that could not be
+/// rendered inline. Indented to align under the message body.
+fn image_fallback_line(indent: u16, image: &ImageAttachment) -> Line<'static> {
+    let mut spans = vec![
+        Span::raw(" ".repeat(indent as usize)),
+        Span::styled(
+            format!("[image: {}]", image.name),
+            Style::default().fg(Color::Blue),
+        ),
+    ];
+    if let Some(url) = &image.url {
+        spans.push(Span::styled(
+            format!(" {url}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    Line::from(spans)
+}
+
 impl Renderer {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            picker: None,
+            image_cache: RefCell::new(HashMap::new()),
+            focused: true,
+        }
+    }
+
+    /// Stores the detected terminal graphics capabilities, enabling inline image
+    /// rendering. Called once after the terminal is initialized.
+    pub fn set_picker(&mut self, picker: Picker) {
+        self.picker = Some(picker);
+    }
+
+    /// Records terminal focus. While unfocused, inline images are not drawn so
+    /// their graphics escapes cannot leak into another (active) tmux pane.
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
     }
 
     fn get_layout(&self, bar_height: u16) -> Layout {
         Layout::default()
             .direction(Direction::Vertical)
-            .constraints(
-                [
-                    Constraint::Min(0),
-                    Constraint::Length(2),
-                    Constraint::Length(bar_height),
-                ]
-                .as_ref(),
-            )
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(2),
+                Constraint::Length(bar_height),
+            ])
     }
 
     fn lua_value_to_spans(
@@ -239,9 +334,36 @@ impl Renderer {
         )
     }
 
+    /// Encodes (once, or again if `avail` shrank below it) an image fitted to the
+    /// available cell area and returns the cell size it occupies. `None` when
+    /// graphics are disabled or the file cannot be decoded/encoded.
+    fn image_cell_size(&self, path: &Path, avail: Size) -> Option<Size> {
+        let picker = self.picker.as_ref()?;
+        let mut cache = self.image_cache.borrow_mut();
+        // Re-encode when the previously fitted image no longer fits (terminal
+        // narrowed); growth keeps the smaller size, which is fine.
+        let needs_encode = match cache.get(path) {
+            Some(protocol) => {
+                protocol.size().width > avail.width || protocol.size().height > avail.height
+            }
+            None => true,
+        };
+        if needs_encode {
+            let image = image::ImageReader::open(path)
+                .ok()?
+                .with_guessed_format()
+                .ok()?
+                .decode()
+                .ok()?;
+            let protocol = picker.new_protocol(image, avail, Resize::Fit(None)).ok()?;
+            cache.insert(path.to_path_buf(), protocol);
+        }
+        Some(cache.get(path)?.size())
+    }
+
     /// Draws the message list and returns the reaction-pill hit boxes recorded
-    /// this frame (screen `Rect` paired with the reaction it toggles), for the
-    /// caller to store in the [`LayoutMap`].
+    /// this frame (screen `Rect` paired with the reaction it toggles) plus the
+    /// inline images to draw over the list, for the caller to place.
     fn render_messages(
         &self,
         f: &mut ratatui::Frame,
@@ -249,9 +371,9 @@ impl Renderer {
         view: &ViewState,
         lua: &mlua::Lua,
         rect: Rect,
-    ) -> Vec<(Rect, ReactionHit)> {
+    ) -> (Vec<(Rect, ReactionHit)>, Vec<ImageDraw>) {
         let Some((buffer_id, buffer, backend, nickname)) = self.focused(state, view) else {
-            return vec![];
+            return (vec![], vec![]);
         };
 
         let target_name = buffer.label(&buffer_id.target);
@@ -306,6 +428,7 @@ impl Renderer {
         let mut prev_msg_time: Option<chrono::DateTime<chrono::Local>> = None;
         let mut messages: Vec<ListItem<'_>> = Vec::with_capacity(rendered.len() + 2);
         let mut reaction_hits: Vec<(Rect, ReactionHit)> = vec![];
+        let mut image_draws: Vec<ImageDraw> = vec![];
 
         // Rows of every item pushed so far. `List` (BottomToTop) anchors item 0 at
         // the bottom, so item `i` occupies rows `[bottom - cum - h, bottom - cum)`
@@ -380,9 +503,56 @@ impl Renderer {
                     break_words: true,
                 },
             );
+            // Inline images begin on the message's first row, just after its text
+            // (`<nick> <image>`), and span downward. The image column is one past
+            // the first line's content; its width is what remains to the right.
+            let first_line_width = text
+                .lines
+                .first()
+                .map(|line| line.width() as u16)
+                .unwrap_or(0);
+            let image_x = list_area
+                .x
+                .saturating_add(first_line_width)
+                .saturating_add(1);
+            let image_avail_width = list_area.right().saturating_sub(image_x);
+            let avail = Size {
+                width: image_avail_width,
+                height: MAX_IMAGE_ROWS,
+            };
+
+            // Decide per image whether it renders inline: if so, it is drawn over
+            // reserved blank rows (no text); otherwise a `[image: name] url`
+            // fallback line is shown. So the label is never duplicated alongside
+            // the picture.
+            let mut inline_images: Vec<(PathBuf, Size)> = Vec::new();
+            for image in &rm.images {
+                let inline = if self.picker.is_some() && image_avail_width > 0 {
+                    image
+                        .path
+                        .as_ref()
+                        .and_then(|path| self.image_cell_size(path, avail).map(|size| (path, size)))
+                        .filter(|(_, size)| size.width > 0 && size.height > 0)
+                } else {
+                    None
+                };
+                match inline {
+                    Some((path, size)) => inline_images.push((path.clone(), size)),
+                    None => text.lines.push(image_fallback_line(indent_width, image)),
+                }
+            }
+            // The inline images form a vertical strip starting at the first row.
+            // Ensure the item has enough rows for the whole strip (the first rows
+            // overlap the message text to its left).
+            let images_total_h: u16 = inline_images.iter().map(|(_, size)| size.height).sum();
+            let base_lines = text.lines.len() as u16;
+            for _ in base_lines..images_total_h {
+                text.lines.push(Line::from(""));
+            }
 
             // Append the reaction pills on their own trailing row, aligned under
-            // the message body. Pills are separated by a single blank column.
+            // the message body. Kept last so its hit-box geometry is unchanged by
+            // the image rows above it. Pills are separated by a single blank column.
             if !rm.reactions.is_empty() {
                 let mut spans: Vec<Span<'_>> = vec![Span::raw(" ".repeat(indent_width as usize))];
                 for (i, pill) in rm.reactions.iter().enumerate() {
@@ -395,12 +565,14 @@ impl Renderer {
             }
 
             let h = text.lines.len() as u16;
+            // The item is drawn only when it fully fits (List drops overflow
+            // items); its hit boxes and images must obey the same rule.
+            let fully_visible = cum.saturating_add(h) <= list_area.height;
 
-            // Record hit boxes for the reaction row, but only when the item is
-            // fully visible (matching `List`'s drop-the-overflow-item rule) and
-            // the message has a server id to toggle against.
+            // Record hit boxes for the reaction row (still the item's last row),
+            // only when fully visible and the message has a server id to toggle.
             if let Some(event_id) = &rm.event_id {
-                if !rm.reactions.is_empty() && cum.saturating_add(h) <= list_area.height {
+                if !rm.reactions.is_empty() && fully_visible {
                     let row_y = list_area.bottom().saturating_sub(1).saturating_sub(cum);
                     let mut pill_x = list_area.x.saturating_add(indent_width);
                     for (i, pill) in rm.reactions.iter().enumerate() {
@@ -427,6 +599,27 @@ impl Renderer {
                 }
             }
 
+            // Record the image rectangles. The strip begins at the item's top row
+            // (`bottom - cum - h`), just right of the first line's text, and each
+            // image stacks below the previous.
+            if fully_visible && !inline_images.is_empty() && image_x < list_area.right() {
+                let item_top = list_area.bottom().saturating_sub(cum).saturating_sub(h);
+                let mut y = item_top;
+                for (path, size) in inline_images {
+                    let width = size.width.min(list_area.right() - image_x);
+                    image_draws.push(ImageDraw {
+                        path,
+                        rect: Rect {
+                            x: image_x,
+                            y,
+                            width,
+                            height: size.height,
+                        },
+                    });
+                    y = y.saturating_add(size.height);
+                }
+            }
+
             cum = cum.saturating_add(h);
             messages.push(ListItem::new(text));
         }
@@ -437,7 +630,24 @@ impl Renderer {
 
         f.render_widget(list, rect);
 
-        reaction_hits
+        (reaction_hits, image_draws)
+    }
+
+    /// Draws the inline images recorded by [`Self::render_messages`] over the
+    /// list, each into its reserved rectangle. Runs after the list so the image
+    /// protocol's cells overwrite the blank rows.
+    fn draw_images(&self, f: &mut ratatui::Frame, draws: Vec<ImageDraw>) {
+        // Suppress graphics while unfocused: a re-emit here would land in the
+        // active tmux pane, not ours.
+        if !self.focused {
+            return;
+        }
+        let cache = self.image_cache.borrow();
+        for draw in draws {
+            if let Some(protocol) = cache.get(&draw.path) {
+                f.render_widget(Image::new(protocol), draw.rect);
+            }
+        }
     }
 
     /// Renders the "new messages" separator line. The appearance is driven by
@@ -511,6 +721,7 @@ impl Renderer {
             message: Box::new(Line::from(message_spans)),
             event_id: message.event_id().cloned(),
             reactions,
+            images: image_attachments(message),
         })
     }
 
@@ -575,6 +786,10 @@ impl Renderer {
         t.set("name", buffer.label(&id.target))?;
         t.set("target", id.target.as_str())?;
         t.set("is_status", id.target.is_status())?;
+        t.set(
+            "is_system",
+            matches!(buffer.kind, crate::core::BufferKind::System),
+        )?;
         t.set("backend_id", id.backend.0)?;
         t.set("backend_name", backend_name)?;
         if let Some(metadata) = crate::config::get_backend_metadata(lua, id.backend) {
@@ -978,7 +1193,7 @@ impl Renderer {
                 let sidebar = view.sidebar_constraint_width(chunks[0].width);
                 let split = Layout::default()
                     .direction(Direction::Horizontal)
-                    .constraints([Constraint::Min(0), Constraint::Length(sidebar)].as_ref())
+                    .constraints([Constraint::Min(0), Constraint::Length(sidebar)])
                     .split(chunks[0]);
 
                 self.render_users(f, members, lua, &title, split[1]);
@@ -991,7 +1206,8 @@ impl Renderer {
 
         view.viewport_height = msg_rect.height;
 
-        let reaction_hits = self.render_messages(f, state, view, lua, msg_rect);
+        let (reaction_hits, image_draws) = self.render_messages(f, state, view, lua, msg_rect);
+        self.draw_images(f, image_draws);
 
         // Compute horizontal scroll so the focused tab stays visible.
         let focused_index = view
@@ -1713,6 +1929,77 @@ mod tests {
         assert!(
             text.contains("30 Jun 2026"),
             "expected '30 Jun 2026' in separator, got: {text:?}"
+        );
+        Ok(())
+    }
+
+    /// Without a graphics picker (the test environment has no terminal), an image
+    /// attachment renders as its `[image: name]` fallback line rather than
+    /// vanishing, so the media is never silently dropped.
+    #[test]
+    fn image_attachment_without_graphics_renders_fallback_line() -> anyhow::Result<(), anyhow::Error>
+    {
+        use crate::backends::BackendInfo;
+        use crate::core::{
+            Attachment, AttachmentKind, BackendId, ChatEvent, EventId, MessageBody, MsgKind,
+            Protocol, TargetId, UserRef,
+        };
+        use crate::ui::{State, ViewState};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default'):setup({})")
+            .exec()?;
+
+        let backend = BackendId(0);
+        let mut state = State::new();
+        state.register_backend(BackendInfo {
+            id: backend,
+            protocol: Protocol::Matrix,
+            name: "matrix.example.com".to_string(),
+        });
+
+        state.apply(
+            backend,
+            ChatEvent::Message {
+                target: TargetId::from("#chan"),
+                id: Some(EventId("$1".to_string())),
+                sender: UserRef::new("alice"),
+                body: MessageBody::with_attachments(
+                    "",
+                    vec![Attachment {
+                        kind: AttachmentKind::Image,
+                        name: "cat.png".to_string(),
+                        url: Some("/cache/cat.png".to_string()),
+                        source: None,
+                        mime: Some("image/png".to_string()),
+                        local_path: None,
+                    }],
+                ),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+
+        let mut view = ViewState::new();
+        view.focus(BufferId::new(backend, "#chan"));
+
+        let mut renderer = Renderer::new();
+        let mut terminal = Terminal::new(TestBackend::new(60, 12))?;
+        terminal.draw(|f| renderer.render(f, &state, &mut view, &lua, &Input::default()))?;
+
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            text.contains("[image: cat.png]"),
+            "expected image fallback line, got: {text:?}"
         );
         Ok(())
     }

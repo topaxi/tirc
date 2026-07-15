@@ -11,6 +11,8 @@
 ---@field backend_metadata? table<string, any> per-server metadata from the config (e.g. `{ label = 'topaxi' }`)
 ---@field has_unread boolean true when unseen messages are present
 ---@field has_mention boolean true when the user's nick was mentioned in an unseen message
+---@field is_status boolean true for the backend's status/server buffer
+---@field is_system boolean true for a homeserver system buffer (e.g. a Matrix server-notices room)
 
 --- The buffer bar layout returned by `render_buffer_bar`: one `TircSpans` per row.
 ---@class TircBufferBar
@@ -34,10 +36,20 @@
 ---@field display? string
 ---@field name string
 
---- A message body: plain `text` plus optional rich `html` (Matrix).
+--- A media attachment on a message (image, file, ...). `kind` is one of
+--- 'image' | 'video' | 'audio' | 'file'; `url` is a resolvable link when known.
+---@class TircAttachment
+---@field kind 'image' | 'video' | 'audio' | 'file'
+---@field name string
+---@field url? string
+---@field mime? string
+
+--- A message body: plain `text` plus optional rich `html` (Matrix) and media
+--- `attachments`.
 ---@class TircBody
 ---@field text string
 ---@field html? string
+---@field attachments? TircAttachment[]
 
 --- A normalized chat event, as passed to the `message_text` formatter and the
 --- `event` callback. `type` selects which fields are present.
