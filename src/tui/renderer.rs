@@ -786,6 +786,10 @@ impl Renderer {
         t.set("name", buffer.label(&id.target))?;
         t.set("target", id.target.as_str())?;
         t.set("is_status", id.target.is_status())?;
+        t.set(
+            "is_system",
+            matches!(buffer.kind, crate::core::BufferKind::System),
+        )?;
         t.set("backend_id", id.backend.0)?;
         t.set("backend_name", backend_name)?;
         if let Some(metadata) = crate::config::get_backend_metadata(lua, id.backend) {

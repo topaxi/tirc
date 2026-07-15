@@ -6,8 +6,8 @@ use ratatui::layout::Rect;
 
 use crate::backends::BackendInfo;
 use crate::core::{
-    BackendId, BufferId, ChatEvent, EventId, MemberRole, MembershipChange, MessageBody, TargetId,
-    TxnId, UserRef,
+    BackendId, BufferId, BufferKind, ChatEvent, EventId, MemberRole, MembershipChange, MessageBody,
+    TargetId, TxnId, UserRef,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -108,6 +108,8 @@ pub struct ChatBuffer {
     pub topic: Option<String>,
     /// Friendly name shown instead of the raw target (e.g. a Matrix room name).
     pub display_name: Option<String>,
+    /// Classification of this buffer (e.g. a homeserver server-notices room).
+    pub kind: BufferKind,
     pub scroll_position: usize,
     /// True when messages have arrived that the user has not yet seen.
     pub has_unread: bool,
@@ -379,6 +381,9 @@ impl State {
             } => {
                 let topic = topic.clone();
                 self.buffer_mut(backend, target.clone()).topic = Some(topic);
+            }
+            ChatEvent::BufferKind { ref target, kind } => {
+                self.buffer_mut(backend, target.clone()).kind = kind;
             }
             ChatEvent::Rename { .. } => self.apply_rename(backend, event),
             ChatEvent::Quit { .. } => self.apply_quit(backend, event),
@@ -1090,6 +1095,21 @@ mod tests {
     fn status_buffer_is_created_for_backend() {
         let state = test_state();
         assert!(state.buffers.contains_key(&BufferId::status(backend())));
+    }
+
+    #[test]
+    fn buffer_kind_classifies_buffer_without_rendering_a_line() {
+        let mut state = test_state();
+        state.apply(
+            backend(),
+            ChatEvent::BufferKind {
+                target: TargetId::from("!notices:matrix.org"),
+                kind: BufferKind::System,
+            },
+        );
+        let buffer = buffer(&state, "!notices:matrix.org");
+        assert_eq!(buffer.kind, BufferKind::System);
+        assert!(buffer.messages.is_empty());
     }
 
     #[test]

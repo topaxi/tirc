@@ -50,6 +50,7 @@ use matrix_sdk::ruma::events::room::message::{
 use matrix_sdk::ruma::events::room::redaction::SyncRoomRedactionEvent;
 use matrix_sdk::ruma::events::room::topic::SyncRoomTopicEvent;
 use matrix_sdk::ruma::events::room::MediaSource;
+use matrix_sdk::ruma::events::tag::TagName;
 use matrix_sdk::ruma::events::{
     AnySyncMessageLikeEvent, AnySyncStateEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
 };
@@ -58,9 +59,9 @@ use matrix_sdk::ruma::{OwnedRoomId, OwnedTransactionId, RoomId, UserId};
 use matrix_sdk::{Client, Room};
 
 use crate::core::{
-    Attachment, AttachmentKind, BackendEvent, BackendId, BackendMessage, ChatEvent, Command,
-    EventId, Formatted, MemberRole, MembershipChange, MessageBody, MsgKind, Protocol, TargetId,
-    TxnId, UserRef, VerifyAction,
+    Attachment, AttachmentKind, BackendEvent, BackendId, BackendMessage, BufferKind, ChatEvent,
+    Command, EventId, Formatted, MemberRole, MembershipChange, MessageBody, MsgKind, Protocol,
+    TargetId, TxnId, UserRef, VerifyAction,
 };
 
 use super::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
@@ -1116,6 +1117,20 @@ async fn populate_room(
         },
     );
 
+    // The homeserver's server-notices room (matrix.org surfaces this as the
+    // "Official Account") is tagged `m.server_notice`. Flag it so the UI can mark
+    // it distinctly, akin to an IRC server window, while it stays a real room.
+    if is_server_notice_room(room).await {
+        emit(
+            events,
+            id,
+            ChatEvent::BufferKind {
+                target: target.clone(),
+                kind: BufferKind::System,
+            },
+        );
+    }
+
     if let Some(topic) = room.topic() {
         let room_id = room.room_id().to_string();
         if known_topics.get(&room_id).map(String::as_str) == Some(topic.as_str()) {
@@ -1217,6 +1232,12 @@ fn room_by_target(client: &Client, target: &TargetId) -> Option<Room> {
 
 fn room_target(room: &Room) -> TargetId {
     TargetId(room.room_id().to_string())
+}
+
+/// Whether `room` is the homeserver's server-notices room, identified by the
+/// `m.server_notice` room tag the homeserver sets on it.
+async fn is_server_notice_room(room: &Room) -> bool {
+    matches!(room.tags().await, Ok(Some(tags)) if tags.contains_key(&TagName::ServerNotice))
 }
 
 fn message_body(
@@ -1482,6 +1503,7 @@ async fn msgtype_to_body(
                 MessageBody::with_attachments(caption, vec![attachment]),
             )
         }
+        MessageType::ServerNotice(content) => (MsgKind::Notice, MessageBody::plain(content.body)),
         other => (
             MsgKind::Notice,
             MessageBody::plain(format!("[unsupported message of type {}]", other.msgtype())),

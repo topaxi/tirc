@@ -11,6 +11,8 @@
 ---@field backend_metadata? table<string, any> per-server metadata from the config (e.g. `{ label = 'topaxi' }`)
 ---@field has_unread boolean true when unseen messages are present
 ---@field has_mention boolean true when the user's nick was mentioned in an unseen message
+---@field is_status boolean true for the backend's status/server buffer
+---@field is_system boolean true for a homeserver system buffer (e.g. a Matrix server-notices room)
 
 --- The buffer bar layout returned by `render_buffer_bar`: one `TircSpans` per row.
 ---@class TircBufferBar

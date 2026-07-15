@@ -630,6 +630,8 @@ function Theme:render_buffer_tab(buffer)
     elseif buffer.latency_ms and buffer.latency_ms > 100 then
       name = name .. ' [' .. buffer.latency_ms .. 'ms]'
     end
+  elseif buffer.is_system then
+    name = name .. ' [server]'
   end
 
   return { { ' ' .. name .. ' ', style }, ' ' }

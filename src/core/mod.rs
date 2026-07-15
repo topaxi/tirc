@@ -195,6 +195,21 @@ pub struct Attachment {
     pub local_path: Option<std::path::PathBuf>,
 }
 
+impl Attachment {
+    /// A non-image attachment (file/video/audio) that is only ever shown as a
+    /// textual fallback line.
+    pub fn link(kind: AttachmentKind, name: impl Into<String>) -> Self {
+        Attachment {
+            kind,
+            name: name.into(),
+            url: None,
+            source: None,
+            mime: None,
+            local_path: None,
+        }
+    }
+}
+
 /// A message body: always has a plain-text form, optionally a rich form and/or
 /// media attachments.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,6 +261,19 @@ pub enum MemberRole {
     HalfOp,
     Voice,
     Member,
+}
+
+/// How a buffer should be classified, beyond its channel/DM target. Backends set
+/// this to let the UI mark special buffers (e.g. a Matrix homeserver
+/// server-notices room) distinctly from ordinary conversations. `Normal` is the
+/// default; further variants (direct, space) can be added as detection lands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BufferKind {
+    #[default]
+    Normal,
+    /// A homeserver/admin buffer such as a Matrix `m.server_notice` room.
+    System,
 }
 
 /// A change to a single user's presence within one buffer.
@@ -351,6 +379,10 @@ pub enum ChatEvent {
     /// startup to restore already-known state from the backend's local store;
     /// actual topic changes use [`Topic`](ChatEvent::Topic) which does render a line.
     BufferTopic { target: TargetId, topic: String },
+    /// Classifies a buffer (e.g. flags a Matrix server-notices room as
+    /// [`System`](BufferKind::System)) without rendering a line. Creates the buffer
+    /// if it does not exist yet, like [`BufferName`](ChatEvent::BufferName).
+    BufferKind { target: TargetId, kind: BufferKind },
     /// Server-originated or otherwise un-normalized line. `target` of `None`
     /// routes to the backend's status buffer. `from` is the originating server
     /// or nick, when known. `code` is a protocol-specific classifier (IRC numeric
@@ -415,7 +447,8 @@ impl ChatEvent {
             | ChatEvent::Membership { target, .. }
             | ChatEvent::Topic { target, .. }
             | ChatEvent::BufferName { target, .. }
-            | ChatEvent::BufferTopic { target, .. } => Some(target),
+            | ChatEvent::BufferTopic { target, .. }
+            | ChatEvent::BufferKind { target, .. } => Some(target),
             ChatEvent::ServerInfo { target, .. } => target.as_ref(),
             ChatEvent::Rename { .. } | ChatEvent::Quit { .. } => None,
         }

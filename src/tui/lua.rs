@@ -220,6 +220,9 @@ pub fn to_lua_event(
         ChatEvent::BufferTopic { .. } => {
             unreachable!("BufferTopic is never stored as a chat message")
         }
+        ChatEvent::BufferKind { .. } => {
+            unreachable!("BufferKind is never stored as a chat message")
+        }
         ChatEvent::Rename { who, new_display } => {
             table.set("type", "rename")?;
             table.set("who", user_table(lua, who)?)?;
