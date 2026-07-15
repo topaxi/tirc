@@ -961,8 +961,12 @@ impl Renderer {
                     text.lines.push(line.clone());
                 }
                 preview_thumb_row = text.lines.len() as u16;
+                // Reserve the thumbnail rows carrying the base indent so the
+                // timestamp separator keeps running down beside the image. The
+                // thumbnail is drawn from `preview_x` (past `indent_width`)
+                // rightward, so it never covers the `▏` in the indent.
                 for _ in 0..preview_thumbs_h {
-                    text.lines.push(Line::from(""));
+                    text.lines.push(Line::from(preview_base_indent.to_vec()));
                 }
             } else {
                 // Dropped for lack of space: draw no thumbnail for this item.
