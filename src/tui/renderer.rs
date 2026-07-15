@@ -821,12 +821,13 @@ impl Renderer {
                 Box::new([Span::raw(""), Span::raw("")])
             };
 
-            // Preview rows sit below the message body, so they are indented like
-            // its wrapped continuation rows: the timestamp separator (last span of
-            // `subsequent_indent`, e.g. `▏`) continues down through the whole
-            // preview rather than leaving that column blank. Cloned before
-            // `subsequent_indent` is consumed by the message-body wrap below.
-            let preview_base_indent = subsequent_indent.clone();
+            // Rows below the message's first line (wrapped preview text, and the
+            // reserved rows behind inline attachment/preview images) are indented
+            // like the message's wrapped continuation rows, so the timestamp
+            // separator (last span of `subsequent_indent`, e.g. `▏`) continues
+            // down through the whole item rather than leaving that column blank.
+            // Cloned before `subsequent_indent` is consumed by the body wrap below.
+            let continuation_indent = subsequent_indent.clone();
 
             let mut text = wrap_line(
                 &rm.message,
@@ -880,8 +881,12 @@ impl Renderer {
             // the preview sits under both the message text and any attachments.
             let images_total_h: u16 = inline_images.iter().map(|(_, size)| size.height).sum();
             let base_lines = text.lines.len() as u16;
+            // Carry the base indent on the reserved rows so the timestamp
+            // separator keeps running down beside the image. The image is drawn
+            // from `image_x` (past the first line's text, so well right of the
+            // `▏` in the indent), so it never covers the separator.
             for _ in base_lines..images_total_h {
-                text.lines.push(Line::from(""));
+                text.lines.push(Line::from(continuation_indent.to_vec()));
             }
 
             // Measure the link-preview block (title/description rows + thumbnail)
@@ -917,7 +922,7 @@ impl Renderer {
             // body is wrapped, so long previews break within the message area
             // instead of overflowing. Done before measuring so `preview_extra`
             // reflects the rows actually pushed below. The base indent
-            // (`preview_base_indent`) carries the message's timestamp separator,
+            // (`continuation_indent`) carries the message's timestamp separator,
             // so `▏` continues down every preview row; each row additionally
             // repeats its own leading decoration (the theme's `▎` gutter, its
             // first span), so both bars run unbroken down the whole preview.
@@ -925,7 +930,7 @@ impl Renderer {
                 .preview_lines
                 .iter()
                 .flat_map(|line| {
-                    let mut subsequent: Vec<Span<'_>> = preview_base_indent.to_vec();
+                    let mut subsequent: Vec<Span<'_>> = continuation_indent.to_vec();
                     if let Some(gutter) = line.spans.first() {
                         subsequent.push(gutter.clone());
                     }
@@ -933,7 +938,7 @@ impl Renderer {
                         line,
                         super::wrap::Options {
                             width: rect.width as usize,
-                            initial_indent: preview_base_indent.clone(),
+                            initial_indent: continuation_indent.clone(),
                             subsequent_indent: subsequent.into_boxed_slice(),
                             break_words: true,
                         },
@@ -966,7 +971,7 @@ impl Renderer {
                 // thumbnail is drawn from `preview_x` (past `indent_width`)
                 // rightward, so it never covers the `▏` in the indent.
                 for _ in 0..preview_thumbs_h {
-                    text.lines.push(Line::from(preview_base_indent.to_vec()));
+                    text.lines.push(Line::from(continuation_indent.to_vec()));
                 }
             } else {
                 // Dropped for lack of space: draw no thumbnail for this item.
