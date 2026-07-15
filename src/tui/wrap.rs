@@ -156,7 +156,10 @@ fn wrap_single_line_slow_path<'a>(
         for (position, word) in words.iter().with_position() {
             output_line.extend(word.word_span());
 
-            if position.is_last() {
+            if matches!(
+                position,
+                itertools::Position::Last | itertools::Position::Only
+            ) {
                 // Don't add trailing whitespace, just the content.
                 // We don't support hyphenation at the moment, but if we
                 // did, this is where they would go.

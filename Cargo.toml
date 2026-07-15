@@ -27,8 +27,8 @@ indoc = "2.0"
 indexmap = "2.14"
 semver = { version = "1.0", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-textwrap = "0.16"
-itertools = "0.15"
+textwrap = "0.16.2"
+itertools = "0.14"
 unicode-width = "0.2"
 async-trait = "0.1.89"
 arboard = "3"
@@ -36,9 +36,10 @@ arboard = "3"
 # features keeps HTTPS working. `e2e-encryption` re-uses the same sqlite store
 # for the crypto state (Olm/Megolm keys); `automatic-room-key-forwarding` lets
 # our other verified sessions forward us room keys so we can decrypt history.
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { version = "0.13", default-features = false, features = [
   "json",
-  "rustls-tls-webpki-roots",
+  "rustls",
+  "webpki-roots",
 ] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 matrix-sdk = { version = "0.18.0", default-features = false, features = [
