@@ -384,11 +384,28 @@ function Theme:message_time(dt, _event)
   local s = self.styles
   local is_1337 = dt.hour == 13 and dt.minute == 37
 
-  return {
-    {
+  local time = nil
+
+  if is_1337 then
+    time = {
+      {
+        string.format('%02d:%02d', dt.hour, dt.minute),
+        s.red,
+      },
+      {
+        string.format(':%02d', dt.second),
+        s.twhite,
+      },
+    }
+  else
+    time = {
       string.format('%02d:%02d:%02d', dt.hour, dt.minute, dt.second),
-      is_1337 and s.red or s.twhite,
-    },
+      s.twhite,
+    }
+  end
+
+  return {
+    time,
     { ' ▏', s.twhite },
   }
 end
