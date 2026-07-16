@@ -967,7 +967,24 @@ impl Renderer {
             // would push the item past the remaining space - so `List` (which drops
             // any not-fully-visible item) would hide the message itself - we skip
             // the preview and still render the message.
-            let preview_x = list_area.x.saturating_add(indent_width);
+            // The theme's per-row leading decoration (e.g. the `▎` gutter, each
+            // preview row's first span); cloned onto the reserved thumbnail rows
+            // so the gutter runs down beside the image too. The thumbnail shifts
+            // right past it, aligning with the preview text content. Image-only
+            // previews have no text rows and thus no gutter to continue.
+            let preview_gutter: Option<Span<'_>> = rm
+                .preview_lines
+                .first()
+                .and_then(|line| line.spans.first())
+                .cloned();
+            let preview_gutter_w: u16 = preview_gutter
+                .as_ref()
+                .map(|span| span.width() as u16)
+                .unwrap_or(0);
+            let preview_x = list_area
+                .x
+                .saturating_add(indent_width)
+                .saturating_add(preview_gutter_w);
             let preview_avail_width = list_area.right().saturating_sub(preview_x);
             let preview_avail = Size {
                 width: preview_avail_width,
@@ -1039,12 +1056,15 @@ impl Renderer {
                     text.lines.push(line.clone());
                 }
                 preview_thumb_row = text.lines.len() as u16;
-                // Reserve the thumbnail rows carrying the base indent so the
-                // timestamp separator keeps running down beside the image. The
-                // thumbnail is drawn from `preview_x` (past `indent_width`)
-                // rightward, so it never covers the `▏` in the indent.
+                // Reserve the thumbnail rows carrying the base indent plus the
+                // preview gutter, so both the timestamp separator and the `▎`
+                // gutter keep running down beside the image. The thumbnail is
+                // drawn from `preview_x` (past `indent_width` and the gutter)
+                // rightward, so it covers neither bar.
                 for _ in 0..preview_thumbs_h {
-                    text.lines.push(Line::from(continuation_indent.to_vec()));
+                    let mut spans = continuation_indent.to_vec();
+                    spans.extend(preview_gutter.clone());
+                    text.lines.push(Line::from(spans));
                 }
             } else {
                 // Dropped for lack of space: draw no thumbnail for this item.
@@ -3256,6 +3276,122 @@ mod tests {
             rx.try_recv().is_err(),
             "no re-request once the image is cached"
         );
+
+        Ok(())
+    }
+
+    /// The theme's `▎` preview gutter (and the message's `▏` timestamp
+    /// separator) continue down the rows reserved for the preview thumbnail, so
+    /// the left decoration runs unbroken beside the image instead of stopping
+    /// at the last text row.
+    #[test]
+    fn link_preview_gutter_continues_beside_thumbnail() -> anyhow::Result<(), anyhow::Error> {
+        use crate::backends::BackendInfo;
+        use crate::core::{
+            BackendId, ChatEvent, EventId, MessageBody, MsgKind, Protocol, TargetId, UserRef,
+        };
+        use crate::ui::{State, ViewState};
+        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui_image::{picker::Picker, Resize};
+
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default'):setup({})")
+            .exec()?;
+
+        let backend = BackendId(0);
+        let mut state = State::new();
+        state.register_backend(BackendInfo {
+            id: backend,
+            protocol: Protocol::Irc,
+            name: "irc.example.com".to_string(),
+        });
+        state.set_nickname(backend, "me".to_string());
+
+        let url = "https://example.com/x";
+        state.apply(
+            backend,
+            ChatEvent::Message {
+                target: TargetId::from("#chan"),
+                id: Some(EventId("$1".to_string())),
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain(format!("look {url}")),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+
+        let mut view = ViewState::new();
+        view.focus(BufferId::new(backend, "#chan"));
+
+        let thumb = PathBuf::from("/cache/og.png");
+        let mut renderer = Renderer::new();
+        renderer.enable_images();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DecodeRequest>();
+        renderer.set_decode_sender(tx);
+        // Simulate a completed fetch (with a downloaded og:image) the way the
+        // preview worker would deliver it.
+        renderer.preview_cache.borrow_mut().insert(
+            url.to_string(),
+            LinkPreview {
+                title: Some("Example Title".to_string()),
+                description: None,
+                site_name: None,
+                image_path: Some(thumb.clone()),
+            },
+        );
+
+        // First frame requests the thumbnail decode; answer it headlessly.
+        let mut terminal = Terminal::new(TestBackend::new(60, 12))?;
+        terminal.draw(|f| renderer.render(f, &state, &mut view, &lua, &Input::default()))?;
+        let request = rx.try_recv().expect("a thumbnail decode was enqueued");
+        assert_eq!(request.path, thumb);
+        let picker = Picker::halfblocks();
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 4));
+        let protocol = picker
+            .new_protocol(image, request.avail, Resize::Fit(None))
+            .expect("encode stub protocol");
+        let thumb_size = protocol.size();
+        assert!(thumb_size.height > 0, "stub thumbnail reserves rows");
+        renderer.insert_decoded(DecodedImage {
+            path: thumb.clone(),
+            protocol: Some(EncodedImage::Widget(protocol)),
+        });
+
+        // Second frame draws the thumbnail on its reserved rows.
+        terminal.draw(|f| renderer.render(f, &state, &mut view, &lua, &Input::default()))?;
+
+        let buffer = terminal.backend().buffer().clone();
+        let area = buffer.area;
+        let row_text = |y: u16| -> String {
+            (0..area.width)
+                .map(|x| buffer.cell((x, y)).map(|cell| cell.symbol()).unwrap_or(""))
+                .collect()
+        };
+
+        let title_row = (area.top()..area.bottom())
+            .find(|&y| row_text(y).contains("Example Title"))
+            .expect("preview title is drawn");
+        let gutter_col = row_text(title_row)
+            .chars()
+            .position(|c| c == '\u{258e}')
+            .expect("title row carries the gutter glyph");
+
+        // Every reserved thumbnail row below the title repeats both bars, with
+        // the gutter in the same column as on the text row.
+        for y in title_row + 1..=title_row + thumb_size.height {
+            let line = row_text(y);
+            assert!(
+                line.contains('\u{258f}'),
+                "expected the timestamp separator on thumbnail row {y}, got:\n{line}"
+            );
+            assert_eq!(
+                line.chars().position(|c| c == '\u{258e}'),
+                Some(gutter_col),
+                "expected the preview gutter on thumbnail row {y}, got:\n{line}"
+            );
+        }
 
         Ok(())
     }
