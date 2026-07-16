@@ -795,19 +795,19 @@ impl State {
 /// geometry is recomputed per frame and the latest copy lives here so input
 /// handling does not need to re-derive the layout.
 ///
-/// Only the first row of the buffer bar is mapped (`bar_tabs`), which matches
-/// the default theme's single-row layout exactly. Multi-row or separator-heavy
-/// custom themes (e.g. `slanted`) degrade to approximate boxes, where a misclick
-/// lands on an adjacent buffer - low harm.
+/// Every bar row is mapped when the theme returns hit `ids`; without them
+/// (legacy themes like `slanted`) only the first row is mapped, matching the
+/// single-row layout exactly. Separator-heavy custom themes degrade to
+/// approximate boxes, where a misclick lands on an adjacent buffer - low harm.
 #[derive(Debug, Default, Clone)]
 pub struct LayoutMap {
     /// The message area (excludes the user list when a sidebar is shown).
     pub message_rect: Rect,
     /// The whole buffer bar region.
     pub bar_rect: Rect,
-    /// Per-tab hit boxes paired with the buffer they select, left to right in
-    /// buffer order. Built by measuring each tab's rendered display width.
-    pub bar_tabs: Vec<(Rect, BufferId)>,
+    /// Per-tab hit boxes paired with what they act on, left to right per row.
+    /// Built by measuring each tab's rendered display width.
+    pub bar_tabs: Vec<(Rect, BarHit)>,
     /// The user list region, or `None` when the sidebar is hidden.
     pub userlist_rect: Option<Rect>,
     /// Index of the first member rendered in the user list. Always 0 today;
@@ -834,13 +834,27 @@ pub struct ReactionHit {
     pub key: String,
 }
 
+/// What a buffer-bar tab acts on when clicked. Buffer tabs focus the buffer;
+/// backend tabs (emitted by multi-row themes, e.g. the tabbed layout) either
+/// focus the backend's last-viewed buffer or only change the selected backend.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BarHit {
+    Buffer(BufferId),
+    Backend {
+        backend: BackendId,
+        /// `true` for the `backend-select:` marker: only switch the visible
+        /// buffer row, do not move focus.
+        select_only: bool,
+    },
+}
+
 impl LayoutMap {
-    /// Returns the buffer whose tab hit box contains `(x, y)`, if any. Used to
-    /// turn a left-click on the buffer bar into a focus switch.
-    pub fn tab_at(&self, x: u16, y: u16) -> Option<&BufferId> {
+    /// Returns the bar hit whose tab hit box contains `(x, y)`, if any. Used to
+    /// turn a left-click on the buffer bar into a focus/selection switch.
+    pub fn tab_at(&self, x: u16, y: u16) -> Option<&BarHit> {
         self.bar_tabs
             .iter()
-            .find_map(|(rect, id)| rect_contains(rect, x, y).then_some(id))
+            .find_map(|(rect, hit)| rect_contains(rect, x, y).then_some(hit))
     }
 
     /// Returns the member index (relative to `userlist_first_member`) for a
@@ -1079,9 +1093,21 @@ pub struct ViewState {
     /// Updated by the renderer after each draw; used by scroll key handlers to
     /// compute page-height steps without a second terminal size query.
     pub viewport_height: u16,
-    /// Horizontal scroll offset of the buffer bar (columns). Persisted across
-    /// frames so "follow" mode can scroll minimally without jumping each frame.
-    pub bar_x_scroll: u16,
+    /// Per-row horizontal scroll offsets of the buffer bar (columns). Persisted
+    /// across frames so "follow" mode can scroll minimally without jumping each
+    /// frame; resized by the renderer to the row count of the current bar.
+    pub bar_row_scroll: Vec<u16>,
+    /// The backend whose buffers a tabbed bar layout shows, set by clicking a
+    /// backend tab. `None` until a backend tab is clicked; display code should
+    /// use [`ViewState::effective_selected_backend`], which falls back to the
+    /// focused buffer's backend.
+    pub selected_backend: Option<BackendId>,
+    /// The buffer most recently focused on each backend, so selecting a backend
+    /// tab can return to where the user left off. Not persisted.
+    pub last_focused_per_backend: HashMap<BackendId, BufferId>,
+    /// Runtime `:barstyle` override for the theme's buffer-bar layout, exposed
+    /// to Lua as `_tirc.buffer_bar_style`. `None` lets the theme option apply.
+    pub buffer_bar_style: Option<String>,
     /// Hit-region map from the most recent render, read by the input handler to
     /// resolve mouse clicks to buffers and user-list members.
     pub layout: LayoutMap,
@@ -1235,13 +1261,23 @@ impl ViewState {
     /// status buffer at startup).
     pub fn focus_if_unset(&mut self, buffer: BufferId) {
         if self.focused.is_none() {
-            self.focused = Some(buffer);
+            self.focus(buffer);
         }
     }
 
     pub fn focus(&mut self, buffer: BufferId) {
+        self.selected_backend = Some(buffer.backend);
+        self.last_focused_per_backend
+            .insert(buffer.backend, buffer.clone());
         self.focused = Some(buffer);
         self.exit_message_selection();
+    }
+
+    /// The backend a tabbed bar layout should show: the explicitly selected one
+    /// (backend tab click), else the focused buffer's backend.
+    pub fn effective_selected_backend(&self) -> Option<BackendId> {
+        self.selected_backend
+            .or_else(|| self.focused.as_ref().map(|id| id.backend))
     }
 
     fn focused_index(&self, state: &State) -> Option<usize> {
@@ -1251,8 +1287,7 @@ impl ViewState {
 
     fn focus_index(&mut self, state: &State, index: usize) {
         if let Some((id, _)) = state.buffers.get_index(index) {
-            self.focused = Some(id.clone());
-            self.exit_message_selection();
+            self.focus(id.clone());
         }
     }
 
@@ -1922,8 +1957,13 @@ mod tests {
 
     #[test]
     fn tab_at_resolves_clicks_to_contiguous_hit_boxes() {
-        let a = BufferId::new(backend(), "#a");
-        let b = BufferId::new(backend(), "#b");
+        let a = BarHit::Buffer(BufferId::new(backend(), "#a"));
+        let b = BarHit::Buffer(BufferId::new(backend(), "#b"));
+        // A second-row backend tab, as a multi-row theme would declare it.
+        let c = BarHit::Backend {
+            backend: backend(),
+            select_only: false,
+        };
         let layout = LayoutMap {
             bar_tabs: vec![
                 (
@@ -1944,6 +1984,15 @@ mod tests {
                     },
                     b.clone(),
                 ),
+                (
+                    Rect {
+                        x: 0,
+                        y: 1,
+                        width: 5,
+                        height: 1,
+                    },
+                    c.clone(),
+                ),
             ],
             ..LayoutMap::default()
         };
@@ -1957,7 +2006,47 @@ mod tests {
         );
         assert_eq!(layout.tab_at(8, 0), Some(&b));
         assert_eq!(layout.tab_at(9, 0), None, "past the last tab");
-        assert_eq!(layout.tab_at(0, 1), None, "wrong row");
+        assert_eq!(layout.tab_at(0, 1), Some(&c), "second row resolves too");
+        assert_eq!(layout.tab_at(5, 1), None, "past the second row's tab");
+    }
+
+    #[test]
+    fn focus_records_selection_and_last_focused_per_backend() {
+        let mut view = ViewState::new();
+        assert_eq!(view.effective_selected_backend(), None);
+
+        let a = BufferId::new(backend(), "#a");
+        view.focus(a.clone());
+        assert_eq!(view.selected_backend, Some(backend()));
+        assert_eq!(view.last_focused_per_backend.get(&backend()), Some(&a));
+
+        // Focusing another backend's buffer moves the selection and keeps the
+        // per-backend memory for the first one.
+        let other = BackendId(1);
+        let b = BufferId::new(other, "#b");
+        view.focus(b.clone());
+        assert_eq!(view.selected_backend, Some(other));
+        assert_eq!(view.effective_selected_backend(), Some(other));
+        assert_eq!(view.last_focused_per_backend.get(&backend()), Some(&a));
+        assert_eq!(view.last_focused_per_backend.get(&other), Some(&b));
+    }
+
+    #[test]
+    fn effective_selected_backend_falls_back_to_focused() {
+        let mut view = ViewState::new();
+        view.focused = Some(BufferId::new(backend(), "#a"));
+        assert_eq!(
+            view.effective_selected_backend(),
+            Some(backend()),
+            "no explicit selection: the focused buffer's backend"
+        );
+
+        view.selected_backend = Some(BackendId(1));
+        assert_eq!(
+            view.effective_selected_backend(),
+            Some(BackendId(1)),
+            "explicit selection wins"
+        );
     }
 
     #[test]

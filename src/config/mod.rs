@@ -13,6 +13,7 @@ use crate::{
 
 pub mod aliases;
 pub mod buffer_order;
+pub mod ui_prefs;
 
 #[inline]
 fn bool_true() -> bool {

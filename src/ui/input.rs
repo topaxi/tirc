@@ -11,7 +11,7 @@ use mlua::Lua;
 use crate::backends::BackendHandle;
 use crate::config::{
     aliases::AliasStore, buffer_order::BufferOrderStore, collect_user_watched_paths, emit_event,
-    reload_lua_theme, EventName, QuickReactions, SelectionMode,
+    reload_lua_theme, ui_prefs::UiPrefsStore, EventName, QuickReactions, SelectionMode,
 };
 use crate::core::{
     BackendEvent, BackendId, BackendMessage, BufferId, ChatEvent, Command, EventId, MsgKind,
@@ -22,7 +22,7 @@ use crate::tui::{DecodedImage, PreviewResult, Tui};
 use crate::ui::ConnectionStatus;
 
 use super::state::{HistoryState, StoredMessage};
-use super::{MenuAction, MenuItem, MenuTarget, Mode, Selection, State, ViewState};
+use super::{BarHit, MenuAction, MenuItem, MenuTarget, Mode, Selection, State, ViewState};
 
 /// Page size of a scroll-triggered history fetch.
 const HISTORY_FETCH_LIMIT: u16 = 50;
@@ -78,7 +78,13 @@ pub struct InputHandler<'lua> {
     aliases: AliasStore,
     /// Persisted `:bufmove` tab order, saved to the XDG state dir on change.
     buffer_order: BufferOrderStore,
+    /// Persisted runtime UI preferences (`:barstyle`), saved on change.
+    ui_prefs: UiPrefsStore,
 }
+
+/// The buffer-bar layouts the bundled themes understand, accepted by
+/// `:barstyle`. Custom themes may support these or ignore them.
+const BAR_STYLES: [&str; 4] = ["linear", "grouped", "per-backend", "tabbed"];
 
 impl<'lua> InputHandler<'lua> {
     // The handler genuinely owns this many collaborators; grouping them into a
@@ -96,6 +102,7 @@ impl<'lua> InputHandler<'lua> {
         quick_reactions: QuickReactions,
         aliases: AliasStore,
         buffer_order: BufferOrderStore,
+        ui_prefs: UiPrefsStore,
     ) -> Self {
         let watched_files = if auto_reload {
             Self::build_watch_list_for(lua, &config_path, &extra_watch_files)
@@ -122,6 +129,7 @@ impl<'lua> InputHandler<'lua> {
             quick_reactions,
             aliases,
             buffer_order,
+            ui_prefs,
         }
     }
 
@@ -311,6 +319,58 @@ impl<'lua> InputHandler<'lua> {
         self.report_save_error(state, buffer.backend, "buffer order", result);
     }
 
+    /// Sets (or with `reset` clears) the runtime buffer-bar style override and
+    /// persists it. Unknown styles report the valid set instead of changing
+    /// anything.
+    fn set_bar_style(
+        &mut self,
+        state: &mut State,
+        view: &mut ViewState,
+        backend: Option<BackendId>,
+        arg: &str,
+    ) {
+        if arg == "reset" {
+            view.buffer_bar_style = None;
+            let result = self.ui_prefs.set_buffer_bar(None);
+            if let Some(backend) = backend {
+                self.report_save_error(state, backend, "ui prefs", result);
+            }
+        } else if BAR_STYLES.contains(&arg) {
+            view.buffer_bar_style = Some(arg.to_string());
+            let result = self.ui_prefs.set_buffer_bar(Some(arg));
+            if let Some(backend) = backend {
+                self.report_save_error(state, backend, "ui prefs", result);
+            }
+        } else {
+            self.report_info(
+                state,
+                backend,
+                format!(
+                    "Invalid bar style '{arg}'. Valid: {}, reset",
+                    BAR_STYLES.join(", ")
+                ),
+            );
+        }
+    }
+
+    /// Pushes an informational line to `backend`'s status buffer, the channel
+    /// used for local command feedback.
+    fn report_info(&self, state: &mut State, backend: Option<BackendId>, text: String) {
+        if let Some(backend) = backend {
+            state.apply(
+                backend,
+                ChatEvent::ServerInfo {
+                    target: None,
+                    from: None,
+                    code: None,
+                    text: text.replace(['\r', '\n'], " "),
+                    raw: None,
+                    time: None,
+                },
+            );
+        }
+    }
+
     fn report_save_error(
         &self,
         state: &mut State,
@@ -319,16 +379,10 @@ impl<'lua> InputHandler<'lua> {
         result: Result<(), anyhow::Error>,
     ) {
         if let Err(err) = result {
-            state.apply(
-                backend,
-                ChatEvent::ServerInfo {
-                    target: None,
-                    from: None,
-                    code: None,
-                    text: format!("Failed to save {what}: {err}").replace(['\r', '\n'], " "),
-                    raw: None,
-                    time: None,
-                },
+            self.report_info(
+                state,
+                Some(backend),
+                format!("Failed to save {what}: {err}"),
             );
         }
     }
@@ -765,9 +819,34 @@ impl<'lua> InputHandler<'lua> {
     ) -> bool {
         // A click on a buffer tab switches focus, mirroring the Tab key handler's
         // read-marker dance: advance the marker on the buffer we are leaving, then
-        // clear the activity flags on the one we land on.
-        if let Some(id) = view.layout.tab_at(x, y) {
-            let id = id.clone();
+        // clear the activity flags on the one we land on. Backend tabs (multi-row
+        // themes) either select the backend's row or focus its last-viewed buffer.
+        if let Some(hit) = view.layout.tab_at(x, y) {
+            let id = match hit.clone() {
+                BarHit::Buffer(id) => {
+                    // A stale id from a theme bug must not create a buffer.
+                    if !state.buffers.contains_key(&id) {
+                        return false;
+                    }
+                    id
+                }
+                BarHit::Backend {
+                    backend,
+                    select_only: true,
+                } => {
+                    view.selected_backend = Some(backend);
+                    return true;
+                }
+                BarHit::Backend {
+                    backend,
+                    select_only: false,
+                } => view
+                    .last_focused_per_backend
+                    .get(&backend)
+                    .filter(|id| state.buffers.contains_key(*id))
+                    .cloned()
+                    .unwrap_or_else(|| BufferId::status(backend)),
+            };
             if let Some(buffer) = state.focused_buffer_mut(view) {
                 buffer.advance_read_marker();
             }
@@ -846,7 +925,9 @@ impl<'lua> InputHandler<'lua> {
         x: u16,
         y: u16,
     ) -> bool {
-        if let Some(id) = view.layout.tab_at(x, y) {
+        // Only buffer tabs get a context menu: none of the actions below is
+        // well-defined for a backend tab, so those are deliberately ignored.
+        if let Some(BarHit::Buffer(id)) = view.layout.tab_at(x, y) {
             let target = MenuTarget::Buffer(id.clone());
             let items = vec![
                 MenuItem {
@@ -1143,6 +1224,25 @@ impl<'lua> InputHandler<'lua> {
                     let arg = arg.trim().to_string();
                     self.move_buffer(state, id, &arg);
                 }
+            }
+            ["barstyle"] => {
+                let current = view
+                    .buffer_bar_style
+                    .clone()
+                    .map(|s| format!("{s} (override; ':barstyle reset' to clear)"))
+                    .unwrap_or_else(|| "theme default".to_string());
+                self.report_info(
+                    state,
+                    backend,
+                    format!(
+                        "Buffer bar style: {current}. Valid: {}",
+                        BAR_STYLES.join(", ")
+                    ),
+                );
+            }
+            ["barstyle", arg] => {
+                let arg = arg.trim().to_string();
+                self.set_bar_style(state, view, backend, &arg);
             }
             ["list"] => self.send_to(backend, Command::ListChannels),
             ["verify"] => self.send_to(

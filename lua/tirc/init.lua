@@ -17,8 +17,9 @@
 --- The buffer bar layout returned by `render_buffer_bar`: one `TircSpans` per row.
 ---@class TircBufferBar
 ---@field rows TircSpans[]
+---@field ids? string[][] hit-region declaration parallel to `rows`: `ids[r][e]` describes the e-th top-level element of `rows[r]`. Entries: a buffer id (`TircBufferTab.id`, click focuses it), `'backend:<id>'` (click focuses that backend's last-viewed buffer), `'backend-select:<id>'` (click only selects the backend's row), or `''` for decoration. Use `''`, never nil - sequence holes truncate. Absent: first-row elements map to buffers in order (legacy)
 ---@field bg? string optional base background colour (hex or named) to fill empty bar space
----@field scroll? 'follow'|'center' how to scroll the bar to keep the focused tab visible: 'follow' (default) scrolls minimally; 'center' always centers the focused tab
+---@field scroll? 'follow'|'center' how to scroll each bar row to keep its anchor tab visible: 'follow' (default) scrolls minimally; 'center' always centers
 
 --- Styled span tree consumed by the renderer: a string, a `{ content, style }`
 --- pair, or a (possibly nested) list of either. Returning `nil` skips the line.
@@ -128,6 +129,8 @@
 ---@field version string
 ---@field ui TircUi
 ---@field focused_buffer? string opaque id of the currently focused buffer, or nil
+---@field selected_backend? integer id of the backend a tabbed buffer bar shows (falls back to the focused buffer's backend), or nil
+---@field buffer_bar_style? string runtime `:barstyle` override for the buffer-bar layout, or nil when the theme option applies
 ---@field mode 'normal' | 'command' | 'insert' | 'select' current editor mode
 ---@field multi_backend boolean whether more than one backend is connected
 ---@field buffers TircBufferTab[] all open buffers

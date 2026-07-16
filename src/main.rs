@@ -136,6 +136,8 @@ async fn root_task(
 
     let alias_store = tirc::config::aliases::AliasStore::load();
     let order_store = tirc::config::buffer_order::BufferOrderStore::load();
+    let ui_prefs = tirc::config::ui_prefs::UiPrefsStore::load();
+    view.buffer_bar_style = ui_prefs.buffer_bar().map(str::to_string);
 
     // Config buffer ranks count globally across servers so servers keep their
     // config order relative to each other.
@@ -250,6 +252,7 @@ async fn root_task(
         config.quick_reactions.clone(),
         alias_store,
         order_store,
+        ui_prefs,
     );
 
     let mut events = EventStream::new();

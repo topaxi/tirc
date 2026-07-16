@@ -6,7 +6,7 @@ use mlua::LuaSerdeExt;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect, Size},
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListDirection, ListItem, ListState, Paragraph},
 };
 use ratatui_image::{protocol::Protocol, Image};
@@ -16,12 +16,12 @@ use tui_input::Input;
 use tracing::Level;
 
 use crate::backends::BackendInfo;
-use crate::core::{AttachmentKind, BufferId, ChatEvent, EventId, TargetId};
+use crate::core::{AttachmentKind, BackendId, BufferId, ChatEvent, EventId, TargetId};
 use crate::logging::LogLine;
 use crate::lua::date_time::date_time_to_table;
 use crate::ui::{
-    ChatBuffer, ConnectionStatus, LayoutMap, Member, Mode, ReactionHit, State, StoredMessage,
-    ViewState,
+    BarHit, ChatBuffer, ConnectionStatus, LayoutMap, Member, Mode, ReactionHit, State,
+    StoredMessage, ViewState,
 };
 
 use super::lua::{to_lua_event, to_lua_user, STYLE_MARKER};
@@ -37,6 +37,21 @@ pub enum BarScrollMode {
     Follow,
     /// Always center the focused tab in the bar.
     Center,
+}
+
+/// One built buffer bar: the rendered lines plus everything hit-testing and
+/// scrolling need. `hits` is `None` for themes that declared no `ids`, which
+/// selects the legacy first-row↔buffer-order mapping.
+#[derive(Default)]
+struct BuiltBar<'a> {
+    lines: Vec<Line<'a>>,
+    style: Style,
+    /// Display width of each top-level element, per row.
+    row_widths: Vec<Vec<u16>>,
+    /// Parsed per-row hit ids parallel to `row_widths`; `None` entries are
+    /// non-interactive elements (separators/spacers).
+    hits: Option<Vec<Vec<Option<BarHit>>>>,
+    scroll_mode: BarScrollMode,
 }
 
 /// Computes the horizontal scroll offset for the buffer bar so the focused tab
@@ -90,6 +105,55 @@ pub fn buffer_bar_scroll(
             scroll.min(max_scroll)
         }
     }
+}
+
+/// Parses one entry of a theme's `ids` hit declaration (see `TircBufferBar`).
+/// `""` and anything malformed yield `None` (a non-interactive element).
+/// Buffer ids use `split_once` because Matrix targets contain `:`.
+pub fn parse_bar_id(s: &str) -> Option<BarHit> {
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(id) = s.strip_prefix("backend-select:") {
+        return id.parse().ok().map(|n| BarHit::Backend {
+            backend: BackendId(n),
+            select_only: true,
+        });
+    }
+    if let Some(id) = s.strip_prefix("backend:") {
+        return id.parse().ok().map(|n| BarHit::Backend {
+            backend: BackendId(n),
+            select_only: false,
+        });
+    }
+    let (backend, target) = s.split_once(':')?;
+    let backend: usize = backend.parse().ok()?;
+    if target.is_empty() {
+        return None;
+    }
+    Some(BarHit::Buffer(BufferId::new(BackendId(backend), target)))
+}
+
+/// The element a bar row scrolls to keep visible: the focused buffer's tab when
+/// the row contains it, else the selected backend's tab (the tabbed layout's
+/// first row), else none (the row does not scroll).
+pub fn row_anchor_index(
+    row_hits: &[Option<BarHit>],
+    focused: Option<&BufferId>,
+    selected_backend: Option<BackendId>,
+) -> Option<usize> {
+    if let Some(focused) = focused {
+        let position = row_hits
+            .iter()
+            .position(|hit| matches!(hit, Some(BarHit::Buffer(id)) if id == focused));
+        if position.is_some() {
+            return position;
+        }
+    }
+    let selected = selected_backend?;
+    row_hits.iter().position(
+        |hit| matches!(hit, Some(BarHit::Backend { backend, .. }) if *backend == selected),
+    )
 }
 
 /// Upper bound on the terminal-cell height of an inline image, so a tall image
@@ -1437,47 +1501,77 @@ impl Renderer {
         Ok(tabs)
     }
 
-    /// Accumulates left-to-right hit boxes along the first row of the bar from
-    /// the per-tab `widths` measured while the bar was built (see
-    /// [`Self::build_buffer_bar`]), pairing each with its buffer in
-    /// `state.buffers` order. Because the widths come from the same flatten that
-    /// produced the drawn spans, the boxes line up with the bar exactly even when
-    /// a tab includes separators. Any separator a tab carries is attributed to
-    /// that tab, leaving the bar contiguous with no dead zones between tabs.
-    fn bar_tabs_from_widths(
+    /// Accumulates left-to-right hit boxes for every visible bar row from the
+    /// per-tab `row_widths` measured while the bar was built (see
+    /// [`Self::build_buffer_bar`]). With `hits` (themes declaring `ids`), each
+    /// element carries its own [`BarHit`] and non-interactive elements advance
+    /// the x position without producing a box. Without `hits` (legacy themes),
+    /// the first row's elements map to buffers in `state.buffers` order.
+    /// Because the widths come from the same flatten that produced the drawn
+    /// spans, the boxes line up with the bar exactly even when a tab includes
+    /// separators. Any separator a tab carries is attributed to that tab,
+    /// leaving the bar contiguous with no dead zones between tabs.
+    fn bar_hits_from_rows(
         &self,
         state: &State,
         bar_rect: Rect,
-        widths: &[u16],
-        scroll: u16,
-    ) -> Vec<(Rect, BufferId)> {
-        let mut tabs = Vec::with_capacity(widths.len());
-        let mut content_x: u16 = 0;
+        row_widths: &[Vec<u16>],
+        hits: Option<&[Vec<Option<BarHit>>]>,
+        row_scrolls: &[u16],
+    ) -> Vec<(Rect, BarHit)> {
+        let mut tabs = Vec::new();
 
-        for (width, id) in widths.iter().zip(state.buffers.keys()) {
-            let w = *width;
-            let content_end = content_x.saturating_add(w);
+        // Legacy themes map only the first row, zipped against buffer order.
+        let legacy_hits: Vec<Vec<Option<BarHit>>>;
+        let hits = match hits {
+            Some(hits) => hits,
+            None => {
+                let first_row = row_widths.first().map(Vec::as_slice).unwrap_or_default();
+                legacy_hits = vec![first_row
+                    .iter()
+                    .zip(state.buffers.keys())
+                    .map(|(_, id)| Some(BarHit::Buffer(id.clone())))
+                    .collect()];
+                &legacy_hits
+            }
+        };
 
-            if w > 0 && content_end > scroll {
-                let rel_start = content_x.saturating_sub(scroll);
-                if rel_start < bar_rect.width {
-                    let rel_end = content_end.saturating_sub(scroll).min(bar_rect.width);
-                    let visible_width = rel_end.saturating_sub(rel_start);
-                    if visible_width > 0 {
-                        tabs.push((
-                            Rect {
-                                x: bar_rect.x.saturating_add(rel_start),
-                                y: bar_rect.y,
-                                width: visible_width,
-                                height: 1,
-                            },
-                            id.clone(),
-                        ));
+        for (row, (widths, row_hits)) in row_widths.iter().zip(hits.iter()).enumerate() {
+            // Skip rows clipped by the bar-height clamp.
+            if row as u16 >= bar_rect.height {
+                break;
+            }
+            let y = bar_rect.y.saturating_add(row as u16);
+            let scroll = row_scrolls.get(row).copied().unwrap_or(0);
+            let mut content_x: u16 = 0;
+
+            for (width, hit) in widths.iter().zip(row_hits.iter()) {
+                let w = *width;
+                let content_end = content_x.saturating_add(w);
+
+                if let Some(hit) = hit {
+                    if w > 0 && content_end > scroll {
+                        let rel_start = content_x.saturating_sub(scroll);
+                        if rel_start < bar_rect.width {
+                            let rel_end = content_end.saturating_sub(scroll).min(bar_rect.width);
+                            let visible_width = rel_end.saturating_sub(rel_start);
+                            if visible_width > 0 {
+                                tabs.push((
+                                    Rect {
+                                        x: bar_rect.x.saturating_add(rel_start),
+                                        y,
+                                        width: visible_width,
+                                        height: 1,
+                                    },
+                                    hit.clone(),
+                                ));
+                            }
+                        }
                     }
                 }
-            }
 
-            content_x = content_end;
+                content_x = content_end;
+            }
         }
 
         tabs
@@ -1515,41 +1609,48 @@ impl Renderer {
             None => tirc_mod.set("focused_buffer", mlua::Value::Nil)?,
         }
 
+        match view.effective_selected_backend() {
+            Some(id) => tirc_mod.set("selected_backend", id.0)?,
+            None => tirc_mod.set("selected_backend", mlua::Value::Nil)?,
+        }
+        match &view.buffer_bar_style {
+            Some(style) => tirc_mod.set("buffer_bar_style", style.as_str())?,
+            None => tirc_mod.set("buffer_bar_style", mlua::Value::Nil)?,
+        }
+
         Ok(())
     }
 
     /// Converts a `render_buffer_bar` result into rendered lines plus the display
-    /// width of each top-level element of the *first* row. A table with a `rows`
+    /// width of each top-level element of *every* row. A table with a `rows`
     /// sequence yields one line per row; any other value is treated as a single
     /// row (the shorthand documented for `render_buffer_bar`).
     ///
-    /// Each first-row element is one buffer tab, in buffer order (the
-    /// `render_buffer_bar` contract), so these widths drive click hit-testing:
-    /// measuring the same structure that is rendered keeps the hit boxes exact
-    /// even for themes whose tabs include separators (e.g. `slanted`), which a
-    /// separate per-tab re-measure could not match.
+    /// Each row element is one tab (the `render_buffer_bar` contract), so these
+    /// widths drive click hit-testing: measuring the same structure that is
+    /// rendered keeps the hit boxes exact even for themes whose tabs include
+    /// separators (e.g. `slanted`), which a separate per-tab re-measure could
+    /// not match.
     fn rows_to_lines_and_widths(
         &self,
         lua: &mlua::Lua,
         value: mlua::Value,
-    ) -> Result<(Vec<Line<'_>>, Vec<u16>), anyhow::Error> {
+    ) -> Result<(Vec<Line<'_>>, Vec<Vec<u16>>), anyhow::Error> {
         if let mlua::Value::Table(table) = &value {
             if let mlua::Value::Table(rows) = table.get::<mlua::Value>("rows")? {
                 let mut lines = Vec::new();
-                let mut first_row_widths = Vec::new();
-                for (i, row) in rows.sequence_values::<mlua::Value>().enumerate() {
+                let mut row_widths = Vec::new();
+                for row in rows.sequence_values::<mlua::Value>() {
                     let (line, widths) = self.row_line_and_widths(lua, row?)?;
-                    if i == 0 {
-                        first_row_widths = widths;
-                    }
+                    row_widths.push(widths);
                     lines.push(line);
                 }
-                return Ok((lines, first_row_widths));
+                return Ok((lines, row_widths));
             }
         }
 
         let (line, widths) = self.row_line_and_widths(lua, value)?;
-        Ok((vec![line], widths))
+        Ok((vec![line], vec![widths]))
     }
 
     /// Flattens one bar row into a [`Line`] and returns the display width of each
@@ -1596,53 +1697,73 @@ impl Renderer {
         }
     }
 
-    /// Produces the buffer bar as a list of lines, a base background style, and
-    /// the per-tab column widths of the first row (in buffer order) used for
-    /// click hit-testing. Delegates the whole layout to the theme's
-    /// `render_buffer_bar`; when that formatter is absent, falls back to a single
-    /// line built from per-tab `render_buffer_tab` results so raw `TircUi` themes
-    /// keep working.
-    fn build_buffer_bar(
-        &self,
-        state: &State,
-        lua: &mlua::Lua,
-    ) -> (Vec<Line<'_>>, Style, Vec<u16>, BarScrollMode) {
+    /// Reads the optional `ids` hit declaration from a `TircBufferBar` table:
+    /// one string sequence per row, each entry parsed by [`parse_bar_id`].
+    /// Returns `None` when the theme declared no `ids` (legacy layout).
+    fn bar_hit_ids(table: &mlua::Table) -> Option<Vec<Vec<Option<BarHit>>>> {
+        let ids: mlua::Table = table.get::<Option<mlua::Table>>("ids").ok().flatten()?;
+        let mut rows = Vec::new();
+        for row in ids.sequence_values::<mlua::Table>() {
+            let Ok(row) = row else { break };
+            rows.push(
+                row.sequence_values::<String>()
+                    .map(|entry| entry.ok().as_deref().and_then(parse_bar_id))
+                    .collect(),
+            );
+        }
+        Some(rows)
+    }
+
+    /// Produces the buffer bar: rendered lines, a base background style, the
+    /// per-tab column widths of every row, and the optional per-row hit ids
+    /// (`None` = legacy first-row↔buffers mapping). Delegates the whole layout
+    /// to the theme's `render_buffer_bar`; when that formatter is absent, falls
+    /// back to a single line built from per-tab `render_buffer_tab` results so
+    /// raw `TircUi` themes keep working.
+    fn build_buffer_bar(&self, state: &State, lua: &mlua::Lua) -> BuiltBar<'_> {
         let tabs = match self.buffer_tabs(state, lua) {
             Ok(tabs) => tabs,
             Err(_) => {
-                return (
-                    vec![Line::default()],
-                    Style::default(),
-                    Vec::new(),
-                    BarScrollMode::default(),
-                )
+                return BuiltBar {
+                    lines: vec![Line::default()],
+                    ..BuiltBar::default()
+                }
             }
         };
 
         match crate::config::call_formatter(lua, "render_buffer_bar", &tabs) {
             Some(Ok(mlua::Value::Table(table))) => {
-                let bg_style = Self::bar_bg_style(&table);
+                let style = Self::bar_bg_style(&table);
                 let scroll_mode = Self::bar_scroll_mode(&table);
-                let (lines, widths) = self
+                let hits = Self::bar_hit_ids(&table);
+                let (lines, row_widths) = self
                     .rows_to_lines_and_widths(lua, mlua::Value::Table(table))
                     .unwrap_or_default();
-                (lines, bg_style, widths, scroll_mode)
+                BuiltBar {
+                    lines,
+                    style,
+                    row_widths,
+                    hits,
+                    scroll_mode,
+                }
             }
             Some(Ok(value)) => {
-                let (lines, widths) = self
+                let (lines, row_widths) = self
                     .rows_to_lines_and_widths(lua, value)
                     .unwrap_or_default();
-                (lines, Style::default(), widths, BarScrollMode::default())
+                BuiltBar {
+                    lines,
+                    row_widths,
+                    ..BuiltBar::default()
+                }
             }
-            Some(Err(err)) => (
-                vec![Line::from(Self::string_to_span(
+            Some(Err(err)) => BuiltBar {
+                lines: vec![Line::from(Self::string_to_span(
                     format!("ERR: {err}"),
                     Some(Style::default().fg(Color::Red)),
                 ))],
-                Style::default(),
-                Vec::new(),
-                BarScrollMode::default(),
-            ),
+                ..BuiltBar::default()
+            },
             None => {
                 // No `render_buffer_bar`: build a single row from per-tab spans and
                 // measure each tab so hit-testing still works.
@@ -1655,12 +1776,11 @@ impl Renderer {
                     widths.push(tab_spans.iter().map(|s| s.width() as u16).sum());
                     spans.extend(tab_spans);
                 }
-                (
-                    vec![Line::from(spans)],
-                    Style::default(),
-                    widths,
-                    BarScrollMode::default(),
-                )
+                BuiltBar {
+                    lines: vec![Line::from(spans)],
+                    row_widths: vec![widths],
+                    ..BuiltBar::default()
+                }
             }
         }
     }
@@ -1806,8 +1926,15 @@ impl Renderer {
 
         // Build the bar first so the layout can size its region to fit the rows
         // the theme returned, capped so the message area never collapses.
-        let (bar_lines, bar_style, bar_tab_widths, bar_scroll_mode) =
-            self.build_buffer_bar(state, lua);
+        // Destructured so the borrow the lines hold on `self` ends once they
+        // are drawn, freeing `self` for `render_input` below.
+        let BuiltBar {
+            lines: bar_lines,
+            style: bar_style,
+            row_widths: bar_row_widths,
+            hits: bar_hits,
+            scroll_mode: bar_scroll_mode,
+        } = self.build_buffer_bar(state, lua);
         let max_bar_height = f.area().height.saturating_sub(3);
         let bar_height = (bar_lines.len() as u16).clamp(1, max_bar_height.max(1));
 
@@ -1846,25 +1973,47 @@ impl Renderer {
             self.render_messages(f, state, view, lua, msg_rect);
         self.draw_images(f, image_draws);
 
-        // Compute horizontal scroll so the focused tab stays visible.
-        let focused_index = view
-            .focused
-            .as_ref()
-            .and_then(|id| state.buffers.keys().position(|k| k == id));
-        view.bar_x_scroll = buffer_bar_scroll(
-            &bar_tab_widths,
-            focused_index,
-            chunks[2].width,
-            view.bar_x_scroll,
-            bar_scroll_mode,
-        );
+        // Compute per-row horizontal scroll so each row's anchor tab (focused
+        // buffer, or selected backend for a backend-tab row) stays visible.
+        // Preserve previous offsets across frames so Follow mode stays minimal.
+        view.bar_row_scroll.resize(bar_lines.len(), 0);
+        let selected_backend = view.effective_selected_backend();
+        for (row, widths) in bar_row_widths.iter().enumerate() {
+            let anchor = match &bar_hits {
+                Some(hits) => hits.get(row).and_then(|row_hits| {
+                    row_anchor_index(row_hits, view.focused.as_ref(), selected_backend)
+                }),
+                // Legacy themes: row 0 anchors on the focused buffer's position
+                // in buffer order; other rows do not scroll.
+                None if row == 0 => view
+                    .focused
+                    .as_ref()
+                    .and_then(|id| state.buffers.keys().position(|k| k == id)),
+                None => None,
+            };
+            let prev = view.bar_row_scroll.get(row).copied().unwrap_or(0);
+            view.bar_row_scroll[row] =
+                buffer_bar_scroll(widths, anchor, chunks[2].width, prev, bar_scroll_mode);
+        }
 
-        f.render_widget(
-            Paragraph::new(Text::from(bar_lines))
-                .style(bar_style)
-                .scroll((0, view.bar_x_scroll)),
-            chunks[2],
-        );
+        // Each row is its own one-line Paragraph so rows scroll independently
+        // (a tabbed layout's backend row must not shift with the buffer row).
+        for (row, line) in bar_lines.into_iter().enumerate() {
+            if row as u16 >= chunks[2].height {
+                break;
+            }
+            let row_rect = Rect {
+                x: chunks[2].x,
+                y: chunks[2].y.saturating_add(row as u16),
+                width: chunks[2].width,
+                height: 1,
+            };
+            let scroll = view.bar_row_scroll.get(row).copied().unwrap_or(0);
+            f.render_widget(
+                Paragraph::new(line).style(bar_style).scroll((0, scroll)),
+                row_rect,
+            );
+        }
         let can_post = view
             .focused
             .as_ref()
@@ -1876,8 +2025,13 @@ impl Renderer {
         // Record this frame's hit regions so the input handler can resolve mouse
         // clicks without re-deriving the layout. Built last, after the bar's Lua
         // context is in place, so the tab widths match what was drawn.
-        let bar_tabs =
-            self.bar_tabs_from_widths(state, chunks[2], &bar_tab_widths, view.bar_x_scroll);
+        let bar_tabs = self.bar_hits_from_rows(
+            state,
+            chunks[2],
+            &bar_row_widths,
+            bar_hits.as_deref(),
+            &view.bar_row_scroll,
+        );
         view.layout = LayoutMap {
             message_rect: msg_rect,
             bar_rect: chunks[2],
@@ -2237,8 +2391,14 @@ mod tests {
             width: 80,
             height: 1,
         };
-        let (_, _, widths, _) = renderer.build_buffer_bar(&state, &lua);
-        let tabs = renderer.bar_tabs_from_widths(&state, bar_rect, &widths, 0);
+        let bar = renderer.build_buffer_bar(&state, &lua);
+        let tabs = renderer.bar_hits_from_rows(
+            &state,
+            bar_rect,
+            &bar.row_widths,
+            bar.hits.as_deref(),
+            &[0],
+        );
 
         assert_eq!(tabs.len(), state.buffers.len(), "one hit box per buffer");
         assert_eq!(tabs[0].0.x, bar_rect.x, "first tab starts at the bar's x");
@@ -2343,20 +2503,28 @@ mod tests {
         let renderer = Renderer::new();
         renderer.update_render_context(&lua, &view, &state)?;
 
-        let (lines, _, widths, _) = renderer.build_buffer_bar(&state, &lua);
+        let bar = renderer.build_buffer_bar(&state, &lua);
         let bar_rect = Rect {
             x: 0,
             y: 0,
             width: 120,
             height: 1,
         };
-        let tabs = renderer.bar_tabs_from_widths(&state, bar_rect, &widths, 0);
+        // Slanted declares no `ids`, exercising the legacy first-row mapping.
+        assert!(bar.hits.is_none(), "slanted takes the legacy path");
+        let tabs = renderer.bar_hits_from_rows(
+            &state,
+            bar_rect,
+            &bar.row_widths,
+            bar.hits.as_deref(),
+            &[0],
+        );
 
         assert_eq!(tabs.len(), state.buffers.len(), "one hit box per buffer");
 
         // The hit boxes must span exactly the drawn bar: the right edge of the
         // last tab equals the rendered line width, separators included.
-        let drawn_width: u16 = lines[0].spans.iter().map(|s| s.width() as u16).sum();
+        let drawn_width: u16 = bar.lines[0].spans.iter().map(|s| s.width() as u16).sum();
         let last = tabs.last().expect("at least one tab");
         assert_eq!(
             last.0.x + last.0.width,
@@ -2813,7 +2981,8 @@ mod tests {
         let renderer = Renderer::new();
         renderer.update_render_context(&lua, &view, &state)?;
 
-        let (_, _, widths, _) = renderer.build_buffer_bar(&state, &lua);
+        let bar = renderer.build_buffer_bar(&state, &lua);
+        let widths = &bar.row_widths[0];
         let bar_rect = Rect {
             x: 0,
             y: 0,
@@ -2828,7 +2997,13 @@ mod tests {
         let last_tab_end = last_tab_start + widths[last_idx];
         let scroll = last_tab_end.saturating_sub(bar_rect.width);
 
-        let tabs = renderer.bar_tabs_from_widths(&state, bar_rect, &widths, scroll);
+        let tabs = renderer.bar_hits_from_rows(
+            &state,
+            bar_rect,
+            &bar.row_widths,
+            bar.hits.as_deref(),
+            &[scroll],
+        );
 
         // All scrolled-off tabs should still be mapped but may be partially clipped.
         // At minimum the last tab must be fully visible at the right side.
@@ -2850,10 +3025,258 @@ mod tests {
 
         // With scroll=0 the total hit-box width still equals total rendered width
         // (existing invariant should still hold after the refactor).
-        let tabs_no_scroll = renderer.bar_tabs_from_widths(&state, bar_rect, &widths, 0);
+        let tabs_no_scroll = renderer.bar_hits_from_rows(
+            &state,
+            bar_rect,
+            &bar.row_widths,
+            bar.hits.as_deref(),
+            &[0],
+        );
         let hit_total: u16 = tabs_no_scroll.iter().map(|(r, _)| r.width).sum();
         assert_eq!(hit_total, total, "zero-scroll: hit boxes cover all tabs");
 
+        Ok(())
+    }
+
+    #[test]
+    fn parse_bar_id_variants() {
+        use crate::core::BackendId;
+
+        assert_eq!(
+            parse_bar_id("0:#chan"),
+            Some(BarHit::Buffer(BufferId::new(BackendId(0), "#chan")))
+        );
+        // Matrix targets contain ':' - only the first one splits.
+        assert_eq!(
+            parse_bar_id("1:!room:matrix.org"),
+            Some(BarHit::Buffer(BufferId::new(
+                BackendId(1),
+                "!room:matrix.org"
+            )))
+        );
+        assert_eq!(
+            parse_bar_id("backend:2"),
+            Some(BarHit::Backend {
+                backend: BackendId(2),
+                select_only: false,
+            })
+        );
+        assert_eq!(
+            parse_bar_id("backend-select:0"),
+            Some(BarHit::Backend {
+                backend: BackendId(0),
+                select_only: true,
+            })
+        );
+        assert_eq!(parse_bar_id(""), None, "empty = decoration");
+        assert_eq!(parse_bar_id("garbage"), None);
+        assert_eq!(parse_bar_id("x:#chan"), None, "non-numeric backend");
+        assert_eq!(parse_bar_id("backend:x"), None);
+        assert_eq!(parse_bar_id("0:"), None, "empty target");
+    }
+
+    #[test]
+    fn row_anchor_index_prefers_focused_buffer_over_backend() {
+        use crate::core::BackendId;
+
+        let focused = BufferId::new(BackendId(0), "#a");
+        let row = vec![
+            Some(BarHit::Backend {
+                backend: BackendId(0),
+                select_only: false,
+            }),
+            None,
+            Some(BarHit::Buffer(focused.clone())),
+        ];
+
+        assert_eq!(
+            row_anchor_index(&row, Some(&focused), Some(BackendId(0))),
+            Some(2),
+            "the focused buffer's tab wins"
+        );
+        assert_eq!(
+            row_anchor_index(&row, None, Some(BackendId(0))),
+            Some(0),
+            "falls back to the selected backend's tab"
+        );
+        let other = BufferId::new(BackendId(1), "#b");
+        assert_eq!(
+            row_anchor_index(&row, Some(&other), Some(BackendId(0))),
+            Some(0),
+            "a focused buffer absent from the row falls back to the backend tab"
+        );
+        assert_eq!(
+            row_anchor_index(&row, Some(&other), None),
+            None,
+            "nothing to anchor on"
+        );
+    }
+
+    /// Builds a state with two IRC backends and one channel each, the shared
+    /// fixture for the bar-layout tests.
+    fn two_backend_state() -> crate::ui::State {
+        use crate::backends::BackendInfo;
+        use crate::core::{
+            BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef,
+        };
+        use crate::ui::State;
+
+        let mut state = State::new();
+        for (index, name) in ["irc.one.example", "irc.two.example"].iter().enumerate() {
+            let backend = BackendId(index);
+            state.register_backend(BackendInfo {
+                id: backend,
+                protocol: Protocol::Irc,
+                name: name.to_string(),
+            });
+            state.apply(
+                backend,
+                ChatEvent::Message {
+                    target: TargetId::from(if index == 0 { "#a" } else { "#b" }),
+                    id: None,
+                    sender: UserRef::new("alice"),
+                    body: MessageBody::plain("hi"),
+                    kind: MsgKind::Text,
+                    echo_of: None,
+                    time: None,
+                },
+            );
+        }
+        state
+    }
+
+    /// Sets up a Lua with the default theme and the given setup options,
+    /// returning the built bar for `state`/`view`.
+    fn build_bar_with_setup(
+        setup: &str,
+        state: &crate::ui::State,
+        view: &crate::ui::ViewState,
+    ) -> anyhow::Result<(usize, Option<Vec<Vec<Option<BarHit>>>>)> {
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load(format!("require('tirc.tui.themes.default'):setup({setup})"))
+            .exec()?;
+
+        let renderer = Renderer::new();
+        renderer.update_render_context(&lua, view, state)?;
+        let bar = renderer.build_buffer_bar(state, &lua);
+        Ok((bar.lines.len(), bar.hits))
+    }
+
+    #[test]
+    fn bar_styles_produce_expected_row_counts() -> anyhow::Result<(), anyhow::Error> {
+        use crate::core::BackendId;
+        use crate::ui::ViewState;
+
+        let state = two_backend_state();
+        let mut view = ViewState::new();
+        view.focus(BufferId::status(BackendId(0)));
+
+        for (setup, rows) in [
+            ("{}", 1),
+            ("{ buffer_bar = 'linear' }", 1),
+            ("{ buffer_bar = 'grouped' }", 1),
+            ("{ buffer_bar = 'per-backend' }", 2),
+            ("{ buffer_bar = 'tabbed' }", 2),
+        ] {
+            let (row_count, hits) = build_bar_with_setup(setup, &state, &view)?;
+            assert_eq!(row_count, rows, "row count for {setup}");
+            assert!(hits.is_some(), "default theme declares ids ({setup})");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn tabbed_bar_maps_backend_and_buffer_rows() -> anyhow::Result<(), anyhow::Error> {
+        use crate::core::BackendId;
+        use crate::ui::ViewState;
+
+        let state = two_backend_state();
+        let mut view = ViewState::new();
+        // Focusing a backend-0 buffer selects backend 0 for the tabbed row.
+        view.focus(BufferId::new(BackendId(0), "#a"));
+
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default'):setup({ buffer_bar = 'tabbed' })")
+            .exec()?;
+        let renderer = Renderer::new();
+        renderer.update_render_context(&lua, &view, &state)?;
+        let bar = renderer.build_buffer_bar(&state, &lua);
+
+        assert_eq!(bar.lines.len(), 2);
+        let hits = bar.hits.as_deref().expect("tabbed declares ids");
+        assert!(
+            hits[0]
+                .iter()
+                .all(|hit| matches!(hit, Some(BarHit::Backend { .. }))),
+            "row 1 is backend tabs"
+        );
+        // Row 2 holds only the selected backend's buffers: (status) and #a.
+        assert_eq!(hits[1].len(), 2);
+        assert!(hits[1].iter().all(|hit| matches!(
+            hit,
+            Some(BarHit::Buffer(id)) if id.backend == BackendId(0)
+        )));
+
+        // Hit boxes land on their own rows.
+        let bar_rect = Rect {
+            x: 0,
+            y: 5,
+            width: 120,
+            height: 2,
+        };
+        let tabs = renderer.bar_hits_from_rows(
+            &state,
+            bar_rect,
+            &bar.row_widths,
+            bar.hits.as_deref(),
+            &[0, 0],
+        );
+        assert!(tabs.iter().all(|(rect, hit)| match hit {
+            BarHit::Backend { .. } => rect.y == 5,
+            BarHit::Buffer(_) => rect.y == 6,
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn tabbed_click_select_option_emits_select_markers() -> anyhow::Result<(), anyhow::Error> {
+        use crate::core::BackendId;
+        use crate::ui::ViewState;
+
+        let state = two_backend_state();
+        let mut view = ViewState::new();
+        view.focus(BufferId::status(BackendId(0)));
+
+        let (_, hits) = build_bar_with_setup(
+            "{ buffer_bar = 'tabbed', tabbed_click = 'select' }",
+            &state,
+            &view,
+        )?;
+        let hits = hits.expect("ids declared");
+        assert!(hits[0].iter().all(|hit| matches!(
+            hit,
+            Some(BarHit::Backend {
+                select_only: true,
+                ..
+            })
+        )));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_barstyle_override_wins_over_theme_option() -> anyhow::Result<(), anyhow::Error> {
+        use crate::core::BackendId;
+        use crate::ui::ViewState;
+
+        let state = two_backend_state();
+        let mut view = ViewState::new();
+        view.focus(BufferId::status(BackendId(0)));
+        view.buffer_bar_style = Some("tabbed".to_string());
+
+        let (row_count, _) = build_bar_with_setup("{ buffer_bar = 'linear' }", &state, &view)?;
+        assert_eq!(row_count, 2, "the runtime override selects tabbed");
         Ok(())
     }
 

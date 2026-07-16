@@ -63,6 +63,8 @@ local Class = require('tirc.class')
 ---@field render_buffer_bar? fun(self: TircTheme, buffers: TircBufferTab[]): TircBufferBar | TircSpans
 ---@field render_unread_separator? fun(self: TircTheme): TircSpans
 ---@field render_date_separator? fun(self: TircTheme, date: TircDateTime): TircSpans
+---@field buffer_bar? 'linear'|'grouped'|'per-backend'|'tabbed' buffer-bar layout (default 'linear'); the runtime `:barstyle` override wins
+---@field tabbed_click? 'focus'|'select' what clicking a backend tab does in the 'tabbed' layout: 'focus' jumps to that backend's last-viewed buffer, 'select' only switches the visible buffer row (default 'focus')
 
 ---@class TircTheme: TircUi, TircClassDef<TircTheme, TircThemeOptions>
 ---@field styles table<string, TircThemeStyle>
@@ -108,6 +110,9 @@ function Theme:make_styles(overrides)
     tab_focused = theme.style { fg = 'white', bg = 'darkgray' },
     tab_unread = theme.style { fg = 'white', bg = 'darkgray' },
     tab_mention = theme.style { fg = 'red', bg = 'darkgray' },
+    backend_tab = theme.style { fg = 'gray', bg = 'darkgray' },
+    backend_tab_selected = theme.style { fg = 'white', bg = 'blue' },
+    bar_group_label = theme.style { fg = 'darkgray' },
     unread_separator = theme.style { fg = 'darkgray' },
     reaction = theme.style { fg = 'gray', bg = 'darkgray' },
     reaction_mine = theme.style { fg = 'white', bg = 'blue' },
@@ -701,24 +706,161 @@ function Theme:render_buffer_tab(buffer)
   return { { ' ' .. name .. ' ', style }, ' ' }
 end
 
---- Lays out the whole buffer bar. Returns `{ rows = { <TircSpans>, ... } }`, one
---- entry per rendered line. The default is a single row of tabs; override this to
---- group by `buffer.backend_id`, render multiple rows, or filter the buffers.
----
---- Each top-level element of a row is treated as one buffer tab, in `buffers`
---- order, for mouse click hit-testing. Keep one element per buffer (wrap a tab's
---- separators inside its own element rather than appending them to the row) so a
---- click maps to the right buffer; the first row is the one made clickable.
+--- Groups buffers by backend, preserving buffer order within each group and
+--- backend order of first appearance. Labels come from `backend_metadata.label`
+--- when set, else the backend name.
+---@param buffers TircBufferTab[]
+---@return { id: integer, label: string, buffers: TircBufferTab[], has_unread: boolean, has_mention: boolean }[]
+function Theme:backend_groups(buffers)
+  local groups, order = {}, {}
+  for _, b in ipairs(buffers) do
+    local g = groups[b.backend_id]
+    if not g then
+      local meta = b.backend_metadata
+      g = {
+        id = b.backend_id,
+        label = (meta and meta.label) or b.backend_name,
+        buffers = {},
+        has_unread = false,
+        has_mention = false,
+      }
+      groups[b.backend_id] = g
+      order[#order + 1] = g
+    end
+    g.buffers[#g.buffers + 1] = b
+    g.has_unread = g.has_unread or b.has_unread
+    g.has_mention = g.has_mention or b.has_mention
+  end
+  return order
+end
+
+--- Renders one backend tab for the tabbed layout's first row. The selected
+--- backend is highlighted; unselected backends show mention/unread activity.
+---@param group { id: integer, label: string, has_unread: boolean, has_mention: boolean }
+function Theme:render_backend_tab(group)
+  local s = self.styles
+  local style
+  if tirc.selected_backend == group.id then
+    style = s.backend_tab_selected
+  elseif group.has_mention then
+    style = s.tab_mention
+  elseif group.has_unread then
+    style = s.tab_unread
+  else
+    style = s.backend_tab
+  end
+  return { { ' ' .. group.label .. ' ', style }, ' ' }
+end
+
+--- The active bar layout: the runtime `:barstyle` override wins, then the
+--- `buffer_bar` theme option, then 'linear'.
+function Theme:resolved_buffer_bar_style()
+  return tirc.buffer_bar_style or self.buffer_bar or 'linear'
+end
+
+--- Lays out the whole buffer bar. Returns `{ rows = ..., ids = ... }` (see
+--- `TircBufferBar`): one `rows` entry per rendered line, and one `ids` entry
+--- per top-level row element declaring what a click on it does (a buffer id,
+--- a `backend:`/`backend-select:` marker, or `''` for decoration). Dispatches
+--- on the layout resolved by `resolved_buffer_bar_style`; override this (or
+--- one of the `render_*_bar` methods) for custom layouts.
 ---@param buffers TircBufferTab[]
 ---@return TircBufferBar
 function Theme:render_buffer_bar(buffers)
-  local row = {}
+  local style = self:resolved_buffer_bar_style()
+  if style == 'grouped' then
+    return self:render_grouped_bar(buffers)
+  elseif style == 'per-backend' then
+    return self:render_per_backend_bar(buffers)
+  elseif style == 'tabbed' then
+    return self:render_tabbed_bar(buffers)
+  end
+  return self:render_linear_bar(buffers)
+end
 
+--- One row of all buffer tabs, in buffer order (the classic layout).
+---@param buffers TircBufferTab[]
+---@return TircBufferBar
+function Theme:render_linear_bar(buffers)
+  local row, ids = {}, {}
   for _, buffer in ipairs(buffers) do
     row[#row + 1] = self:render_buffer_tab(buffer)
+    ids[#ids + 1] = buffer.id
+  end
+  return { rows = { row }, ids = { ids } }
+end
+
+--- One row, buffers grouped behind a clickable backend label:
+--- ` libera: (status) #rust │ matrix: friends `. Clicking a label focuses that
+--- backend's last-viewed buffer.
+---@param buffers TircBufferTab[]
+---@return TircBufferBar
+function Theme:render_grouped_bar(buffers)
+  local s = self.styles
+  local row, ids = {}, {}
+  for i, group in ipairs(self:backend_groups(buffers)) do
+    if i > 1 then
+      row[#row + 1] = { '│ ', s.darkgray }
+      ids[#ids + 1] = ''
+    end
+    row[#row + 1] = { group.label .. ': ', s.bar_group_label }
+    ids[#ids + 1] = 'backend:' .. group.id
+    for _, buffer in ipairs(group.buffers) do
+      row[#row + 1] = self:render_buffer_tab(buffer)
+      ids[#ids + 1] = buffer.id
+    end
+  end
+  return { rows = { row }, ids = { ids } }
+end
+
+--- One row per backend, each led by a clickable backend label.
+---@param buffers TircBufferTab[]
+---@return TircBufferBar
+function Theme:render_per_backend_bar(buffers)
+  local s = self.styles
+  local rows, ids = {}, {}
+  for _, group in ipairs(self:backend_groups(buffers)) do
+    local row, row_ids = {}, {}
+    row[#row + 1] = { group.label .. ': ', s.bar_group_label }
+    row_ids[#row_ids + 1] = 'backend:' .. group.id
+    for _, buffer in ipairs(group.buffers) do
+      row[#row + 1] = self:render_buffer_tab(buffer)
+      row_ids[#row_ids + 1] = buffer.id
+    end
+    rows[#rows + 1] = row
+    ids[#ids + 1] = row_ids
+  end
+  return { rows = rows, ids = ids }
+end
+
+--- Two rows: backend tabs on top, the selected backend's buffers below. The
+--- `tabbed_click` option picks what a backend-tab click does ('focus' jumps to
+--- its last-viewed buffer, 'select' only switches the visible row).
+---@param buffers TircBufferTab[]
+---@return TircBufferBar
+function Theme:render_tabbed_bar(buffers)
+  local groups = self:backend_groups(buffers)
+  local selected = tirc.selected_backend or (groups[1] and groups[1].id)
+  local marker = self.tabbed_click == 'select' and 'backend-select:'
+    or 'backend:'
+
+  local backend_row, backend_ids = {}, {}
+  local buffer_row, buffer_ids = {}, {}
+  for _, group in ipairs(groups) do
+    backend_row[#backend_row + 1] = self:render_backend_tab(group)
+    backend_ids[#backend_ids + 1] = marker .. group.id
+    if group.id == selected then
+      for _, buffer in ipairs(group.buffers) do
+        buffer_row[#buffer_row + 1] = self:render_buffer_tab(buffer)
+        buffer_ids[#buffer_ids + 1] = buffer.id
+      end
+    end
   end
 
-  return { rows = { row } }
+  return {
+    rows = { backend_row, buffer_row },
+    ids = { backend_ids, buffer_ids },
+  }
 end
 
 return Theme
