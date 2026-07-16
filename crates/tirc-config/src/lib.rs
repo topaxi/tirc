@@ -435,6 +435,8 @@ mod tests {
             value: "hi @top",
             cursor: 7,
             force: false,
+            state: None,
+            focused: None,
         };
         let (span, items) = engine.query(&query, &lua).expect("source should match");
         assert_eq!(span, (3, 7));

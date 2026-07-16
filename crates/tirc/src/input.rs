@@ -1118,7 +1118,7 @@ impl<'lua> InputHandler<'lua> {
     /// trigger's minimum query length so the full candidate list opens.
     /// Typing a closing `:` after an exact emoji shortcode auto-accepts it
     /// without opening the popup (`:smile:` just works).
-    fn refresh_completion(&mut self, view: &mut ViewState, force: bool) {
+    fn refresh_completion(&mut self, state: &State, view: &mut ViewState, force: bool) {
         if view.mode == Mode::Insert {
             let (value, cursor) = (self.ui.input().value(), self.ui.input().cursor());
             if let Some((span, insert)) = completion::closing_sigil_accept(value, cursor) {
@@ -1134,6 +1134,8 @@ impl<'lua> InputHandler<'lua> {
             value: self.ui.input().value(),
             cursor: self.ui.input().cursor(),
             force,
+            state: Some(state),
+            focused: view.focused.as_ref(),
         };
         match self.completion.query(&query, self.lua) {
             Some((span, items)) => view.completion.show(span, items),
@@ -1725,7 +1727,7 @@ impl<'lua> InputHandler<'lua> {
             // With the popup closed, Tab force-opens command completion with
             // the full candidate list.
             (Mode::Command, KeyCode::Tab) => {
-                self.refresh_completion(view, true);
+                self.refresh_completion(state, view, true);
             }
             (Mode::Command, KeyCode::Enter) => {
                 view.completion.close();
@@ -1759,7 +1761,7 @@ impl<'lua> InputHandler<'lua> {
             }
             (Mode::Command | Mode::Insert, _) => {
                 self.ui.handle_event(&CrosstermEvent::Key(event));
-                self.refresh_completion(view, false);
+                self.refresh_completion(state, view, false);
             }
             _ => {}
         }

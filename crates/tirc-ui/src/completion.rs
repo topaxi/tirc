@@ -17,8 +17,9 @@ use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization};
 use nucleo_matcher::{Matcher, Utf32Str};
 use ratatui::layout::Rect;
 
-use super::commands;
-use super::state::Mode;
+use super::commands::{self, ArgKind, Resolution};
+use super::state::{Mode, State};
+use tirc_core::BufferId;
 use tirc_lua::runtime::completion_sources_registry;
 
 /// Upper bound on the items a single query returns; the popup scrolls within
@@ -79,6 +80,11 @@ pub struct CompletionQuery<'a> {
     /// True when explicitly requested (Tab): triggers match with an empty
     /// query so the full candidate list opens.
     pub force: bool,
+    /// Domain state for argument candidates (buffers, members). `None` turns
+    /// state-backed argument kinds into no-ops.
+    pub state: Option<&'a State>,
+    /// The focused buffer, scoping channel/nick candidates.
+    pub focused: Option<&'a BufferId>,
 }
 
 /// A provider of completion items behind a [`Trigger`].
@@ -118,6 +124,9 @@ impl CompletionEngine {
             if let Some(result) = self.command_name_query(ctx) {
                 return Some(result);
             }
+            if let Some(result) = self.command_arg_query(ctx, lua) {
+                return Some(result);
+            }
         }
         for source in &self.sources {
             if !source.modes().contains(&ctx.mode) {
@@ -142,6 +151,45 @@ impl CompletionEngine {
         let min_chars = if ctx.force { 0 } else { 1 };
         let (start, end, query) = line_start_span(ctx.value, ctx.cursor, min_chars)?;
         let items = command_name_items(&query, &mut self.matcher);
+        (!items.is_empty()).then_some(((start, end), items))
+    }
+
+    /// Completes the argument word under the cursor from the registry spec of
+    /// the (prefix-resolved) command in the first word: channels, nicks,
+    /// buffer labels, fixed choices, or theme bar styles depending on the
+    /// argument position's [`ArgKind`]. On ordinary edits at least one query
+    /// char is required so the popup does not open on every space; Tab
+    /// force-opens the full list.
+    fn command_arg_query(&mut self, ctx: &CompletionQuery, lua: &Lua) -> Option<QueryResult> {
+        let (arg_index, start, end, query) = commands::arg_word_span(ctx.value, ctx.cursor)?;
+        if !ctx.force && query.is_empty() {
+            return None;
+        }
+        let (name, _) = commands::split_line(ctx.value);
+        let spec = match commands::resolve(name, &[]) {
+            Resolution::Builtin(spec) => spec,
+            _ => return None,
+        };
+        let kind = *spec.args.get(arg_index)?;
+        let names = arg_kind_names(kind, ctx, lua);
+        // A trailing space moves on to the next argument; the final declared
+        // position completes without one.
+        let trailing = arg_index + 1 < spec.args.len();
+        let candidates = names.iter().map(|name| {
+            let insert = if trailing {
+                format!("{name} ")
+            } else {
+                name.clone()
+            };
+            (
+                name.as_str(),
+                CompletionItem {
+                    label: name.clone(),
+                    insert,
+                },
+            )
+        });
+        let items = fuzzy_rank(&mut self.matcher, &query, candidates);
         (!items.is_empty()).then_some(((start, end), items))
     }
 
@@ -287,6 +335,55 @@ fn command_name_items(query: &str, matcher: &mut Matcher) -> Vec<CompletionItem>
             })
     });
     fuzzy_rank(matcher, query, candidates)
+}
+
+/// Collects the raw candidate names for one argument kind. State-backed kinds
+/// return nothing when the query carries no state or focused buffer.
+fn arg_kind_names(kind: ArgKind, ctx: &CompletionQuery, lua: &Lua) -> Vec<String> {
+    match kind {
+        ArgKind::None => Vec::new(),
+        ArgKind::Channel => {
+            let (Some(state), Some(focused)) = (ctx.state, ctx.focused) else {
+                return Vec::new();
+            };
+            state
+                .buffers
+                .keys()
+                .filter(|id| id.backend == focused.backend && !id.target.is_status())
+                .map(|id| id.target.as_str().to_string())
+                .collect()
+        }
+        ArgKind::Nick => {
+            let (Some(state), Some(focused)) = (ctx.state, ctx.focused) else {
+                return Vec::new();
+            };
+            let Some(buffer) = state.buffers.get(focused) else {
+                return Vec::new();
+            };
+            buffer
+                .members
+                .iter()
+                .map(|member| member.user.name().to_string())
+                .collect()
+        }
+        ArgKind::Buffer => {
+            let Some(state) = ctx.state else {
+                return Vec::new();
+            };
+            state
+                .buffers
+                .iter()
+                .map(|(id, buffer)| state.buffer_label(id, buffer).to_string())
+                .collect()
+        }
+        ArgKind::Choices(choices) => choices.iter().map(|s| s.to_string()).collect(),
+        ArgKind::BarStyle => {
+            let mut styles =
+                tirc_lua::runtime::ui_string_list(lua, "buffer_bar_styles").unwrap_or_default();
+            styles.push("reset".to_string());
+            styles
+        }
+    }
 }
 
 /// Completes emoji shortcodes after a `:` sigil in Insert mode, backed by the
@@ -508,6 +605,70 @@ impl CompletionPopup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tirc_core::backend::BackendInfo;
+    use tirc_core::{
+        BackendId, ChatEvent, MemberRole, MembershipChange, MessageBody, MsgKind, Protocol,
+        TargetId, UserRef,
+    };
+
+    fn command_query<'a>(value: &'a str, cursor: usize, force: bool) -> CompletionQuery<'a> {
+        CompletionQuery {
+            mode: Mode::Command,
+            value,
+            cursor,
+            force,
+            state: None,
+            focused: None,
+        }
+    }
+
+    /// Backend 0 with #rust (members alice, albert, bob) and #news; backend 1
+    /// with #other. Returns the state and backend 0's #rust buffer id.
+    fn arg_state() -> (State, BufferId) {
+        let mut state = State::new();
+        for (id, channels) in [
+            (BackendId(0), &["#rust", "#news"][..]),
+            (BackendId(1), &["#other"][..]),
+        ] {
+            state.register_backend(BackendInfo {
+                id,
+                protocol: Protocol::Irc,
+                name: format!("test{}", id.0),
+            });
+            for channel in channels {
+                state.apply(
+                    id,
+                    ChatEvent::Message {
+                        target: TargetId::from(*channel),
+                        id: None,
+                        sender: UserRef::new("alice"),
+                        body: MessageBody::plain("hi"),
+                        kind: MsgKind::Text,
+                        echo_of: None,
+                        time: None,
+                    },
+                );
+            }
+        }
+        for nick in ["alice", "albert", "bob"] {
+            state.apply(
+                BackendId(0),
+                ChatEvent::Membership {
+                    target: TargetId::from("#rust"),
+                    who: UserRef::new(nick),
+                    change: MembershipChange::Present {
+                        role: MemberRole::Member,
+                    },
+                    time: None,
+                },
+            );
+        }
+        (state, BufferId::new(BackendId(0), "#rust"))
+    }
+
+    fn labels(items: &[CompletionItem]) -> Vec<&str> {
+        items.iter().map(|i| i.label.as_str()).collect()
+    }
 
     #[test]
     fn test_sigil_span_at_line_start() {
@@ -688,23 +849,121 @@ mod tests {
     #[test]
     fn test_command_name_query_only_inside_first_word() {
         let mut engine = CompletionEngine::new();
-        let ctx = CompletionQuery {
-            mode: Mode::Command,
-            value: "jo",
-            cursor: 2,
-            force: false,
-        };
+        let ctx = command_query("jo", 2, false);
         let ((start, end), items) = engine.command_name_query(&ctx).unwrap();
         assert_eq!((start, end), (0, 2));
         assert!(items.iter().any(|i| i.label == "join"));
 
-        let ctx = CompletionQuery {
-            mode: Mode::Command,
-            value: "join #rust",
-            cursor: 7,
-            force: false,
-        };
+        let ctx = command_query("join #rust", 7, false);
         assert_eq!(engine.command_name_query(&ctx), None);
+    }
+
+    #[test]
+    fn test_arg_completion_channels_scoped_to_focused_backend() {
+        let (state, focused) = arg_state();
+        let lua = Lua::new();
+        let mut engine = CompletionEngine::new();
+
+        let mut ctx = command_query("join ", 5, true);
+        ctx.state = Some(&state);
+        ctx.focused = Some(&focused);
+        let ((start, end), items) = engine.command_arg_query(&ctx, &lua).unwrap();
+        assert_eq!((start, end), (5, 5));
+        let labels = labels(&items);
+        assert!(labels.contains(&"#rust"));
+        assert!(labels.contains(&"#news"));
+        assert!(!labels.contains(&"#other"), "other backend's channels leak");
+        assert!(!labels.contains(&TargetId::STATUS), "status buffer leaks");
+    }
+
+    #[test]
+    fn test_arg_completion_final_position_no_trailing_space() {
+        let (state, focused) = arg_state();
+        let lua = Lua::new();
+        let mut engine = CompletionEngine::new();
+
+        let mut ctx = command_query("join #r", 7, false);
+        ctx.state = Some(&state);
+        ctx.focused = Some(&focused);
+        let (span, items) = engine.command_arg_query(&ctx, &lua).unwrap();
+        assert_eq!(span, (5, 7));
+        assert_eq!(items[0].insert, "#rust");
+    }
+
+    #[test]
+    fn test_arg_completion_nicks_with_trailing_space() {
+        let (state, focused) = arg_state();
+        let lua = Lua::new();
+        let mut engine = CompletionEngine::new();
+
+        // msg's target is not the final declared position, so accepting a
+        // nick moves on to the message with a trailing space.
+        let mut ctx = command_query("msg al", 6, false);
+        ctx.state = Some(&state);
+        ctx.focused = Some(&focused);
+        let (_, items) = engine.command_arg_query(&ctx, &lua).unwrap();
+        let labels = labels(&items);
+        assert!(labels.contains(&"alice"));
+        assert!(labels.contains(&"albert"));
+        assert!(!labels.contains(&"bob"));
+        assert!(items.iter().all(|i| i.insert.ends_with(' ')));
+    }
+
+    #[test]
+    fn test_arg_completion_prefix_resolved_command() {
+        let (state, focused) = arg_state();
+        let lua = Lua::new();
+        let mut engine = CompletionEngine::new();
+
+        // "jo" prefix-resolves to join, so its channel argument completes.
+        let mut ctx = command_query("jo #n", 5, false);
+        ctx.state = Some(&state);
+        ctx.focused = Some(&focused);
+        let (_, items) = engine.command_arg_query(&ctx, &lua).unwrap();
+        assert_eq!(items[0].label, "#news");
+    }
+
+    #[test]
+    fn test_arg_completion_choices() {
+        let lua = Lua::new();
+        let mut engine = CompletionEngine::new();
+
+        let ctx = command_query("verify acc", 10, false);
+        let (_, items) = engine.command_arg_query(&ctx, &lua).unwrap();
+        assert_eq!(labels(&items), ["accept"]);
+    }
+
+    #[test]
+    fn test_arg_completion_requires_query_unless_forced() {
+        let (state, focused) = arg_state();
+        let lua = Lua::new();
+        let mut engine = CompletionEngine::new();
+
+        // No query char and no Tab: stay closed so the popup does not open
+        // on every space keypress.
+        let mut ctx = command_query("join ", 5, false);
+        ctx.state = Some(&state);
+        ctx.focused = Some(&focused);
+        assert_eq!(engine.command_arg_query(&ctx, &lua), None);
+    }
+
+    #[test]
+    fn test_arg_completion_unknown_command_and_extra_positions() {
+        let (state, focused) = arg_state();
+        let lua = Lua::new();
+        let mut engine = CompletionEngine::new();
+
+        let mut ctx = command_query("xyz #r", 6, false);
+        ctx.state = Some(&state);
+        ctx.focused = Some(&focused);
+        assert_eq!(engine.command_arg_query(&ctx, &lua), None);
+
+        // join declares a single argument position; a second one does not
+        // complete.
+        let mut ctx = command_query("join #rust #n", 13, false);
+        ctx.state = Some(&state);
+        ctx.focused = Some(&focused);
+        assert_eq!(engine.command_arg_query(&ctx, &lua), None);
     }
 
     #[test]
