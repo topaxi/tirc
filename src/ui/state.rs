@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ops::RangeInclusive;
 
 use chrono::{DateTime, Local};
@@ -352,6 +353,18 @@ pub struct BackendState {
 pub struct State {
     pub backends: IndexMap<BackendId, BackendState>,
     pub buffers: IndexMap<BufferId, ChatBuffer>,
+    /// Buffer display aliases from the Lua config (`servers[i].aliases`).
+    /// Populated once at startup; not re-read on `:reload` (like `autojoin`).
+    pub config_aliases: HashMap<BufferId, String>,
+    /// Runtime aliases set via `:alias`, mirrored to the persisted
+    /// [`crate::config::aliases::AliasStore`].
+    pub user_aliases: HashMap<BufferId, String>,
+    /// Buffer ranks from the Lua config (`servers[i].buffer_order`), counted
+    /// globally across servers in config order. Populated once at startup.
+    pub config_order: HashMap<BufferId, usize>,
+    /// Buffer ranks snapshotted on `:bufmove`, mirrored to the persisted
+    /// [`crate::config::buffer_order::BufferOrderStore`].
+    pub user_order: HashMap<BufferId, usize>,
 }
 
 impl State {
@@ -363,7 +376,7 @@ impl State {
     /// backend is spawned.
     pub fn register_backend(&mut self, info: BackendInfo) {
         let id = info.id;
-        self.buffers.entry(BufferId::status(id)).or_default();
+        self.ensure_buffer(BufferId::status(id));
         self.backends.insert(
             id,
             BackendState {
@@ -430,15 +443,51 @@ impl State {
             .unwrap_or_default()
     }
 
+    /// The active alias for a buffer: runtime (`:alias`) wins over config.
+    pub fn alias(&self, id: &BufferId) -> Option<&str> {
+        self.user_aliases
+            .get(id)
+            .or_else(|| self.config_aliases.get(id))
+            .map(String::as_str)
+    }
+
+    /// The name to display for a buffer: alias > display name > raw target.
+    pub fn buffer_label<'a>(&'a self, id: &'a BufferId, buffer: &'a ChatBuffer) -> &'a str {
+        self.alias(id).unwrap_or_else(|| buffer.label(&id.target))
+    }
+
     pub fn focused_buffer_mut<'a>(&'a mut self, view: &ViewState) -> Option<&'a mut ChatBuffer> {
         let focused = view.focused.as_ref()?;
         self.buffers.get_mut(focused)
     }
 
     fn buffer_mut(&mut self, backend: BackendId, target: TargetId) -> &mut ChatBuffer {
-        self.buffers
-            .entry(BufferId::new(backend, target))
-            .or_default()
+        self.ensure_buffer(BufferId::new(backend, target))
+    }
+
+    /// Returns the buffer for `id`, creating it if needed. Creation re-sorts
+    /// the buffer map so a new buffer lands at its configured position.
+    pub fn ensure_buffer(&mut self, id: BufferId) -> &mut ChatBuffer {
+        if !self.buffers.contains_key(&id) {
+            self.buffers.insert(id.clone(), ChatBuffer::default());
+            self.sort_buffers();
+        }
+        self.buffers.get_mut(&id).expect("buffer just ensured")
+    }
+
+    /// Reorders buffers to honor the user (`:bufmove`) and config
+    /// (`buffer_order`) ranks; the user layer wins. The sort is stable, so
+    /// unranked buffers keep their arrival order after the ranked ones.
+    pub fn sort_buffers(&mut self) {
+        let user = &self.user_order;
+        let config = &self.config_order;
+        let rank = |id: &BufferId| {
+            user.get(id)
+                .map(|r| (0usize, *r))
+                .or_else(|| config.get(id).map(|r| (1, *r)))
+                .unwrap_or((2, 0))
+        };
+        self.buffers.sort_by(|a, _, b, _| rank(a).cmp(&rank(b)));
     }
 
     /// Applies a normalized event from `backend`, mutating buffers, rosters, and
@@ -1299,6 +1348,72 @@ mod tests {
         let buffer = buffer(&state, "!notices:matrix.org");
         assert_eq!(buffer.kind, BufferKind::System);
         assert!(buffer.messages.is_empty());
+    }
+
+    #[test]
+    fn buffer_label_precedence_is_user_alias_config_alias_display_name_target() {
+        let mut state = test_state();
+        let id = BufferId::new(backend(), "#tirc");
+
+        // Bare buffer: the raw target.
+        state.apply(backend(), message("#tirc", "alice", None));
+        assert_eq!(state.buffer_label(&id, buffer(&state, "#tirc")), "#tirc");
+
+        // A backend-provided display name (e.g. a Matrix room name).
+        state.apply(
+            backend(),
+            ChatEvent::BufferName {
+                target: TargetId::from("#tirc"),
+                name: "Room".to_string(),
+            },
+        );
+        assert_eq!(state.buffer_label(&id, buffer(&state, "#tirc")), "Room");
+
+        // A config alias beats the display name.
+        state.config_aliases.insert(id.clone(), "cfg".to_string());
+        assert_eq!(state.buffer_label(&id, buffer(&state, "#tirc")), "cfg");
+
+        // A runtime alias beats the config alias.
+        state.user_aliases.insert(id.clone(), "usr".to_string());
+        assert_eq!(state.buffer_label(&id, buffer(&state, "#tirc")), "usr");
+
+        // Removing each layer falls back to the next.
+        state.user_aliases.remove(&id);
+        assert_eq!(state.buffer_label(&id, buffer(&state, "#tirc")), "cfg");
+        state.config_aliases.remove(&id);
+        assert_eq!(state.buffer_label(&id, buffer(&state, "#tirc")), "Room");
+    }
+
+    fn targets(state: &State) -> Vec<&str> {
+        state.buffers.keys().map(|id| id.target.as_str()).collect()
+    }
+
+    #[test]
+    fn config_order_places_ranked_buffers_first_in_rank_order() {
+        let mut state = test_state();
+        state.config_order.insert(BufferId::new(backend(), "#b"), 0);
+        state.config_order.insert(BufferId::new(backend(), "#a"), 1);
+
+        // Arrival order: #a, #unranked, #b - the ranks must win regardless.
+        for channel in ["#a", "#unranked", "#b"] {
+            state.apply(backend(), message(channel, "alice", None));
+        }
+
+        // Ranked buffers first, then unranked (status, #unranked) by arrival.
+        assert_eq!(targets(&state), ["#b", "#a", TargetId::STATUS, "#unranked"]);
+    }
+
+    #[test]
+    fn user_order_wins_over_config_order() {
+        let mut state = test_state();
+        state.config_order.insert(BufferId::new(backend(), "#a"), 0);
+        state.user_order.insert(BufferId::new(backend(), "#b"), 0);
+
+        for channel in ["#a", "#b"] {
+            state.apply(backend(), message(channel, "alice", None));
+        }
+
+        assert_eq!(targets(&state), ["#b", "#a", TargetId::STATUS]);
     }
 
     #[test]

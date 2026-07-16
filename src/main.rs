@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -133,6 +134,14 @@ async fn root_task(
     let mut view = ViewState::new();
     let mut handles = Vec::new();
 
+    let alias_store = tirc::config::aliases::AliasStore::load();
+    let order_store = tirc::config::buffer_order::BufferOrderStore::load();
+
+    // Config buffer ranks count globally across servers so servers keep their
+    // config order relative to each other.
+    let mut config_rank = 0;
+    let mut backend_names: HashMap<String, BackendId> = HashMap::new();
+
     for (index, server) in config.servers.iter().enumerate() {
         if !server.enabled {
             continue;
@@ -140,11 +149,38 @@ async fn root_task(
         let id = BackendId(index);
         tirc::config::register_backend_metadata(lua, id)?;
         let backend = build_backend(id, server)?;
-        state.register_backend(backend.info());
+        let info = backend.info();
+        for (target, name) in &server.aliases {
+            state
+                .config_aliases
+                .insert(BufferId::new(id, target.as_str()), name.clone());
+        }
+        for (target, name) in alias_store.aliases_for(&info.name) {
+            state
+                .user_aliases
+                .insert(BufferId::new(id, target), name.to_string());
+        }
+        for target in &server.buffer_order {
+            state
+                .config_order
+                .insert(BufferId::new(id, target.as_str()), config_rank);
+            config_rank += 1;
+        }
+        backend_names.insert(info.name.clone(), id);
+        state.register_backend(info);
         view.focus_if_unset(BufferId::status(id));
         handles.push(backends::spawn(backend, event_tx.clone()));
     }
     drop(event_tx);
+
+    // The persisted `:bufmove` order is a flat cross-server list, so it can
+    // only be resolved once every backend's name is known.
+    for (rank, (server, target)) in order_store.iter().enumerate() {
+        if let Some(&id) = backend_names.get(server) {
+            state.user_order.insert(BufferId::new(id, target), rank);
+        }
+    }
+    state.sort_buffers();
 
     let mut tui = Tui::new()?;
     let picker = tui.initialize_terminal(config.image_protocol)?;
@@ -212,6 +248,8 @@ async fn root_task(
         config.watch_files.clone(),
         config.selection_mode,
         config.quick_reactions.clone(),
+        alias_store,
+        order_store,
     );
 
     let mut events = EventStream::new();

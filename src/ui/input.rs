@@ -10,12 +10,12 @@ use mlua::Lua;
 
 use crate::backends::BackendHandle;
 use crate::config::{
-    collect_user_watched_paths, emit_event, reload_lua_theme, EventName, QuickReactions,
-    SelectionMode,
+    aliases::AliasStore, buffer_order::BufferOrderStore, collect_user_watched_paths, emit_event,
+    reload_lua_theme, EventName, QuickReactions, SelectionMode,
 };
 use crate::core::{
-    BackendEvent, BackendId, BackendMessage, ChatEvent, Command, EventId, MsgKind, TargetId,
-    TxnAllocator, VerifyAction,
+    BackendEvent, BackendId, BackendMessage, BufferId, ChatEvent, Command, EventId, MsgKind,
+    TargetId, TxnAllocator, VerifyAction,
 };
 use crate::tui::lua::{create_lua_sender, to_lua_event};
 use crate::tui::{DecodedImage, PreviewResult, Tui};
@@ -74,6 +74,10 @@ pub struct InputHandler<'lua> {
     /// Quick-reaction config: whether message-select mode is available and the
     /// ordered emoji bound to the number keys `1`..`9` in that mode.
     quick_reactions: QuickReactions,
+    /// Persisted `:alias` buffer names, saved to the XDG state dir on change.
+    aliases: AliasStore,
+    /// Persisted `:bufmove` tab order, saved to the XDG state dir on change.
+    buffer_order: BufferOrderStore,
 }
 
 impl<'lua> InputHandler<'lua> {
@@ -90,6 +94,8 @@ impl<'lua> InputHandler<'lua> {
         extra_watch_files: Vec<String>,
         selection_mode: SelectionMode,
         quick_reactions: QuickReactions,
+        aliases: AliasStore,
+        buffer_order: BufferOrderStore,
     ) -> Self {
         let watched_files = if auto_reload {
             Self::build_watch_list_for(lua, &config_path, &extra_watch_files)
@@ -114,6 +120,8 @@ impl<'lua> InputHandler<'lua> {
             left_press: None,
             selection_mode,
             quick_reactions,
+            aliases,
+            buffer_order,
         }
     }
 
@@ -213,6 +221,111 @@ impl<'lua> InputHandler<'lua> {
                     from: None,
                     code: None,
                     text: notice_text,
+                    raw: None,
+                    time: None,
+                },
+            );
+        }
+    }
+
+    /// Sets a runtime display alias on `buffer` and persists it. A failed save
+    /// keeps the in-memory alias and reports the error to the status buffer.
+    fn set_alias(&mut self, state: &mut State, buffer: BufferId, name: String) {
+        let Some(server) = state
+            .backends
+            .get(&buffer.backend)
+            .map(|b| b.info.name.clone())
+        else {
+            return;
+        };
+        let result = self.aliases.set(&server, buffer.target.as_str(), &name);
+        let backend = buffer.backend;
+        state.user_aliases.insert(buffer, name);
+        self.report_save_error(state, backend, "aliases", result);
+    }
+
+    /// Removes the runtime alias from `buffer`, revealing the config alias /
+    /// display name / raw target underneath, and persists the removal.
+    fn remove_alias(&mut self, state: &mut State, buffer: BufferId) {
+        if state.user_aliases.remove(&buffer).is_none() {
+            return;
+        }
+        let Some(server) = state
+            .backends
+            .get(&buffer.backend)
+            .map(|b| b.info.name.clone())
+        else {
+            return;
+        };
+        let result = self.aliases.remove(&server, buffer.target.as_str());
+        self.report_save_error(state, buffer.backend, "aliases", result);
+    }
+
+    /// Moves the focused buffer within the tab bar. `arg` is a 1-based
+    /// absolute position, or a `+n`/`-n` relative step (clamped to the ends).
+    /// The resulting order is snapshotted and persisted.
+    fn move_buffer(&mut self, state: &mut State, buffer: BufferId, arg: &str) {
+        let Some(from) = state.buffers.get_index_of(&buffer) else {
+            return;
+        };
+        let last = state.buffers.len() - 1;
+        let to = if let Some(step) = arg.strip_prefix('+') {
+            let Ok(step) = step.parse::<usize>() else {
+                return;
+            };
+            from.saturating_add(step).min(last)
+        } else if let Some(step) = arg.strip_prefix('-') {
+            let Ok(step) = step.parse::<usize>() else {
+                return;
+            };
+            from.saturating_sub(step)
+        } else {
+            let Ok(position) = arg.parse::<usize>() else {
+                return;
+            };
+            position.saturating_sub(1).min(last)
+        };
+        if from == to {
+            return;
+        }
+        state.buffers.move_index(from, to);
+
+        // Snapshot the whole tab order so it restores exactly, and rank every
+        // open buffer so later-created buffers sort after the moved ones.
+        let snapshot: Vec<(String, String)> = state
+            .buffers
+            .keys()
+            .filter_map(|id| {
+                let backend = state.backends.get(&id.backend)?;
+                Some((backend.info.name.clone(), id.target.as_str().to_string()))
+            })
+            .collect();
+        state.user_order = state
+            .buffers
+            .keys()
+            .enumerate()
+            .map(|(rank, id)| (id.clone(), rank))
+            .collect();
+
+        let result = self.buffer_order.set_order(snapshot);
+        self.report_save_error(state, buffer.backend, "buffer order", result);
+    }
+
+    fn report_save_error(
+        &self,
+        state: &mut State,
+        backend: BackendId,
+        what: &str,
+        result: Result<(), anyhow::Error>,
+    ) {
+        if let Err(err) = result {
+            state.apply(
+                backend,
+                ChatEvent::ServerInfo {
+                    target: None,
+                    from: None,
+                    code: None,
+                    text: format!("Failed to save {what}: {err}").replace(['\r', '\n'], " "),
                     raw: None,
                     time: None,
                 },
@@ -1015,6 +1128,22 @@ impl<'lua> InputHandler<'lua> {
                     }
                 }
             }
+            ["alias", name] if !name.trim().is_empty() => {
+                if let Some(id) = focused.clone() {
+                    self.set_alias(state, id, name.trim().to_string());
+                }
+            }
+            ["unalias"] => {
+                if let Some(id) = focused.clone() {
+                    self.remove_alias(state, id);
+                }
+            }
+            ["bufmove", arg] => {
+                if let Some(id) = focused.clone() {
+                    let arg = arg.trim().to_string();
+                    self.move_buffer(state, id, &arg);
+                }
+            }
             ["list"] => self.send_to(backend, Command::ListChannels),
             ["verify"] => self.send_to(
                 backend,
@@ -1056,7 +1185,7 @@ impl<'lua> InputHandler<'lua> {
         if let Some(b) = state.focused_buffer_mut(view) {
             b.advance_read_marker();
         }
-        state.buffers.entry(buffer.clone()).or_default();
+        state.ensure_buffer(buffer.clone());
         view.focus(buffer);
         if let Some(b) = state.focused_buffer_mut(view) {
             b.mark_read();

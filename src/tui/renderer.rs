@@ -768,7 +768,7 @@ impl Renderer {
             return (vec![], vec![], vec![]);
         };
 
-        let target_name = buffer.label(&buffer_id.target);
+        let target_name = state.buffer_label(buffer_id, buffer);
         let total = buffer.messages.len();
         // Clamp scroll so we always render at least the oldest message when any exist.
         let scroll = buffer.scroll_position.min(total.saturating_sub(1));
@@ -809,7 +809,7 @@ impl Renderer {
             .collect();
 
         let title = self
-            .render_buffer_title(lua, backend, nickname, buffer.label(&buffer_id.target))
+            .render_buffer_title(lua, backend, nickname, target_name)
             .unwrap_or_default();
 
         // Build the block up front so `list_area` can be derived from the exact
@@ -1400,7 +1400,7 @@ impl Renderer {
 
         let t = lua.create_table()?;
         t.set("id", format!("{}:{}", id.backend.0, id.target.as_str()))?;
-        t.set("name", buffer.label(&id.target))?;
+        t.set("name", state.buffer_label(id, buffer))?;
         t.set("target", id.target.as_str())?;
         t.set("is_status", id.target.is_status())?;
         t.set(
@@ -1814,9 +1814,9 @@ impl Renderer {
         let layout = self.get_layout(bar_height);
         let chunks = layout.split(f.area());
 
-        let members = self
-            .focused(state, view)
-            .map(|(id, buffer, _, _)| (buffer.label(&id.target).to_string(), &buffer.members));
+        let members = self.focused(state, view).map(|(id, buffer, _, _)| {
+            (state.buffer_label(id, buffer).to_string(), &buffer.members)
+        });
 
         let mut userlist_rect = None;
         let mut split_x = None;
@@ -2252,6 +2252,51 @@ mod tests {
             );
             assert!(prev.width > 0, "each tab has a measurable width");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn buffer_tab_table_uses_alias_and_keeps_raw_target() -> anyhow::Result<(), anyhow::Error> {
+        use crate::backends::BackendInfo;
+        use crate::core::{
+            BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef,
+        };
+        use crate::ui::State;
+
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default'):setup({})")
+            .exec()?;
+
+        let backend = BackendId(0);
+        let mut state = State::new();
+        state.register_backend(BackendInfo {
+            id: backend,
+            protocol: Protocol::Irc,
+            name: "irc.example.com".to_string(),
+        });
+        state.apply(
+            backend,
+            ChatEvent::Message {
+                target: TargetId::from("#a"),
+                id: None,
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain("hi"),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+
+        let id = BufferId::new(backend, "#a");
+        state.user_aliases.insert(id.clone(), "alpha".to_string());
+
+        let renderer = Renderer::new();
+        let buffer = state.buffers.get(&id).expect("buffer exists");
+        let tab = renderer.buffer_tab_table(&state, &lua, &id, buffer)?;
+
+        assert_eq!(tab.get::<String>("name")?, "alpha");
+        assert_eq!(tab.get::<String>("target")?, "#a");
         Ok(())
     }
 

@@ -27,6 +27,8 @@
 ---@field accept_invalid_cert? boolean defaults to false
 ---@field realname? string
 ---@field autojoin? string[]
+---@field aliases? table<string, string> display aliases for buffers on this server: raw target -> shown name (e.g. `{ ['#rust-beginners'] = 'rust-101' }`)
+---@field buffer_order? string[] explicit tab order for this server's buffers; listed targets sort first, unlisted follow in arrival order. Include '(status)' to position the status buffer
 ---@field metadata? table<string, any> free-form data passed back to Lua for rendering (e.g. `{ label = 'topaxi' }`)
 
 --- A Matrix homeserver.
@@ -38,6 +40,8 @@
 ---@field password string
 ---@field device_id? string
 ---@field autojoin? string[] room ids/aliases to join on connect
+---@field aliases? table<string, string> display aliases for buffers on this server: raw target -> shown name
+---@field buffer_order? string[] explicit tab order for this server's buffers; listed targets sort first, unlisted follow in arrival order. Include '(status)' to position the status buffer
 ---@field metadata? table<string, any> free-form data passed back to Lua for rendering (e.g. `{ label = 'matrix' }`)
 
 local M = {}

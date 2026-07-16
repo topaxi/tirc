@@ -11,6 +11,9 @@ use crate::{
     tui::lua::create_tirc_theme_lua_module,
 };
 
+pub mod aliases;
+pub mod buffer_order;
+
 #[inline]
 fn bool_true() -> bool {
     true
@@ -52,6 +55,17 @@ pub struct ServerConfig {
 
     #[serde(default)]
     pub autojoin: Vec<String>,
+
+    /// Display aliases for buffers on this server: raw target -> shown name.
+    #[serde(default)]
+    pub aliases: std::collections::HashMap<String, String>,
+
+    /// Explicit tab order for this server's buffers. Listed targets sort
+    /// first, in list order (servers keep their config order relative to each
+    /// other); unlisted buffers follow in arrival order. Include
+    /// `"(status)"` to position the status buffer.
+    #[serde(default)]
+    pub buffer_order: Vec<String>,
 
     // Matrix fields.
     pub homeserver: Option<String>,
@@ -793,6 +807,56 @@ mod tests {
             default_quick_reaction_emojis(),
             "emojis default even when only `enabled` is set"
         );
+    }
+
+    #[test]
+    fn server_aliases_deserialize_and_default_to_empty() {
+        let lua = Lua::new();
+
+        let server: ServerConfig = lua
+            .from_value(
+                lua.load(
+                    "{ protocol = 'irc', host = 'irc.libera.chat', aliases = { ['#a'] = 'x' } }",
+                )
+                .eval()
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(server.aliases.get("#a").map(String::as_str), Some("x"));
+
+        let without: ServerConfig = lua
+            .from_value(
+                lua.load("{ protocol = 'irc', host = 'irc.libera.chat' }")
+                    .eval()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(without.aliases.is_empty());
+    }
+
+    #[test]
+    fn server_buffer_order_deserializes_and_defaults_to_empty() {
+        let lua = Lua::new();
+
+        let server: ServerConfig = lua
+            .from_value(
+                lua.load(
+                    "{ protocol = 'irc', host = 'irc.libera.chat', buffer_order = { '(status)', '#a' } }",
+                )
+                .eval()
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(server.buffer_order, ["(status)", "#a"]);
+
+        let without: ServerConfig = lua
+            .from_value(
+                lua.load("{ protocol = 'irc', host = 'irc.libera.chat' }")
+                    .eval()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(without.buffer_order.is_empty());
     }
 
     fn stored(event: ChatEvent) -> StoredMessage {
