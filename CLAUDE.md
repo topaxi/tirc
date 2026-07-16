@@ -101,6 +101,13 @@ fire the Lua `"event"` callback before being pushed to state.
   invoked with `runtime::call_formatter`.
 - `ui::lua::to_lua_event` (tirc-ui) converts a stored message into the Lua table shape
   that themes consume.
+- Async host tasks: `tirc.process.spawn(argv)` (shell-free process spawning) and
+  `tirc.http.fetch(url)` (HTTP via reqwest) are promise-based (`tirc.promise`,
+  coroutine `:await()` via `Promise.async`). The native `_tirc.__spawn`/`__fetch` run
+  on the tokio runtime and deliver completions over a dedicated channel drained by
+  the main loop (`InputHandler::on_host_task`), so Lua callbacks always run on the UI
+  thread. `tirc.json` (native, serde-backed) complements fetch. These live in their
+  own `require('tirc.*')` modules - avoid attaching new API onto the `tirc` object.
 - Rust-created event/buffer-tab/datetime tables carry shared method metatables
   (`event:is_dm()`, `buffer:is_focused()`, `dt:format(fmt)`). The `__index` targets are
   the `tirc.event`/`tirc.buffer` Lua modules (datetime methods are native); the

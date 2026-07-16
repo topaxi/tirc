@@ -18,11 +18,12 @@
 --- your nick or a pattern.
 
 local tirc = require('tirc')
+local process = require('tirc.process')
 local utils = require('tirc.utils')
 
 --- Options for the notify plugin.
 ---@class TircNotifyOptions
----@field command? string notifier binary (default 'notify-send'); trusted config, invoked through the shell, so a wrapper with flags works
+---@field command? string|string[] notifier program (default 'notify-send'); a list carries leading arguments, e.g. { 'flatpak-spawn', '--host', 'notify-send' }
 ---@field app_name? string `-a` flag (default 'tirc')
 ---@field urgency? 'low'|'normal'|'critical' `-u` flag (default 'normal')
 ---@field dms? boolean notify on direct messages (default true)
@@ -34,14 +35,6 @@ local utils = require('tirc.utils')
 local MAX_BODY_LEN = 300
 
 local M = {}
-
---- Quotes `s` for a POSIX shell: wraps it in single quotes with embedded
---- single quotes escaped, making arbitrary message text inert under `sh -c`.
----@param s string
----@return string
-function M.shell_quote(s)
-  return "'" .. s:gsub("'", "'\\''") .. "'"
-end
 
 --- The notification decision, kept pure for testability: all runtime state
 --- arrives via `ctx`.
@@ -77,24 +70,35 @@ function M.should_notify(event, ctx)
   return event:is_mention(opts.patterns)
 end
 
---- Default executor: shells out to `notify-send` (or `opts.command`),
---- backgrounded with output discarded so the UI thread never blocks and stray
---- output cannot corrupt the TUI.
+--- Default executor: runs `notify-send` (or `opts.command`) via
+--- `tirc.process.spawn` - no shell involved, so message text needs no quoting
+--- and cannot inject. Spawn failures (missing binary) are logged to the
+--- `:debug` pane.
 ---@param summary string
 ---@param body string
 ---@param opts TircNotifyOptions
 function M.exec_notify(summary, body, opts)
-  local cmd = table.concat({
-    opts.command or 'notify-send',
-    '-a',
-    M.shell_quote(opts.app_name or 'tirc'),
-    '-u',
-    M.shell_quote(opts.urgency or 'normal'),
-    '--',
-    M.shell_quote(summary),
-    M.shell_quote(utils.truncate(body, MAX_BODY_LEN)),
-  }, ' ')
-  os.execute(cmd .. ' >/dev/null 2>&1 &')
+  local argv = {}
+  local command = opts.command or 'notify-send'
+  if type(command) == 'table' then
+    for _, part in ipairs(command) do
+      argv[#argv + 1] = part
+    end
+  else
+    argv[#argv + 1] = command
+  end
+
+  argv[#argv + 1] = '-a'
+  argv[#argv + 1] = opts.app_name or 'tirc'
+  argv[#argv + 1] = '-u'
+  argv[#argv + 1] = opts.urgency or 'normal'
+  argv[#argv + 1] = '--'
+  argv[#argv + 1] = summary
+  argv[#argv + 1] = utils.truncate(body, MAX_BODY_LEN)
+
+  process.spawn(argv, { capture = false }):catch(function(err)
+    tirc.log.warn('notify:', err)
+  end)
 end
 
 ---@param opts? TircNotifyOptions

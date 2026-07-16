@@ -244,6 +244,12 @@ async fn root_task(
         ));
     }
 
+    // Host tasks Lua submits from `tirc.spawn`/`tirc.fetch`: completions come
+    // back over this channel so their callbacks run on this (the Lua) thread.
+    let (host_task_tx, mut host_task_rx) =
+        tokio::sync::mpsc::unbounded_channel::<tirc_lua::host_tasks::HostTaskMessage>();
+    lua.set_app_data(tirc_lua::host_tasks::HostTaskSender(host_task_tx));
+
     let mut input_handler = InputHandler::new(
         lua,
         tui,
@@ -319,6 +325,10 @@ async fn root_task(
             Some(result) = preview_result_rx.recv() => {
                 input_handler.insert_link_preview(result);
                 input_handler.mark_dirty();
+                continue;
+            }
+            Some(message) = host_task_rx.recv() => {
+                input_handler.on_host_task(&mut state, &mut view, message);
                 continue;
             }
             _ = tick.tick() => {

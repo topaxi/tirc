@@ -3,6 +3,8 @@ use mlua::{Lua, Table, Value};
 pub mod builtins;
 pub mod date_time;
 pub mod hash;
+pub mod host_tasks;
+pub mod json;
 pub mod meta;
 pub mod runtime;
 pub mod theme;

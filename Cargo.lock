@@ -5549,8 +5549,11 @@ dependencies = [
  "log",
  "mlua",
  "ratatui",
+ "reqwest",
  "semver",
+ "serde_json",
  "tirc-core",
+ "tokio",
  "twox-hash",
 ]
 

@@ -8,6 +8,8 @@ use mlua::{Lua, Table};
 
 use super::date_time::create_date_time_module;
 use super::hash::create_tirc_hash_lua_module;
+use super::host_tasks::{lua_fetch, lua_spawn};
+use super::json::create_tirc_json_lua_module;
 use super::meta::{register_method_metatable, BUFFER_META_KEY, EVENT_META_KEY};
 use super::runtime::{
     create_user_command, get_ui, lua_log, register_completion_source, register_event, set_ui,
@@ -58,6 +60,9 @@ fn get_version_lua_value(lua: &Lua) -> mlua::Table {
 const TIRC_INIT_LUA: &str = include_str!("../lua/tirc/init.lua");
 const TIRC_CONFIG_LUA: &str = include_str!("../lua/tirc/config.lua");
 const TIRC_UTILS_LUA: &str = include_str!("../lua/tirc/utils.lua");
+const TIRC_PROMISE_LUA: &str = include_str!("../lua/tirc/promise.lua");
+const TIRC_PROCESS_LUA: &str = include_str!("../lua/tirc/process.lua");
+const TIRC_HTTP_LUA: &str = include_str!("../lua/tirc/http.lua");
 const TIRC_EVENT_LUA: &str = include_str!("../lua/tirc/event.lua");
 const TIRC_BUFFER_LUA: &str = include_str!("../lua/tirc/buffer.lua");
 const TIRC_HASH_LUA: &str = include_str!("../lua/tirc/hash.lua");
@@ -78,6 +83,9 @@ pub const TYPE_DEFINITIONS: &[(&str, &str)] = &[
     ("tirc/init.lua", TIRC_INIT_LUA),
     ("tirc/config.lua", TIRC_CONFIG_LUA),
     ("tirc/utils.lua", TIRC_UTILS_LUA),
+    ("tirc/promise.lua", TIRC_PROMISE_LUA),
+    ("tirc/process.lua", TIRC_PROCESS_LUA),
+    ("tirc/http.lua", TIRC_HTTP_LUA),
     ("tirc/event.lua", TIRC_EVENT_LUA),
     ("tirc/buffer.lua", TIRC_BUFFER_LUA),
     ("tirc/hash.lua", TIRC_HASH_LUA),
@@ -123,6 +131,9 @@ const BUILTIN_LUA_FILES: &[&str] = &[
     "lua/tirc/init.lua",
     "lua/tirc/config.lua",
     "lua/tirc/utils.lua",
+    "lua/tirc/promise.lua",
+    "lua/tirc/process.lua",
+    "lua/tirc/http.lua",
     "lua/tirc/event.lua",
     "lua/tirc/buffer.lua",
     "lua/tirc/hash.lua",
@@ -171,9 +182,12 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
     tirc_mod.set("__log", lua.create_function(lua_log)?)?;
     tirc_mod.set("__get_ui", lua.create_function(get_ui)?)?;
     tirc_mod.set("__set_ui", lua.create_function(set_ui)?)?;
+    tirc_mod.set("__spawn", lua.create_function(lua_spawn)?)?;
+    tirc_mod.set("__fetch", lua.create_function(lua_fetch)?)?;
 
     create_date_time_module(lua)?;
     create_tirc_hash_lua_module(lua)?;
+    create_tirc_json_lua_module(lua)?;
     create_tirc_theme_lua_module(lua)?;
 
     let (name, src) = load_builtin("lua/tirc/init.lua", TIRC_INIT_LUA);
@@ -205,6 +219,20 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
     let (name, src) = load_builtin("lua/tirc/class.lua", TIRC_CLASS_LUA);
     let class_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
     set_loaded_modules(lua, "tirc.class", class_module)?;
+
+    // Requires tirc.class at load time, so it must come after it.
+    let (name, src) = load_builtin("lua/tirc/promise.lua", TIRC_PROMISE_LUA);
+    let promise_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
+    set_loaded_modules(lua, "tirc.promise", promise_module)?;
+
+    // Both require tirc.promise at load time, so they must come after it.
+    let (name, src) = load_builtin("lua/tirc/process.lua", TIRC_PROCESS_LUA);
+    let process_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
+    set_loaded_modules(lua, "tirc.process", process_module)?;
+
+    let (name, src) = load_builtin("lua/tirc/http.lua", TIRC_HTTP_LUA);
+    let http_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
+    set_loaded_modules(lua, "tirc.http", http_module)?;
 
     let (name, src) = load_builtin("lua/tirc/tui/bar_row.lua", TIRC_BAR_ROW_LUA);
     let bar_row_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;

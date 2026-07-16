@@ -1530,6 +1530,22 @@ impl<'lua> InputHandler<'lua> {
         }
     }
 
+    /// Completes a finished host task (`tirc.spawn`/`tirc.fetch`): runs the
+    /// Lua callback on this thread, applies any UI actions it queued, and
+    /// requests a repaint since handlers commonly change render-relevant state.
+    pub fn on_host_task(
+        &mut self,
+        state: &mut State,
+        view: &mut ViewState,
+        message: tirc_lua::host_tasks::HostTaskMessage,
+    ) {
+        if let Err(err) = tirc_lua::host_tasks::deliver_host_task(self.lua, message) {
+            log::warn!("host task callback failed: {err}");
+        }
+        self.apply_queued_ui_actions(state, view);
+        self.mark_dirty();
+    }
+
     /// Applies a new away state: broadcasts [`Command::Away`] to every backend
     /// (native away where the protocol supports it) and fires the Lua `away`
     /// event so plugins can track it. No-op when the state is unchanged.

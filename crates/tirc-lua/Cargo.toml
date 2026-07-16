@@ -10,5 +10,8 @@ chrono = { workspace = true }
 log = { workspace = true }
 mlua = { workspace = true }
 ratatui = { workspace = true }
+reqwest = { workspace = true }
 semver = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
 twox-hash = { workspace = true }

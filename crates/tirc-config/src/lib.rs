@@ -1644,18 +1644,6 @@ mod tests {
         assert_eq!(tirc_lua::runtime::user_command_names(&lua), ["back"]);
     }
 
-    #[test]
-    fn notify_shell_quote_escapes_single_quotes() {
-        let lua = Lua::new();
-        register_builtin_modules(&lua).unwrap();
-
-        let quoted: String = lua
-            .load(r#"return require('tirc.plugins.notify').shell_quote([[it's a'b]])"#)
-            .eval()
-            .unwrap();
-        assert_eq!(quoted, r#"'it'\''s a'\''b'"#);
-    }
-
     /// Calls a metatable method on an event table built by `to_lua_event`.
     fn call_event_method<R: mlua::FromLuaMulti>(
         lua: &Lua,
@@ -1827,6 +1815,126 @@ mod tests {
         // And a table created after the reload dispatches correctly.
         let dm = notify_event(&lua, "alice", "alice", "hi");
         assert!(call_event_method::<bool>(&lua, &dm, "is_dm", ()));
+    }
+
+    #[test]
+    fn promise_chains_catches_and_finalizes() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        let (chained, caught, finalized, late): (i64, String, bool, i64) = lua
+            .load(indoc! {"
+                local Promise = require('tirc.promise')
+
+                -- next() chains transform values; returned promises are adopted.
+                local chained
+                Promise.resolve(1)
+                  :next(function(v) return v + 1 end)
+                  :next(function(v) return Promise.resolve(v * 10) end)
+                  :next(function(v) chained = v end)
+
+                -- Errors raised in handlers reject the chained promise.
+                local caught
+                Promise.resolve('x')
+                  :next(function() error('boom', 0) end)
+                  :catch(function(err) caught = err end)
+
+                -- finally runs on both paths and passes the state through.
+                local finalized = false
+                Promise.reject('nope')
+                  :finally(function() finalized = true end)
+                  :catch(function() end)
+
+                -- Handlers attached after settlement fire immediately.
+                local late
+                local settled = Promise.resolve(42)
+                settled:next(function(v) late = v end)
+
+                return chained, caught, finalized, late
+            "})
+            .eval()
+            .unwrap();
+
+        assert_eq!(chained, 20);
+        assert_eq!(caught, "boom");
+        assert!(finalized);
+        assert_eq!(late, 42);
+    }
+
+    #[test]
+    fn promise_await_inside_async_resolves_and_reraises() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        let (value, reraised, outer_rejected, outside_err): (i64, String, String, String) = lua
+            .load(indoc! {"
+                local Promise = require('tirc.promise')
+
+                -- Await returns the settled value without suspending.
+                local value
+                Promise.async(function()
+                  value = Promise.resolve(7):await()
+                end)()
+
+                -- A rejected promise re-raises inside the coroutine...
+                local reraised
+                Promise.async(function()
+                  local ok, err = pcall(function()
+                    Promise.reject('denied'):await()
+                  end)
+                  reraised = err
+                end)()
+
+                -- ...and an uncaught error rejects the async outer promise.
+                local outer_rejected
+                Promise.async(function()
+                  Promise.reject('bubbles'):await()
+                end)():catch(function(err) outer_rejected = err end)
+
+                -- Await outside Promise.async raises.
+                local ok, outside_err = pcall(function()
+                  Promise.resolve(1):await()
+                end)
+
+                return value, reraised, outer_rejected, tostring(outside_err)
+            "})
+            .eval()
+            .unwrap();
+
+        assert_eq!(value, 7);
+        assert_eq!(reraised, "denied");
+        assert_eq!(outer_rejected, "bubbles");
+        assert!(outside_err.contains("Promise.async"), "{outside_err}");
+    }
+
+    #[test]
+    fn promise_await_suspends_until_late_settlement() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        // Settle the awaited promise only after the async fn has suspended,
+        // mirroring how a host task completes on a later loop iteration.
+        let (before, after): (bool, i64) = lua
+            .load(indoc! {"
+                local Promise = require('tirc.promise')
+
+                local resolve
+                local pending = Promise.new(function(res) resolve = res end)
+
+                local result
+                Promise.async(function()
+                  result = pending:await()
+                end)()
+
+                local before = result == nil
+                resolve(9)
+                return before, result
+            "})
+            .eval()
+            .unwrap();
+
+        assert!(before, "async fn must suspend on a pending promise");
+        assert_eq!(after, 9);
     }
 
     /// Registers a Lua global `find_fg(spans, text)` that walks a span tree and
