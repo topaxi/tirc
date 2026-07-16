@@ -17,8 +17,8 @@ use tui_input::Input;
 
 use ratatui_image::picker::{Picker, ProtocolType};
 
-use crate::config::ImageProtocol;
-use crate::ui::{State, ViewState};
+use tirc_config::ImageProtocol;
+use tirc_ui::{State, ViewState};
 
 use super::renderer::Renderer;
 use super::tmux;
@@ -177,7 +177,7 @@ impl Tui {
 
     /// Configures the quick-reaction affordance from the user config, forwarded to
     /// the renderer which draws the selected-message pill bar.
-    pub fn set_quick_reactions(&mut self, config: &crate::config::QuickReactions) {
+    pub fn set_quick_reactions(&mut self, config: &tirc_config::QuickReactions) {
         self.renderer.set_quick_reactions(config);
     }
 
@@ -186,7 +186,7 @@ impl Tui {
     /// it. `None` means inline images are disabled and media falls back to text.
     pub fn initialize_terminal(
         &mut self,
-        image_protocol: crate::config::ImageProtocol,
+        image_protocol: tirc_config::ImageProtocol,
     ) -> Result<Option<Picker>, anyhow::Error> {
         enable_raw_mode()?;
 

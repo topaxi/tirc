@@ -5465,6 +5465,7 @@ dependencies = [
  "tirc-config",
  "tirc-core",
  "tirc-lua",
+ "tirc-tui",
  "tirc-ui",
  "tokio",
  "tokio-tungstenite",
@@ -5521,6 +5522,35 @@ dependencies = [
  "ratatui",
  "semver",
  "tirc-core",
+]
+
+[[package]]
+name = "tirc-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "crossterm 0.29.0",
+ "image",
+ "indoc",
+ "itertools 0.14.0",
+ "linkify",
+ "log",
+ "mlua",
+ "ratatui",
+ "ratatui-image",
+ "reqwest",
+ "scraper",
+ "serde",
+ "textwrap",
+ "tirc-config",
+ "tirc-core",
+ "tirc-lua",
+ "tirc-ui",
+ "tokio",
+ "tracing",
+ "tui-input",
+ "unicode-width",
 ]
 
 [[package]]

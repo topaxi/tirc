@@ -1,0 +1,31 @@
+[package]
+name = "tirc-tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tirc-core = { path = "../tirc-core" }
+tirc-lua = { path = "../tirc-lua" }
+tirc-config = { path = "../tirc-config" }
+tirc-ui = { path = "../tirc-ui" }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+crossterm = { workspace = true }
+image = { workspace = true }
+itertools = { workspace = true }
+linkify = { workspace = true }
+log = { workspace = true }
+mlua = { workspace = true }
+ratatui = { workspace = true }
+ratatui-image = { workspace = true }
+reqwest = { workspace = true }
+scraper = { workspace = true }
+serde = { workspace = true }
+textwrap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tui-input = { workspace = true }
+unicode-width = { workspace = true }
+
+[dev-dependencies]
+indoc = { workspace = true }
