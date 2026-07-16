@@ -8,23 +8,24 @@ use crossterm::event::{
 };
 use mlua::Lua;
 
-use tirc_core::backend::BackendHandle;
 use tirc_config::{
     aliases::AliasStore, buffer_order::BufferOrderStore, collect_user_watched_paths,
     reload_lua_theme, ui_prefs::UiPrefsStore, QuickReactions, SelectionMode,
 };
-use tirc_lua::runtime::{emit_event, EventName};
+use tirc_core::backend::BackendHandle;
 use tirc_core::{
     BackendEvent, BackendId, BackendMessage, BufferId, ChatEvent, Command, EventId, MsgKind,
     TargetId, TxnAllocator, VerifyAction,
 };
-use tirc_ui::lua::{create_lua_sender, to_lua_event};
+use tirc_lua::runtime::{emit_event, EventName};
 use tirc_tui::{parse_bar_id, DecodedImage, PreviewResult, Tui};
+use tirc_ui::lua::{create_lua_sender, to_lua_event};
 use tirc_ui::ConnectionStatus;
 
+use tirc_ui::commands::{self, BuiltinCmd, Resolution};
 use tirc_ui::completion::{self, CompletionEngine, CompletionQuery};
-use tirc_ui::{HistoryState, StoredMessage};
 use tirc_ui::{BarHit, MenuAction, MenuItem, MenuTarget, Mode, Selection, State, ViewState};
+use tirc_ui::{HistoryState, StoredMessage};
 
 /// Page size of a scroll-triggered history fetch.
 const HISTORY_FETCH_LIMIT: u16 = 50;
@@ -1168,8 +1169,9 @@ impl<'lua> InputHandler<'lua> {
 
     /// Returns `false` when the command requests application exit (`:q`).
     ///
-    /// Keep the command set in sync with [`tirc_ui::completion::COMMAND_NAMES`], which feeds
-    /// command-mode completion.
+    /// The accepted command set is the registry in [`tirc_ui::commands`]; the
+    /// name is resolved vim-style (exact name or alias, then unique prefix)
+    /// and the matched spec's [`BuiltinCmd`] selects the handler arm below.
     fn handle_command(
         &mut self,
         state: &mut State,
@@ -1181,16 +1183,41 @@ impl<'lua> InputHandler<'lua> {
         let backend = focused.as_ref().map(|b| b.backend);
         let target = focused.as_ref().map(|b| b.target.clone());
 
-        let command: Box<[&str]> = self.ui.input().value().splitn(2, ' ').collect();
+        let line = self.ui.input().value().trim().to_string();
+        if line.is_empty() {
+            return Ok(true);
+        }
 
-        match *command {
-            ["q" | "quit"] => {
+        let (name, rest) = commands::split_line(&line);
+        let spec = match commands::resolve(name, &[]) {
+            Resolution::Builtin(spec) => spec,
+            Resolution::Lua(_) => return Ok(true),
+            Resolution::Ambiguous(candidates) => {
+                self.report_info(
+                    state,
+                    backend,
+                    format!("Ambiguous command: {name} ({})", candidates.join(", ")),
+                );
+                return Ok(true);
+            }
+            Resolution::Unknown => {
+                self.report_info(state, backend, format!("Not a client command: {name}"));
+                return Ok(true);
+            }
+        };
+        if let Err(message) = commands::check_nargs(spec, rest) {
+            self.report_info(state, backend, message);
+            return Ok(true);
+        }
+
+        match spec.cmd {
+            BuiltinCmd::Quit => {
                 for handle in &self.backends {
                     let _ = handle.send(Command::Quit { reason: None });
                 }
                 return Ok(false);
             }
-            ["m" | "msg", rest] => {
+            BuiltinCmd::Msg => {
                 if let Some(backend) = backend {
                     match *rest.splitn(2, ' ').collect::<Box<[&str]>>() {
                         [to, message] => {
@@ -1206,12 +1233,12 @@ impl<'lua> InputHandler<'lua> {
                     }
                 }
             }
-            ["me", message] => {
+            BuiltinCmd::Me => {
                 if let (Some(backend), Some(target)) = (backend, target) {
-                    self.send(backend, target, message.to_string(), MsgKind::Action);
+                    self.send(backend, target, rest.to_string(), MsgKind::Action);
                 }
             }
-            ["desc" | "describe", rest] => {
+            BuiltinCmd::Describe => {
                 if let Some(backend) = backend {
                     if let [to, message] = *rest.splitn(2, ' ').collect::<Box<[&str]>>() {
                         let buffer = self.focus_buffer(state, view, backend, to);
@@ -1219,7 +1246,7 @@ impl<'lua> InputHandler<'lua> {
                     }
                 }
             }
-            ["notice", rest] => {
+            BuiltinCmd::Notice => {
                 if let Some(backend) = backend {
                     if let [to, message] = *rest.splitn(2, ' ').collect::<Box<[&str]>>() {
                         self.send(
@@ -1231,50 +1258,49 @@ impl<'lua> InputHandler<'lua> {
                     }
                 }
             }
-            ["j" | "join", channel] => self.send_to(
+            BuiltinCmd::Join => self.send_to(
                 backend,
                 Command::Join {
-                    target: TargetId::from(channel),
+                    target: TargetId::from(rest),
                 },
             ),
-            ["p" | "part", channel] => self.send_to(
+            BuiltinCmd::Part => self.send_to(
                 backend,
                 Command::Part {
-                    target: TargetId::from(channel),
+                    target: TargetId::from(rest),
                     reason: None,
                 },
             ),
-            ["n" | "nick", nickname] => self.send_to(
+            BuiltinCmd::Nick => self.send_to(
                 backend,
                 Command::SetNick {
-                    nick: nickname.to_string(),
+                    nick: rest.to_string(),
                 },
             ),
-            ["whois", nickname] => self.send_to(
+            BuiltinCmd::Whois => self.send_to(
                 backend,
                 Command::Whois {
-                    user: nickname.to_string(),
+                    user: rest.to_string(),
                 },
             ),
-            ["topic", text] => {
+            BuiltinCmd::Topic => {
                 if let Some(target) = target {
                     self.send_to(
                         backend,
                         Command::SetTopic {
                             target,
-                            topic: text.to_string(),
+                            topic: rest.to_string(),
                         },
                     );
                 }
             }
-            ["away"] => self.send_to(backend, Command::Away { message: None }),
-            ["away", message] => self.send_to(
+            BuiltinCmd::Away => self.send_to(
                 backend,
                 Command::Away {
-                    message: Some(message.to_string()),
+                    message: (!rest.is_empty()).then(|| rest.to_string()),
                 },
             ),
-            ["kick", rest] => {
+            BuiltinCmd::Kick => {
                 if let Some(backend) = backend {
                     // :kick [#channel] <nick> [reason...]
                     let (kick_target, nick_and_rest) = if rest.starts_with('#') {
@@ -1301,7 +1327,7 @@ impl<'lua> InputHandler<'lua> {
                     }
                 }
             }
-            ["invite", rest] => {
+            BuiltinCmd::Invite => {
                 if let Some(backend) = backend {
                     let parts: Box<[&str]> = rest.splitn(2, ' ').collect();
                     match *parts {
@@ -1329,58 +1355,63 @@ impl<'lua> InputHandler<'lua> {
                     }
                 }
             }
-            ["alias", name] if !name.trim().is_empty() => {
+            BuiltinCmd::Alias => {
                 if let Some(id) = focused.clone() {
-                    self.set_alias(state, id, name.trim().to_string());
+                    self.set_alias(state, id, rest.trim().to_string());
                 }
             }
-            ["unalias"] => {
+            BuiltinCmd::Unalias => {
                 if let Some(id) = focused.clone() {
                     self.remove_alias(state, id);
                 }
             }
-            ["bufmove", arg] => {
+            BuiltinCmd::Bufmove => {
                 if let Some(id) = focused.clone() {
-                    let arg = arg.trim().to_string();
+                    let arg = rest.trim().to_string();
                     self.move_buffer(state, id, &arg);
                 }
             }
-            ["barstyle"] => {
-                let current = view
-                    .buffer_bar_style
-                    .clone()
-                    .map(|s| format!("{s} (override; ':barstyle reset' to clear)"))
-                    .unwrap_or_else(|| "theme default".to_string());
-                let styles = self
-                    .theme_bar_styles()
-                    .map(|styles| styles.join(", "))
-                    .unwrap_or_else(|| "none declared by the theme".to_string());
-                self.report_info(
-                    state,
-                    backend,
-                    format!("Buffer bar style: {current}. Theme styles: {styles}"),
-                );
+            BuiltinCmd::Barstyle => {
+                if rest.is_empty() {
+                    let current = view
+                        .buffer_bar_style
+                        .clone()
+                        .map(|s| format!("{s} (override; ':barstyle reset' to clear)"))
+                        .unwrap_or_else(|| "theme default".to_string());
+                    let styles = self
+                        .theme_bar_styles()
+                        .map(|styles| styles.join(", "))
+                        .unwrap_or_else(|| "none declared by the theme".to_string());
+                    self.report_info(
+                        state,
+                        backend,
+                        format!("Buffer bar style: {current}. Theme styles: {styles}"),
+                    );
+                } else {
+                    let arg = rest.trim().to_string();
+                    self.set_bar_style(state, view, backend, &arg);
+                }
             }
-            ["barstyle", arg] => {
-                let arg = arg.trim().to_string();
-                self.set_bar_style(state, view, backend, &arg);
+            BuiltinCmd::List => self.send_to(backend, Command::ListChannels),
+            BuiltinCmd::Verify => {
+                if rest.is_empty() {
+                    self.send_to(
+                        backend,
+                        Command::Verify(VerifyAction::Request { user: None }),
+                    );
+                } else {
+                    self.send_to(backend, Command::Verify(parse_verify(rest)));
+                }
             }
-            ["list"] => self.send_to(backend, Command::ListChannels),
-            ["verify"] => self.send_to(
-                backend,
-                Command::Verify(VerifyAction::Request { user: None }),
-            ),
-            ["verify", arg] => self.send_to(backend, Command::Verify(parse_verify(arg))),
-            ["redraw"] => {
+            BuiltinCmd::Redraw => {
                 self.ui.redraw()?;
             }
-            ["debug"] => {
+            BuiltinCmd::Debug => {
                 view.debug_open = !view.debug_open;
             }
-            ["reload"] => {
+            BuiltinCmd::Reload => {
                 self.do_reload(state, backend);
             }
-            _ => {}
         }
 
         Ok(true)
