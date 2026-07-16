@@ -2108,6 +2108,13 @@ impl Renderer {
             self.render_debug_pane(f);
         }
 
+        // The completion popup grows upward from the input line, anchored at
+        // the trigger span. Under the context menu so the menu stays topmost,
+        // and before the hyperlink post-pass so no OSC 8 escape leaks under it.
+        if view.completion.open {
+            self.render_completion_popup(f, view, input, chunks[1]);
+        }
+
         // The context menu is drawn last so it floats over everything. The full
         // synchronized repaint each frame (see `ui.rs`) means a `Clear` plus the
         // bordered list is all that is needed - there is no incremental diff to
@@ -2219,6 +2226,79 @@ impl Renderer {
                 cell.set_style(reversed);
             }
         }
+    }
+
+    /// Draws the completion popup above the input line, its bottom edge on the
+    /// input's top border and its left edge anchored at the trigger span's
+    /// column (so the list lines up with what is being completed). Records the
+    /// resolved rectangle on `view.completion`. Uses display width (not char
+    /// count) throughout, since emoji labels are width-2.
+    fn render_completion_popup(
+        &self,
+        f: &mut ratatui::Frame,
+        view: &mut ViewState,
+        input: &Input,
+        input_rect: Rect,
+    ) {
+        let area = f.area();
+        let popup = &view.completion;
+        if popup.items.is_empty() || input_rect.y == 0 {
+            return;
+        }
+
+        // Anchor column: the same math as the input cursor in `render_input`,
+        // but at the span start instead of the cursor.
+        let prefix_len = match view.mode {
+            Mode::Command => 1u16,
+            Mode::Insert => 2,
+            _ => 0,
+        };
+        let width = area.width.max(3) - prefix_len;
+        let scroll = input.visual_scroll(width as usize);
+        let span_col: usize = input
+            .value()
+            .chars()
+            .take(popup.span.0)
+            .map(|ch| unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0))
+            .sum();
+        let anchor_x = input_rect.x + (span_col.max(scroll) - scroll) as u16 + prefix_len;
+
+        // One row per item plus the borders, capped and clamped to the space
+        // above the input line; the list scrolls beyond that.
+        const MAX_POPUP_ROWS: u16 = 8;
+        let height = (popup.items.len() as u16)
+            .saturating_add(2)
+            .min(MAX_POPUP_ROWS + 2)
+            .min(input_rect.y);
+        let longest = popup
+            .items
+            .iter()
+            .map(|item| unicode_width::UnicodeWidthStr::width(item.label.as_str()))
+            .max()
+            .unwrap_or(0) as u16;
+        let popup_width = longest.saturating_add(4).min(area.width.max(1));
+        let rect = Rect {
+            x: anchor_x.min(area.width.saturating_sub(popup_width)),
+            y: input_rect.y.saturating_sub(height),
+            width: popup_width,
+            height,
+        };
+        view.completion.rect = rect;
+
+        let items: Vec<ListItem> = view
+            .completion
+            .items
+            .iter()
+            .map(|item| ListItem::new(item.label.clone()))
+            .collect();
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL))
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        let mut list_state = ListState::default();
+        list_state.select(Some(view.completion.selected));
+
+        f.render_widget(Clear, rect);
+        f.render_stateful_widget(list, rect, &mut list_state);
     }
 
     /// Draws the floating context menu and records its on-screen rectangle on

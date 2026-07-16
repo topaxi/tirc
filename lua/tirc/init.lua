@@ -128,6 +128,37 @@
 ---@field buffer_bar_styles? string[] bar layout names the theme understands, surfaced by `:barstyle`
 ---@field on_bar_click? fun(id: string) handler for clicks on `'custom:<...>'` bar elements
 
+--- What part of the input activates a completion source. `sigil` opens on a
+--- character typed at the start of a word (e.g. `:` for emoji, `@` for
+--- mentions); `line_start` completes the first word of the line.
+---@class TircCompletionTrigger
+---@field kind 'sigil' | 'line_start'
+---@field char? string the sigil character, required for kind 'sigil'
+---@field min_chars? integer minimum query length before suggesting (default 1)
+
+--- The context passed to a completion source's `complete` function.
+---@class TircCompletionContext
+---@field input string the full input line
+---@field cursor integer cursor position as a 0-based character index
+---@field query string the text between the trigger and the cursor
+---@field mode 'insert' | 'command'
+
+--- One completion suggestion. `insert` replaces the trigger span (including
+--- the sigil); `label` is what the popup shows and defaults to `insert`. A
+--- plain string is shorthand for both.
+---@class TircCompletionItem
+---@field insert string
+---@field label? string
+
+--- A Lua completion source: a declarative trigger plus a `complete` function
+--- returning items for the extracted query. Consulted after the builtin
+--- sources (command names, emoji); cleared and re-registered on `:reload`.
+---@class TircCompletionSource
+---@field name? string used in error logs
+---@field mode 'insert' | 'command'
+---@field trigger TircCompletionTrigger
+---@field complete fun(ctx: TircCompletionContext): (TircCompletionItem | string)[]
+
 ---@class TircModule
 ---@field version string
 ---@field ui TircUi
@@ -141,6 +172,7 @@
 ---@field focus_buffer fun(id: string) queue focusing a buffer by its opaque id (applied after the current callback)
 ---@field select_backend fun(backend_id: integer) queue selecting a backend for the tabbed bar (applied after the current callback)
 ---@field on fun(event_name: EventName, callback: fun(event: TircEvent, sender: TircSender))
+---@field register_completion_source fun(source: TircCompletionSource)
 ---@field log TircLog logging helpers that write to the `:debug` pane
 local M = {}
 

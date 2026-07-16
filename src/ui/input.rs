@@ -21,11 +21,46 @@ use crate::tui::lua::{create_lua_sender, to_lua_event};
 use crate::tui::{parse_bar_id, DecodedImage, PreviewResult, Tui};
 use crate::ui::ConnectionStatus;
 
+use super::completion::{self, CompletionEngine, CompletionQuery};
 use super::state::{HistoryState, StoredMessage};
 use super::{BarHit, MenuAction, MenuItem, MenuTarget, Mode, Selection, State, ViewState};
 
 /// Page size of a scroll-triggered history fetch.
 const HISTORY_FETCH_LIMIT: u16 = 50;
+
+/// Every command name `handle_command` accepts, paired with whether it takes
+/// arguments (drives the trailing space on completion accept). Keep in sync
+/// with the match arms in `InputHandler::handle_command`.
+pub(crate) const COMMAND_NAMES: &[(&str, bool)] = &[
+    ("q", false),
+    ("quit", false),
+    ("m", true),
+    ("msg", true),
+    ("me", true),
+    ("desc", true),
+    ("describe", true),
+    ("notice", true),
+    ("j", true),
+    ("join", true),
+    ("p", true),
+    ("part", true),
+    ("n", true),
+    ("nick", true),
+    ("whois", true),
+    ("topic", true),
+    ("away", true),
+    ("kick", true),
+    ("invite", true),
+    ("alias", true),
+    ("unalias", false),
+    ("bufmove", true),
+    ("barstyle", true),
+    ("list", false),
+    ("verify", true),
+    ("redraw", false),
+    ("debug", false),
+    ("reload", false),
+];
 
 /// Events the main loop feeds to the input handler.
 #[derive(Debug)]
@@ -80,6 +115,9 @@ pub struct InputHandler<'lua> {
     buffer_order: BufferOrderStore,
     /// Persisted runtime UI preferences (`:barstyle`), saved on change.
     ui_prefs: UiPrefsStore,
+    /// The completion engine queried after every Command/Insert-mode edit;
+    /// popup state lives on [`ViewState::completion`].
+    completion: CompletionEngine,
 }
 
 impl<'lua> InputHandler<'lua> {
@@ -126,6 +164,7 @@ impl<'lua> InputHandler<'lua> {
             aliases,
             buffer_order,
             ui_prefs,
+            completion: CompletionEngine::new(),
         }
     }
 
@@ -1110,6 +1149,45 @@ impl<'lua> InputHandler<'lua> {
     }
 
     /// Returns whether the paste was applied to the input line (Insert mode).
+    /// Re-derives the completion popup from the current input and cursor.
+    /// Called after every Command/Insert-mode edit; `force` (Tab) waives the
+    /// trigger's minimum query length so the full candidate list opens.
+    /// Typing a closing `:` after an exact emoji shortcode auto-accepts it
+    /// without opening the popup (`:smile:` just works).
+    fn refresh_completion(&mut self, view: &mut ViewState, force: bool) {
+        if view.mode == Mode::Insert {
+            let (value, cursor) = (self.ui.input().value(), self.ui.input().cursor());
+            if let Some((span, insert)) = completion::closing_sigil_accept(value, cursor) {
+                let (value, cursor) = completion::splice(value, span, &insert);
+                self.ui.set_input_with_cursor(value, cursor);
+                view.completion.close();
+                return;
+            }
+        }
+
+        let query = CompletionQuery {
+            mode: view.mode,
+            value: self.ui.input().value(),
+            cursor: self.ui.input().cursor(),
+            force,
+        };
+        match self.completion.query(&query, self.lua) {
+            Some((span, items)) => view.completion.show(span, items),
+            None => view.completion.close(),
+        }
+    }
+
+    /// Splices the highlighted completion item into the input over the
+    /// popup's trigger span and closes the popup.
+    fn accept_completion(&mut self, view: &mut ViewState) {
+        if let Some(item) = view.completion.selected_item() {
+            let (value, cursor) =
+                completion::splice(self.ui.input().value(), view.completion.span, &item.insert);
+            self.ui.set_input_with_cursor(value, cursor);
+        }
+        view.completion.close();
+    }
+
     fn handle_paste(&mut self, view: &ViewState, text: String) -> bool {
         if view.mode != Mode::Insert {
             return false;
@@ -1126,6 +1204,9 @@ impl<'lua> InputHandler<'lua> {
     }
 
     /// Returns `false` when the command requests application exit (`:q`).
+    ///
+    /// Keep the command set in sync with [`COMMAND_NAMES`] above, which feeds
+    /// command-mode completion.
     fn handle_command(
         &mut self,
         state: &mut State,
@@ -1505,6 +1586,40 @@ impl<'lua> InputHandler<'lua> {
             return Ok(true);
         }
 
+        // While the completion popup is open it captures only navigation,
+        // accept, and dismiss keys; everything else falls through so typing
+        // keeps editing the line and live-refiltering the popup.
+        if view.completion.open && matches!(view.mode, Mode::Command | Mode::Insert) {
+            let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
+            match event.code {
+                KeyCode::Tab | KeyCode::Down => {
+                    view.completion.move_down();
+                    return Ok(true);
+                }
+                KeyCode::Char('n') if ctrl => {
+                    view.completion.move_down();
+                    return Ok(true);
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    view.completion.move_up();
+                    return Ok(true);
+                }
+                KeyCode::Char('p') if ctrl => {
+                    view.completion.move_up();
+                    return Ok(true);
+                }
+                KeyCode::Enter => {
+                    self.accept_completion(view);
+                    return Ok(true);
+                }
+                KeyCode::Esc => {
+                    view.completion.close();
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
         let page = (view.viewport_height as usize).max(1);
 
         match (view.mode, event.code) {
@@ -1610,20 +1725,30 @@ impl<'lua> InputHandler<'lua> {
             }
             (Mode::Command | Mode::Insert, KeyCode::Esc) => {
                 view.mode = Mode::Normal;
+                view.completion.close();
                 self.ui.reset_input();
             }
+            // With the popup closed, Tab force-opens command completion with
+            // the full candidate list.
+            (Mode::Command, KeyCode::Tab) => {
+                self.refresh_completion(view, true);
+            }
             (Mode::Command, KeyCode::Enter) => {
+                view.completion.close();
                 let proceed = self.handle_command(state, view)?;
                 self.ui.reset_input();
                 return Ok(proceed);
             }
             (Mode::Insert, KeyCode::Up) => {
                 self.history_up();
+                view.completion.close();
             }
             (Mode::Insert, KeyCode::Down) => {
                 self.history_down();
+                view.completion.close();
             }
             (Mode::Insert, KeyCode::Enter) => {
+                view.completion.close();
                 let message = self.ui.input().value().to_string();
                 if !message.trim().is_empty() {
                     if let Some(buffer) = view.focused.clone() {
@@ -1640,6 +1765,7 @@ impl<'lua> InputHandler<'lua> {
             }
             (Mode::Command | Mode::Insert, _) => {
                 self.ui.handle_event(&CrosstermEvent::Key(event));
+                self.refresh_completion(view, false);
             }
             _ => {}
         }

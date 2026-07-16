@@ -137,6 +137,14 @@ impl Tui {
         self.input = value.into();
     }
 
+    /// Replaces the input value and places the cursor at `cursor` (a char
+    /// index, clamped by tui-input). Used by completion accept to splice text
+    /// mid-line. Like [`set_input`](Self::set_input), rebuilding the `Input`
+    /// drops tui-input's internal yank buffer.
+    pub fn set_input_with_cursor(&mut self, value: String, cursor: usize) {
+        self.input = Input::new(value).with_cursor(cursor);
+    }
+
     pub fn handle_event(&mut self, event: &crossterm::event::Event) {
         self.input.handle_event(event);
     }

@@ -5,6 +5,7 @@ use chrono::{DateTime, Local};
 use indexmap::IndexMap;
 use ratatui::layout::Rect;
 
+use super::completion::CompletionPopup;
 use crate::backends::BackendInfo;
 use crate::core::{
     BackendId, BufferId, BufferKind, ChatEvent, EventId, MemberRole, MembershipChange, MessageBody,
@@ -1143,6 +1144,9 @@ pub struct ViewState {
     /// True while the `:debug` log pane is open. Toggled by the `:debug` command;
     /// read by the renderer to draw the log overlay and the `-- DEBUG --` hint.
     pub debug_open: bool,
+    /// The completion popup above the input line. Managed by the input
+    /// handler's refresh-on-edit hook; drawn by the renderer when open.
+    pub completion: CompletionPopup,
 }
 
 /// Minimum sidebar width in columns. Narrow enough for short nicks while still

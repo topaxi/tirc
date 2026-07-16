@@ -1,3 +1,4 @@
+pub mod completion;
 mod input;
 mod state;
 

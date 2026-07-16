@@ -349,6 +349,50 @@ where
     Some(func.call(args))
 }
 
+/// Registry key holding the sequence of Lua completion-source specs.
+const COMPLETION_SOURCES_KEY: &str = "tirc-completion-sources";
+
+/// Returns the `tirc-completion-sources` registry table, creating it on first
+/// access. A sequence of spec tables registered via
+/// `tirc.register_completion_source`, consulted by the completion engine after
+/// the builtin sources.
+pub fn completion_sources_registry(lua: &Lua) -> mlua::Result<Table> {
+    match lua.named_registry_value::<Value>(COMPLETION_SOURCES_KEY)? {
+        Value::Table(tbl) => Ok(tbl),
+        _ => {
+            let tbl = lua.create_table()?;
+            lua.set_named_registry_value(COMPLETION_SOURCES_KEY, &tbl)?;
+            Ok(tbl)
+        }
+    }
+}
+
+/// Backs `tirc.register_completion_source`: appends a completion-source spec
+/// table (`{ name, mode, trigger, complete }`) to the registry. The spec is
+/// validated lazily when the engine queries it, so registration itself never
+/// fails on shape errors; missing core fields are rejected here to catch
+/// typos early.
+fn register_completion_source(lua: &Lua, spec: Table) -> mlua::Result<()> {
+    if !spec.contains_key("mode")? {
+        return Err(mlua::Error::external(anyhow!(
+            "completion source is missing 'mode'"
+        )));
+    }
+    if !matches!(spec.get::<Value>("trigger")?, Value::Table(_)) {
+        return Err(mlua::Error::external(anyhow!(
+            "completion source is missing a 'trigger' table"
+        )));
+    }
+    if !matches!(spec.get::<Value>("complete")?, Value::Function(_)) {
+        return Err(mlua::Error::external(anyhow!(
+            "completion source is missing a 'complete' function"
+        )));
+    }
+    let registry = completion_sources_registry(lua)?;
+    registry.set(registry.raw_len() + 1, spec)?;
+    Ok(())
+}
+
 /// Registry key holding the per-backend metadata table (`id -> metadata`).
 const BACKEND_METADATA_KEY: &str = "tirc-backend-metadata";
 
@@ -567,6 +611,10 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
 
     tirc_mod.set("version", get_version_lua_value(lua))?;
     tirc_mod.set("on", lua.create_function(register_event)?)?;
+    tirc_mod.set(
+        "register_completion_source",
+        lua.create_function(register_completion_source)?,
+    )?;
     tirc_mod.set("__log", lua.create_function(lua_log)?)?;
     tirc_mod.set("__get_ui", lua.create_function(get_ui)?)?;
     tirc_mod.set("__set_ui", lua.create_function(set_ui)?)?;
@@ -646,6 +694,10 @@ pub fn reload_lua_theme(lua: &Lua, config_path: &Path) -> anyhow::Result<()> {
         }
     }
     lua.set_named_registry_value("tirc-registered-events", mlua::Value::Nil)?;
+
+    // Clear Lua completion sources so :reload replaces them instead of
+    // appending duplicates.
+    lua.set_named_registry_value(COMPLETION_SOURCES_KEY, mlua::Value::Nil)?;
 
     // Clear package.loaded in-place so user modules are re-required from disk.
     // In-place iteration-and-nil is used rather than table replacement because
@@ -783,6 +835,56 @@ mod tests {
     #[test]
     fn selection_mode_defaults_to_app() {
         assert_eq!(SelectionMode::default(), SelectionMode::App);
+    }
+
+    #[test]
+    fn lua_completion_source_registers_and_completes() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        lua.load(indoc::indoc! {r#"
+            local tirc = require('tirc')
+            tirc.register_completion_source {
+              name = 'mentions',
+              mode = 'insert',
+              trigger = { kind = 'sigil', char = '@', min_chars = 1 },
+              complete = function(ctx)
+                return { { label = ctx.query, insert = ctx.query .. ': ' }, 'plain' }
+              end,
+            }
+        "#})
+            .exec()
+            .unwrap();
+
+        let mut engine = crate::ui::completion::CompletionEngine::new();
+        let query = crate::ui::completion::CompletionQuery {
+            mode: crate::ui::Mode::Insert,
+            value: "hi @top",
+            cursor: 7,
+            force: false,
+        };
+        let (span, items) = engine.query(&query, &lua).expect("source should match");
+        assert_eq!(span, (3, 7));
+        assert_eq!(items[0].label, "top");
+        assert_eq!(items[0].insert, "top: ");
+        // A plain string is shorthand for both label and insert.
+        assert_eq!(items[1].insert, "plain");
+
+        // The registry is cleared on reload so sources do not accumulate.
+        lua.set_named_registry_value(COMPLETION_SOURCES_KEY, mlua::Value::Nil)
+            .unwrap();
+        assert!(engine.query(&query, &lua).is_none());
+    }
+
+    #[test]
+    fn lua_completion_source_rejects_bad_specs() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        let result = lua
+            .load("require('tirc').register_completion_source { mode = 'insert' }")
+            .exec();
+        assert!(result.is_err(), "missing trigger/complete must be rejected");
     }
 
     #[test]
