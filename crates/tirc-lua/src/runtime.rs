@@ -380,12 +380,19 @@ pub fn register_backend_metadata(lua: &Lua, id: BackendId) -> mlua::Result<()> {
 }
 
 /// Resets the reload-scoped runtime state: the `tirc.ui` theme object, every
-/// event handler registered via `tirc.on(name, fn)`, the Lua completion
-/// sources, and the Lua user commands. Backend metadata is deliberately kept -
-/// servers are not re-read on reload, so their metadata stays valid.
+/// event handler registered via `tirc.on(name, fn)`, the nick-style provider,
+/// the Lua completion sources, and the Lua user commands. Backend metadata is
+/// deliberately kept - servers are not re-read on reload, so their metadata
+/// stays valid.
 pub fn reset_runtime(lua: &Lua) -> mlua::Result<()> {
     // Clear the UI formatter table so tirc.use(theme) starts from scratch
     lua.set_named_registry_value("tirc-ui", mlua::Value::Nil)?;
+
+    // Clear the nick-style provider registered via tirc.set_nick_style so a
+    // config that drops the plugin does not keep the stale provider around.
+    if let Ok(tirc_mod) = crate::get_or_create_module(lua, "_tirc") {
+        tirc_mod.set("__nick_style_provider", mlua::Value::Nil)?;
+    }
 
     // Clear all event handlers registered via tirc.on(name, fn)
     let tracked: mlua::Value = lua.named_registry_value("tirc-registered-events")?;

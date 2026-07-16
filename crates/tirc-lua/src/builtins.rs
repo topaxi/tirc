@@ -7,6 +7,7 @@
 use mlua::{Lua, Table};
 
 use super::date_time::create_date_time_module;
+use super::hash::create_tirc_hash_lua_module;
 use super::runtime::{
     create_user_command, get_ui, lua_log, register_completion_source, register_event, set_ui,
 };
@@ -56,6 +57,7 @@ fn get_version_lua_value(lua: &Lua) -> mlua::Table {
 const TIRC_INIT_LUA: &str = include_str!("../lua/tirc/init.lua");
 const TIRC_CONFIG_LUA: &str = include_str!("../lua/tirc/config.lua");
 const TIRC_UTILS_LUA: &str = include_str!("../lua/tirc/utils.lua");
+const TIRC_HASH_LUA: &str = include_str!("../lua/tirc/hash.lua");
 const TIRC_CLASS_LUA: &str = include_str!("../lua/tirc/class.lua");
 const TIRC_THEME_LUA: &str = include_str!("../lua/tirc/tui/theme.lua");
 const TIRC_BAR_ROW_LUA: &str = include_str!("../lua/tirc/tui/bar_row.lua");
@@ -63,6 +65,7 @@ const TIRC_DEFAULT_THEME_LUA: &str = include_str!("../lua/tirc/tui/themes/defaul
 const TIRC_SLANTED_THEME_LUA: &str = include_str!("../lua/tirc/tui/themes/slanted.lua");
 const TIRC_NOTIFY_PLUGIN_LUA: &str = include_str!("../lua/tirc/plugins/notify.lua");
 const TIRC_AWAY_PLUGIN_LUA: &str = include_str!("../lua/tirc/plugins/away.lua");
+const TIRC_NICK_COLORS_PLUGIN_LUA: &str = include_str!("../lua/tirc/plugins/nick_colors.lua");
 
 /// Bundled Lua sources written to the config `types/` directory so an editor's
 /// Lua language server can resolve `require('tirc.*')` and the `---@class` types
@@ -72,6 +75,7 @@ pub const TYPE_DEFINITIONS: &[(&str, &str)] = &[
     ("tirc/init.lua", TIRC_INIT_LUA),
     ("tirc/config.lua", TIRC_CONFIG_LUA),
     ("tirc/utils.lua", TIRC_UTILS_LUA),
+    ("tirc/hash.lua", TIRC_HASH_LUA),
     ("tirc/class.lua", TIRC_CLASS_LUA),
     ("tirc/tui/theme.lua", TIRC_THEME_LUA),
     ("tirc/tui/bar_row.lua", TIRC_BAR_ROW_LUA),
@@ -79,6 +83,7 @@ pub const TYPE_DEFINITIONS: &[(&str, &str)] = &[
     ("tirc/tui/themes/slanted.lua", TIRC_SLANTED_THEME_LUA),
     ("tirc/plugins/notify.lua", TIRC_NOTIFY_PLUGIN_LUA),
     ("tirc/plugins/away.lua", TIRC_AWAY_PLUGIN_LUA),
+    ("tirc/plugins/nick_colors.lua", TIRC_NICK_COLORS_PLUGIN_LUA),
 ];
 
 /// In debug (non-test) builds, reads a builtin Lua file from the source tree so
@@ -113,6 +118,7 @@ const BUILTIN_LUA_FILES: &[&str] = &[
     "lua/tirc/init.lua",
     "lua/tirc/config.lua",
     "lua/tirc/utils.lua",
+    "lua/tirc/hash.lua",
     "lua/tirc/class.lua",
     "lua/tirc/tui/theme.lua",
     "lua/tirc/tui/bar_row.lua",
@@ -120,6 +126,7 @@ const BUILTIN_LUA_FILES: &[&str] = &[
     "lua/tirc/tui/themes/slanted.lua",
     "lua/tirc/plugins/notify.lua",
     "lua/tirc/plugins/away.lua",
+    "lua/tirc/plugins/nick_colors.lua",
 ];
 
 /// Returns the absolute paths to all builtin Lua source files in the repo.
@@ -159,6 +166,7 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
     tirc_mod.set("__set_ui", lua.create_function(set_ui)?)?;
 
     create_date_time_module(lua)?;
+    create_tirc_hash_lua_module(lua)?;
     create_tirc_theme_lua_module(lua)?;
 
     let (name, src) = load_builtin("lua/tirc/init.lua", TIRC_INIT_LUA);
@@ -196,6 +204,13 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
     let (name, src) = load_builtin("lua/tirc/plugins/away.lua", TIRC_AWAY_PLUGIN_LUA);
     let away_plugin_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
     set_loaded_modules(lua, "tirc.plugins.away", away_plugin_module)?;
+
+    let (name, src) = load_builtin(
+        "lua/tirc/plugins/nick_colors.lua",
+        TIRC_NICK_COLORS_PLUGIN_LUA,
+    );
+    let nick_colors_plugin_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
+    set_loaded_modules(lua, "tirc.plugins.nick_colors", nick_colors_plugin_module)?;
 
     Ok(())
 }

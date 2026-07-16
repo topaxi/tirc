@@ -2402,6 +2402,46 @@ mod tests {
     }
 
     #[test]
+    fn nick_colors_fg_survives_span_conversion() -> anyhow::Result<(), anyhow::Error> {
+        use std::str::FromStr;
+
+        let renderer = Renderer::new();
+        let lua = mlua::Lua::new();
+        tirc_lua::builtins::register_builtin_modules(&lua)?;
+
+        // The provider's style, applied to a nick span exactly like a theme
+        // would, must reach the ratatui span as the palette's RGB color.
+        let spans = render_lua_table_to_spans(
+            &lua,
+            &renderer,
+            indoc! {"
+                local tirc = require('tirc')
+                tirc.use(require('tirc.plugins.nick_colors'))
+                return { 'alice', tirc.nick_style({ id = 'alice', name = 'alice' }) }
+            "},
+        )?;
+        let expected: String = run_lua_code(
+            &lua,
+            indoc! {"
+                local nc = require('tirc.plugins.nick_colors')
+                return nc.color_for('alice', nc.default_palette)
+            "},
+        )?
+        .as_string()
+        .map(|s| s.to_string_lossy())
+        .expect("color string");
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "alice");
+        assert_eq!(spans[0].style.fg, Some(Color::from_str(&expected)?));
+        assert!(
+            matches!(spans[0].style.fg, Some(Color::Rgb(..))),
+            "palette colors are RGB"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_two_child_tables_are_not_a_style() -> anyhow::Result<(), anyhow::Error> {
         // `{ {..}, {..} }` is two child span-lists, not a styled span: without
         // the style marker the renderer must treat it as a list.

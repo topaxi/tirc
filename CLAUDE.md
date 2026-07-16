@@ -38,9 +38,10 @@ features live in `[workspace.dependencies]`). Dependency edges are strictly acyc
   other workspace crate.
 - `crates/tirc-lua` - everything Lua-runtime: mlua helpers, the registry surface
   (`runtime`: `tirc.on` event handlers, `call_formatter`, completion sources, backend
-  metadata), the `tirc.tui.theme` style module (`theme`), and the embedded builtin
-  modules (`builtins`, `include_str!` of `crates/tirc-lua/lua/`). In debug builds the
-  builtins hot-reload from disk via `CARGO_MANIFEST_DIR`.
+  metadata), the `tirc.tui.theme` style module (`theme`), the `tirc.hash` fast-hash
+  module (`hash`), and the embedded builtin modules (`builtins`, `include_str!` of
+  `crates/tirc-lua/lua/`). In debug builds the builtins hot-reload from disk via
+  `CARGO_MANIFEST_DIR`.
 - `crates/tirc-config` - `TircConfig`/`ServerConfig` deserialization, `load_config`,
   reload, and the persisted stores (`aliases`, `buffer_order`, `ui_prefs`). Dev-depends
   on `tirc-ui` for its theme tests.
@@ -120,6 +121,12 @@ builds a style on the Lua side (`tirc_lua::theme::create_tirc_theme_lua_module`)
 - `plugins/away.lua` - bundled away plugin: hooks the `away` event fired by the
   `:away` builtin (which broadcasts native away to all backends), auto-replies to
   DMs while away, and registers a `:back` user command via `tirc.set_away`.
+- `plugins/nick_colors.lua` - deterministic per-nick colors: hashes the stable user
+  id (native `tirc.hash` module) into a curated palette and registers a
+  `tirc.set_nick_style` provider. Themes consult `tirc.nick_style(user)` wherever
+  they style a nick (the bundled themes do, via `Theme:nick_style(user, fallback)`)
+  and fall back to their own style when no provider is registered; the provider
+  slot is cleared on `:reload`.
 
 ## Conventions
 

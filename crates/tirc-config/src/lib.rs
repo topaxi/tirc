@@ -196,6 +196,9 @@ fn get_default_config() -> &'static str {
         -- Auto-reply to DMs while :away (adds a :back command):
         -- tirc.use(require('tirc.plugins.away'))
 
+        -- Deterministic per-nick colors for easier scanning:
+        -- tirc.use(require('tirc.plugins.nick_colors'))
+
         return config
     "}
 }
@@ -1651,5 +1654,189 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(quoted, r#"'it'\''s a'\''b'"#);
+    }
+
+    /// Registers a Lua global `find_fg(spans, text)` that walks a span tree and
+    /// returns the serialized `fg` of the innermost `{ text, style }` pair.
+    fn register_find_fg(lua: &Lua) {
+        lua.load(indoc! {"
+            function find_fg(spans, text)
+              if type(spans) ~= 'table' then
+                return nil
+              end
+              if spans[1] == text and type(spans[2]) == 'table' then
+                return spans[2].fg
+              end
+              for _, v in ipairs(spans) do
+                local found = find_fg(v, text)
+                if found then
+                  return found
+                end
+              end
+              return nil
+            end
+        "})
+            .exec()
+            .expect("find_fg helper");
+    }
+
+    /// The expected serialized `fg` for a nick id under the plugin's palette.
+    fn expected_nick_fg(lua: &Lua, id: &str) -> String {
+        lua.load(format!(
+            r#"
+            local nick_colors = require('tirc.plugins.nick_colors')
+            local theme = require('tirc.tui.theme')
+            local color = nick_colors.color_for('{id}', nick_colors.default_palette)
+            return theme.style({{ fg = color }}).fg
+            "#
+        ))
+        .eval()
+        .expect("expected fg")
+    }
+
+    #[test]
+    fn nick_colors_color_is_deterministic() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        let (same, case_insensitive, differs): (bool, bool, bool) = lua
+            .load(indoc! {"
+                local nick_colors = require('tirc.plugins.nick_colors')
+                local palette = nick_colors.default_palette
+                local a = nick_colors.color_for('alice', palette)
+                return a == nick_colors.color_for('alice', palette),
+                  a == nick_colors.color_for('ALICE', palette),
+                  a ~= nick_colors.color_for('alice2', palette)
+            "})
+            .eval()
+            .unwrap();
+        assert!(same, "same id must map to the same color");
+        assert!(case_insensitive, "ids hash case-insensitively");
+        assert!(differs, "different ids should get different colors");
+    }
+
+    #[test]
+    fn nick_colors_styles_message_and_userlist_consistently() {
+        let lua = setup_theme();
+        lua.load("require('tirc').use(require('tirc.plugins.nick_colors'))")
+            .exec()
+            .expect("plugin setup");
+        register_find_fg(&lua);
+        let expected = expected_nick_fg(&lua, "alice");
+
+        let spans = render_message_text(
+            &lua,
+            ChatEvent::Message {
+                target: TargetId::from("#tirc"),
+                id: None,
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain("hello"),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+        let find_fg: mlua::Function = lua.globals().get("find_fg").unwrap();
+        let message_fg: String = find_fg.call((&spans, "alice")).expect("nick span found");
+        assert_eq!(message_fg, expected);
+
+        let member = tirc_ui::Member {
+            user: UserRef::new("alice"),
+            role: tirc_core::MemberRole::Member,
+        };
+        let user_table = tirc_ui::lua::to_lua_user(&lua, &member).expect("user table");
+        let user_spans = call_formatter(&lua, "user", user_table)
+            .expect("user formatter registered")
+            .expect("user formatter callback");
+        let user_fg: String = find_fg
+            .call((&user_spans, "alice"))
+            .expect("userlist span found");
+        assert_eq!(
+            user_fg, expected,
+            "message and userlist must agree on the color"
+        );
+    }
+
+    #[test]
+    fn nick_colors_skips_pending_messages() {
+        let lua = setup_theme();
+        lua.load("require('tirc').use(require('tirc.plugins.nick_colors'))")
+            .exec()
+            .expect("plugin setup");
+        register_find_fg(&lua);
+
+        let mut message = stored(ChatEvent::Message {
+            target: TargetId::from("#tirc"),
+            id: None,
+            sender: UserRef::new("alice"),
+            body: MessageBody::plain("hello"),
+            kind: MsgKind::Text,
+            echo_of: None,
+            time: None,
+        });
+        message.pending = true;
+
+        let spans = render_stored_message_text(&lua, message);
+        let find_fg: mlua::Function = lua.globals().get("find_fg").unwrap();
+        let fg: String = find_fg.call((&spans, "alice")).expect("nick span found");
+        let darkgray: String = lua
+            .load("return require('tirc.tui.theme').style({ fg = 'darkgray' }).fg")
+            .eval()
+            .unwrap();
+        assert_eq!(fg, darkgray, "pending messages keep the dimmed nick");
+    }
+
+    #[test]
+    fn nick_style_without_provider_falls_back_to_theme_style() {
+        let lua = setup_theme();
+        register_find_fg(&lua);
+
+        let is_nil: bool = lua
+            .load("return require('tirc').nick_style({ id = 'alice', name = 'alice' }) == nil")
+            .eval()
+            .unwrap();
+        assert!(is_nil, "no provider yields nil");
+
+        let spans = render_message_text(
+            &lua,
+            ChatEvent::Message {
+                target: TargetId::from("#tirc"),
+                id: None,
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain("hello"),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+        let find_fg: mlua::Function = lua.globals().get("find_fg").unwrap();
+        let fg: String = find_fg.call((&spans, "alice")).expect("nick span found");
+        let blue: String = lua
+            .load("return require('tirc.tui.theme').style({ fg = 'blue' }).fg")
+            .eval()
+            .unwrap();
+        assert_eq!(fg, blue, "without a provider the theme's blue applies");
+    }
+
+    #[test]
+    fn reset_runtime_clears_nick_style_provider() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        lua.load("require('tirc').use(require('tirc.plugins.nick_colors'))")
+            .exec()
+            .expect("plugin setup");
+        let registered: bool = lua
+            .load("return require('tirc').nick_style({ id = 'alice', name = 'alice' }) ~= nil")
+            .eval()
+            .unwrap();
+        assert!(registered);
+
+        tirc_lua::runtime::reset_runtime(&lua).expect("reset");
+        let cleared: bool = lua
+            .load("return require('tirc').nick_style({ id = 'alice', name = 'alice' }) == nil")
+            .eval()
+            .unwrap();
+        assert!(cleared, ":reload must drop the stale provider");
     }
 }

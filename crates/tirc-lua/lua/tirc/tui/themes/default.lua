@@ -174,6 +174,16 @@ function Theme:format_body(message)
   return spans
 end
 
+--- Per-nick style: a registered `tirc.nick_style` provider (e.g. the
+--- `tirc.plugins.nick_colors` plugin) wins, else `fallback`. Override to opt a
+--- theme out of provider-driven nick colors.
+---@param user TircUserRef|TircUser|nil
+---@param fallback TircThemeStyle
+---@return TircThemeStyle
+function Theme:nick_style(user, fallback)
+  return user and tirc.nick_style(user) or fallback
+end
+
 ---@param name string
 ---@param style TircThemeStyle
 function Theme:format_nickname(name, style)
@@ -211,15 +221,17 @@ function Theme:format_message(event)
   if event.kind == 'notice' then
     return {
       { '-', s.gray },
-      { name, s.blue },
+      { name, self:nick_style(event.sender, s.blue) },
       { '- ', s.gray },
       self:format_body(text),
     }
   end
 
   return {
-    is_action and self:format_action_nickname(name, s.white)
-      or self:format_nickname(name, s.blue),
+    is_action and self:format_action_nickname(
+      name,
+      self:nick_style(event.sender, s.white)
+    ) or self:format_nickname(name, self:nick_style(event.sender, s.blue)),
     ' ',
     self:format_body(text),
   }
@@ -242,7 +254,7 @@ function Theme:format_membership(event)
     invite = ' was invited to ',
   })[change] or ' '
 
-  local line = { { event.who.name, s.blue } }
+  local line = { { event.who.name, self:nick_style(event.who, s.blue) } }
 
   -- Extended-join real name, e.g. `topaxi (Damian) has joined #tirc`.
   if change == 'join' and event.realname and event.realname ~= 'Unknown' then
@@ -269,7 +281,11 @@ function Theme:format_topic(event)
   local who = event.who and event.who.name or nil
 
   return {
-    who and { { who, s.blue }, { ' changed the topic to ', s.twhite } }
+    who
+        and {
+          { who, self:nick_style(event.who, s.blue) },
+          { ' changed the topic to ', s.twhite },
+        }
       or { 'Topic: ', s.twhite },
     { event.topic, s.green },
   }
@@ -278,10 +294,15 @@ end
 ---@param event TircEvent
 function Theme:format_rename(event)
   local s = self.styles
+  -- The new nick is a bare string; color it via a pseudo ref so it matches
+  -- the user's future messages (for IRC the id is the nick itself).
   return {
-    { event.who.name, s.blue },
+    { event.who.name, self:nick_style(event.who, s.blue) },
     { ' is now known as ', s.twhite },
-    { event.new, s.blue },
+    {
+      event.new,
+      self:nick_style({ id = event.new, name = event.new }, s.blue),
+    },
   }
 end
 
@@ -289,7 +310,7 @@ end
 function Theme:format_quit(event)
   local s = self.styles
   local line = {
-    { event.who.name, s.blue },
+    { event.who.name, self:nick_style(event.who, s.blue) },
     { ' has quit', s.twhite },
   }
 
@@ -593,7 +614,7 @@ end
 function Theme:user(user)
   return {
     self:role_styles()[user.role] or {},
-    { user.name, self.styles.blue },
+    { user.name, self:nick_style(user, self.styles.blue) },
   }
 end
 

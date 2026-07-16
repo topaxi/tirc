@@ -2,6 +2,7 @@ use mlua::{Lua, Table, Value};
 
 pub mod builtins;
 pub mod date_time;
+pub mod hash;
 pub mod runtime;
 pub mod theme;
 

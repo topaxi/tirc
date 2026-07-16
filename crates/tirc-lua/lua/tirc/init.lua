@@ -199,6 +199,8 @@
 ---@field on fun(event_name: 'event', callback: fun(event: TircEvent, sender: TircSender)) | fun(event_name: 'away', callback: fun(message: string|nil))
 ---@field register_completion_source fun(source: TircCompletionSource)
 ---@field create_command fun(name: string, handler: fun(ctx: TircCommandContext, sender: TircSender|nil), opts?: TircCommandOpts) register a `:` user command; builtin names shadow it on exact match; cleared and re-registered on `:reload`
+---@field nick_style fun(user: TircUserRef|TircUser): TircThemeStyle|nil per-nick style from the registered provider, or nil (themes fall back to their own style)
+---@field set_nick_style fun(provider: (fun(user: TircUserRef|TircUser): TircThemeStyle|nil)|nil) register the nick-style provider; a single slot, cleared on `:reload`
 ---@field log TircLog logging helpers that write to the `:debug` pane
 local M = {}
 
@@ -260,6 +262,28 @@ end
 ---@param message string|nil
 function M.set_away(message)
   queue_ui_action { type = 'set_away', message = message }
+end
+
+--- Resolves the per-nick style from the registered provider, or nil when no
+--- provider is set. Themes consult this wherever they style a nick and fall
+--- back to their own style on nil, so plugins (e.g.
+--- `tirc.plugins.nick_colors`) can recolor nicks transparently.
+---@param user TircUserRef|TircUser
+---@return TircThemeStyle|nil
+function M.nick_style(user)
+  local provider = _tirc.__nick_style_provider
+  if provider then
+    return provider(user)
+  end
+  return nil
+end
+
+--- Registers the nick-style provider consulted by `tirc.nick_style`. A single
+--- slot: registering replaces any previous provider; pass nil to clear. The
+--- slot is reset on `:reload` before the config re-runs.
+---@param provider (fun(user: TircUserRef|TircUser): TircThemeStyle|nil)|nil
+function M.set_nick_style(provider)
+  _tirc.__nick_style_provider = provider
 end
 
 --- Joins varargs into one message, stringifying each part (like `print`).

@@ -11,3 +11,4 @@ log = { workspace = true }
 mlua = { workspace = true }
 ratatui = { workspace = true }
 semver = { workspace = true }
+twox-hash = { workspace = true }
