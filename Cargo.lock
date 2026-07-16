@@ -5464,6 +5464,7 @@ dependencies = [
  "textwrap",
  "tirc-core",
  "tirc-lua",
+ "tirc-ui",
  "tokio",
  "tokio-tungstenite",
  "tracing",
@@ -5502,6 +5503,23 @@ dependencies = [
  "ratatui",
  "semver",
  "tirc-core",
+]
+
+[[package]]
+name = "tirc-ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "emojis",
+ "indexmap",
+ "log",
+ "mlua",
+ "nucleo-matcher",
+ "ratatui",
+ "tirc-core",
+ "tirc-lua",
+ "tokio",
 ]
 
 [[package]]

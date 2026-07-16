@@ -16,7 +16,7 @@ use nucleo_matcher::{Matcher, Utf32Str};
 use ratatui::layout::Rect;
 
 use super::state::Mode;
-use crate::lua::runtime::completion_sources_registry;
+use tirc_lua::runtime::completion_sources_registry;
 
 /// Every command name the input handler's `handle_command` accepts, paired
 /// with whether it takes arguments (drives the trailing space on completion

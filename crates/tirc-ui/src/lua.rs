@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::core::backend::BackendInfo;
-use crate::core::{
+use tirc_core::backend::BackendInfo;
+use tirc_core::{
     Attachment, ChatEvent, Command, MemberRole, MembershipChange, MessageBody, MsgKind, Protocol,
     TargetId, TxnAllocator, UserRef,
 };
@@ -56,7 +56,7 @@ fn attachment_table(lua: &mlua::Lua, attachment: &Attachment) -> mlua::Result<ml
 fn body_table(lua: &mlua::Lua, body: &MessageBody) -> mlua::Result<mlua::Table> {
     let table = lua.create_table()?;
     table.set("text", body.text.as_str())?;
-    if let Some(crate::core::Formatted::Html(html)) = &body.formatted {
+    if let Some(tirc_core::Formatted::Html(html)) = &body.formatted {
         table.set("html", html.as_str())?;
     }
     if !body.attachments.is_empty() {
@@ -88,7 +88,7 @@ pub fn to_lua_event(
     backend_table.set("id", backend.id.0)?;
     backend_table.set("protocol", protocol_str(backend.protocol))?;
     backend_table.set("name", backend.name.as_str())?;
-    if let Some(metadata) = crate::lua::runtime::get_backend_metadata(lua, backend.id) {
+    if let Some(metadata) = tirc_lua::runtime::get_backend_metadata(lua, backend.id) {
         backend_table.set("metadata", metadata)?;
     }
     table.set("backend", backend_table)?;
@@ -287,7 +287,7 @@ pub fn to_lua_user(lua: &mlua::Lua, member: &Member) -> mlua::Result<mlua::Table
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{BackendId, EventId};
+    use tirc_core::{BackendId, EventId};
 
     fn backend() -> BackendInfo {
         BackendInfo {
@@ -348,7 +348,7 @@ mod tests {
 
         let metadata = lua.create_table().unwrap();
         metadata.set("label", "topaxi").unwrap();
-        crate::lua::runtime::set_backend_metadata(&lua, BackendId(0), mlua::Value::Table(metadata))
+        tirc_lua::runtime::set_backend_metadata(&lua, BackendId(0), mlua::Value::Table(metadata))
             .unwrap();
 
         let message = stored(ChatEvent::Message {

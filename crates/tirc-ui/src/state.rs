@@ -6,8 +6,8 @@ use indexmap::IndexMap;
 use ratatui::layout::Rect;
 
 use super::completion::CompletionPopup;
-use crate::core::backend::BackendInfo;
-use crate::core::{
+use tirc_core::backend::BackendInfo;
+use tirc_core::{
     BackendId, BufferId, BufferKind, ChatEvent, EventId, MemberRole, MembershipChange, MessageBody,
     TargetId, TxnId, UserRef,
 };
@@ -358,13 +358,13 @@ pub struct State {
     /// Populated once at startup; not re-read on `:reload` (like `autojoin`).
     pub config_aliases: HashMap<BufferId, String>,
     /// Runtime aliases set via `:alias`, mirrored to the persisted
-    /// [`crate::config::aliases::AliasStore`].
+    /// [`tirc_config::aliases::AliasStore`].
     pub user_aliases: HashMap<BufferId, String>,
     /// Buffer ranks from the Lua config (`servers[i].buffer_order`), counted
     /// globally across servers in config order. Populated once at startup.
     pub config_order: HashMap<BufferId, usize>,
     /// Buffer ranks snapshotted on `:bufmove`, mirrored to the persisted
-    /// [`crate::config::buffer_order::BufferOrderStore`].
+    /// [`tirc_config::buffer_order::BufferOrderStore`].
     pub user_order: HashMap<BufferId, usize>,
 }
 
@@ -907,7 +907,7 @@ fn rect_contains(rect: &Rect, x: u16, y: u16) -> bool {
 
 /// What a right-click context menu acts on. Kept as plain data with no command
 /// coupling: the input handler translates a [`MenuAction`] plus the target into
-/// a backend [`Command`](crate::core::Command) or a local state mutation, so the
+/// a backend [`Command`](tirc_core::Command) or a local state mutation, so the
 /// view layer stays free of protocol concerns.
 #[derive(Debug, Clone)]
 pub enum MenuTarget {
@@ -918,7 +918,7 @@ pub enum MenuTarget {
 }
 
 /// The abstract action a menu item performs. Deliberately decoupled from
-/// [`Command`](crate::core::Command): the input handler owns the mapping from an
+/// [`Command`](tirc_core::Command): the input handler owns the mapping from an
 /// action to its concrete effect, which keeps `ViewState` testable without a
 /// backend and lets the same action mean different things per target type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1213,7 +1213,7 @@ impl ViewState {
     }
 
     /// Flips copy mode and returns the new value. The caller pairs this with the
-    /// terminal mouse-capture toggle (which lives on the [`Tui`](crate::tui::Tui)
+    /// terminal mouse-capture toggle (which lives on the `Tui`
     /// since it touches the backend), so the flag here only drives the renderer's
     /// hint. Leaving copy mode also drops any app-level selection, which is
     /// meaningless once native selection has taken over.
@@ -1336,7 +1336,7 @@ impl ViewState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{MsgKind, Protocol};
+    use tirc_core::{MsgKind, Protocol};
 
     fn backend() -> BackendId {
         BackendId(0)
@@ -1493,7 +1493,7 @@ mod tests {
             backend(),
             ChatEvent::Message {
                 target: TargetId::from("#tirc"),
-                id: Some(crate::core::EventId("$evt".to_string())),
+                id: Some(tirc_core::EventId("$evt".to_string())),
                 sender: UserRef::new("me"),
                 body: MessageBody::plain("old message"),
                 kind: MsgKind::Text,
@@ -1807,7 +1807,7 @@ mod tests {
     fn timed_message(target: &str, sender: &str, event_id: &str, ts: i64) -> ChatEvent {
         ChatEvent::Message {
             target: TargetId::from(target),
-            id: Some(crate::core::EventId(event_id.to_string())),
+            id: Some(tirc_core::EventId(event_id.to_string())),
             sender: UserRef::new(sender),
             body: MessageBody::plain("hi"),
             kind: MsgKind::Text,
@@ -1881,7 +1881,7 @@ mod tests {
             backend(),
             ChatEvent::Message {
                 target: TargetId::from("#tirc"),
-                id: Some(crate::core::EventId("$echo".to_string())),
+                id: Some(tirc_core::EventId("$echo".to_string())),
                 sender: UserRef::new("me"),
                 body: MessageBody::plain("hi"),
                 kind: MsgKind::Text,
@@ -2532,7 +2532,7 @@ mod tests {
             backend(),
             ChatEvent::Message {
                 target: TargetId::from("#tirc"),
-                id: Some(crate::core::EventId("$1".to_string())),
+                id: Some(tirc_core::EventId("$1".to_string())),
                 sender: UserRef::new("alice"),
                 body: MessageBody::plain("original"),
                 kind: MsgKind::Text,
@@ -2545,7 +2545,7 @@ mod tests {
             backend(),
             ChatEvent::Edit {
                 target: TargetId::from("#tirc"),
-                id: crate::core::EventId("$1".to_string()),
+                id: tirc_core::EventId("$1".to_string()),
                 body: MessageBody::plain("updated"),
             },
         );
@@ -2569,7 +2569,7 @@ mod tests {
             backend(),
             ChatEvent::Message {
                 target: TargetId::from("#tirc"),
-                id: Some(crate::core::EventId("$1".to_string())),
+                id: Some(tirc_core::EventId("$1".to_string())),
                 sender: UserRef::new("alice"),
                 body: MessageBody::plain("hi"),
                 kind: MsgKind::Text,
@@ -2582,7 +2582,7 @@ mod tests {
             backend(),
             ChatEvent::Redaction {
                 target: TargetId::from("#tirc"),
-                id: crate::core::EventId("$1".to_string()),
+                id: tirc_core::EventId("$1".to_string()),
                 by: None,
             },
         );
@@ -2604,7 +2604,7 @@ mod tests {
             backend(),
             ChatEvent::Message {
                 target: TargetId::from("#tirc"),
-                id: Some(crate::core::EventId("$1".to_string())),
+                id: Some(tirc_core::EventId("$1".to_string())),
                 sender: UserRef::new("alice"),
                 body: MessageBody::plain("hi"),
                 kind: MsgKind::Text,
@@ -2617,7 +2617,7 @@ mod tests {
             backend(),
             ChatEvent::Reaction {
                 target: TargetId::from("#tirc"),
-                id: crate::core::EventId("$1".to_string()),
+                id: tirc_core::EventId("$1".to_string()),
                 sender: UserRef::new("bob"),
                 key: "👍".to_string(),
                 add: true,
@@ -2628,7 +2628,7 @@ mod tests {
             backend(),
             ChatEvent::Reaction {
                 target: TargetId::from("#tirc"),
-                id: crate::core::EventId("$1".to_string()),
+                id: tirc_core::EventId("$1".to_string()),
                 sender: UserRef::new("carol"),
                 key: "👍".to_string(),
                 add: true,

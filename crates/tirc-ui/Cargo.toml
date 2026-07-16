@@ -1,0 +1,17 @@
+[package]
+name = "tirc-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tirc-core = { path = "../tirc-core" }
+tirc-lua = { path = "../tirc-lua" }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+emojis = { workspace = true }
+indexmap = { workspace = true }
+log = { workspace = true }
+mlua = { workspace = true }
+nucleo-matcher = { workspace = true }
+ratatui = { workspace = true }
+tokio = { workspace = true }

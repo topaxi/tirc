@@ -5,8 +5,8 @@
 pub mod backends;
 pub mod config;
 pub mod tui;
-pub mod ui;
 
 pub use tirc_core as core;
 pub use tirc_lua as lua;
+pub use tirc_ui as ui;
 pub use tirc_core::logging;
