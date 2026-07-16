@@ -15,6 +15,9 @@ local tirc = require('tirc')
 --- name are rendered with different background colours and their own inner
 --- separator.
 ---
+--- Only the tab rendering is overridden, so every `buffer_bar` layout of the
+--- default theme (and the runtime `:barstyle` switch) works with this look.
+---
 --- Requires a Nerd Font (U+E0B8 / U+E0BE) and 24-bit colour support.
 ---
 --- Usage in init.lua:
@@ -59,21 +62,10 @@ local function tab_fg(buffer, focused)
   return TAB_FG
 end
 
----@param buffer TircBufferTab
-local function has_unique_name(buffer)
-  local count = 0
-  for _, b in ipairs(tirc.buffers) do
-    if b.name == buffer.name then
-      count = count + 1
-    end
-  end
-  return count <= 1
-end
-
 -- Returns the background of the first visible segment of a tab (backend label
 -- when shown, otherwise the room segment).
-local function tab_entry_bg(buffer, focused)
-  if not has_unique_name(buffer) then
+local function tab_entry_bg(buffer, focused, show_backend)
+  if show_backend then
     return focused and FOCUSED_BG_BACKEND or TAB_BG_BACKEND
   end
   return tab_bg(buffer, focused)
@@ -81,13 +73,14 @@ end
 
 ---@param buffer TircBufferTab
 ---@param focused boolean
-local function tab_spans(buffer, focused)
+---@param show_backend boolean
+local function tab_spans(buffer, focused, show_backend)
   local bg = tab_bg(buffer, focused)
   local fg = tab_fg(buffer, focused)
   local meta = buffer.backend_metadata
   local backend_label = (meta and meta.label) or buffer.backend_name
 
-  if has_unique_name(buffer) then
+  if not show_backend then
     return { { ' ' .. buffer.name .. ' ', theme.style { fg = fg, bg = bg } } }
   end
 
@@ -99,34 +92,59 @@ local function tab_spans(buffer, focused)
   }
 end
 
-function Slanted:render_buffer_bar(buffers)
-  local row = {}
+function Slanted:bar_background()
+  return BAR_BG
+end
 
-  for i, buffer in ipairs(buffers) do
-    local focused = tirc.is_focused_buffer(buffer)
-    local bg = tab_bg(buffer, focused)
+--- Renders one buffer tab with its slant separators. The leading separator is
+--- skipped for a row's first tab so content starts flush; each tab groups its
+--- separators into one element (the renderer measures top-level row elements
+--- for click hit-testing, so a tab's separators must live inside its own
+--- element rather than being flattened into the row).
+---@param buffer TircBufferTab
+---@param first? boolean
+function Slanted:render_buffer_tab(buffer, first)
+  local focused = tirc.is_focused_buffer(buffer)
+  local show_backend = self:tab_needs_backend_prefix(buffer)
+  local bg = tab_bg(buffer, focused)
+  local tab = {}
 
-    -- Group each tab (leading separator, content, trailing separator) into one
-    -- element of the row. The renderer measures each top-level row element as a
-    -- single buffer tab for click hit-testing, so a tab's separators must live
-    -- inside its own element rather than being flattened into the row.
-    local tab = {}
-
-    if i > 1 then
-      local entry_bg = tab_entry_bg(buffer, focused)
-      tab[#tab + 1] = { SEP_LEFT, theme.style { fg = BAR_BG, bg = entry_bg } }
-    end
-
-    for _, span in ipairs(tab_spans(buffer, focused)) do
-      tab[#tab + 1] = span
-    end
-
-    tab[#tab + 1] = { SEP_LEFT, theme.style { fg = bg, bg = BAR_BG } }
-
-    row[#row + 1] = tab
+  if not first then
+    local entry_bg = tab_entry_bg(buffer, focused, show_backend)
+    tab[#tab + 1] = { SEP_LEFT, theme.style { fg = BAR_BG, bg = entry_bg } }
   end
 
-  return { rows = { row }, bg = BAR_BG }
+  for _, span in ipairs(tab_spans(buffer, focused, show_backend)) do
+    tab[#tab + 1] = span
+  end
+
+  tab[#tab + 1] = { SEP_LEFT, theme.style { fg = bg, bg = BAR_BG } }
+
+  return tab
+end
+
+--- Renders one backend tab (the tabbed layout's first row) in the same
+--- slanted look; the selected backend uses the focused colours.
+---@param group { id: integer, label: string, has_unread: boolean, has_mention: boolean }
+---@param first? boolean
+function Slanted:render_backend_tab(group, first)
+  local selected = tirc.selected_backend == group.id
+  local bg = selected and FOCUSED_BG
+    or (group.has_mention and MENTION_BG)
+    or TAB_BG
+  local fg = selected and FOCUSED_FG
+    or (group.has_unread and UNREAD_FG)
+    or TAB_FG
+  local tab = {}
+
+  if not first then
+    tab[#tab + 1] = { SEP_LEFT, theme.style { fg = BAR_BG, bg = bg } }
+  end
+  tab[#tab + 1] =
+    { ' ' .. group.label .. ' ', theme.style { fg = fg, bg = bg } }
+  tab[#tab + 1] = { SEP_LEFT, theme.style { fg = bg, bg = BAR_BG } }
+
+  return tab
 end
 
 return Slanted

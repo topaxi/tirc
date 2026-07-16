@@ -295,6 +295,22 @@ fn get_ui(lua: &Lua, _: ()) -> mlua::Result<Value> {
     lua.named_registry_value::<Value>("tirc-ui")
 }
 
+/// Reads a string-sequence field from the `tirc.ui` theme object (through its
+/// metatable chain, so class-level fields are found). `None` when no theme is
+/// set or the field is absent/not a table. Used for theme-declared metadata
+/// like `buffer_bar_styles`.
+pub fn ui_string_list(lua: &Lua, name: &str) -> Option<Vec<String>> {
+    let ui = ui_object(lua)?;
+    match ui.get::<Value>(name).ok()? {
+        Value::Table(list) => Some(
+            list.sequence_values::<String>()
+                .filter_map(Result::ok)
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
 /// Backs the `tirc.ui` property setter; exposed to Lua as `_tirc.__set_ui`.
 ///
 /// Stores `value` as the theme object verbatim, preserving its metatable so Rust
@@ -914,6 +930,18 @@ mod tests {
             .expect("theme setup");
 
         lua
+    }
+
+    #[test]
+    fn ui_string_list_reads_theme_class_field_through_metatable() {
+        let lua = setup_theme();
+        let styles = ui_string_list(&lua, "buffer_bar_styles").expect("theme declares styles");
+        assert_eq!(styles, ["linear", "grouped", "per-backend", "tabbed"]);
+        assert_eq!(
+            ui_string_list(&lua, "no_such_field"),
+            None,
+            "absent fields yield None"
+        );
     }
 
     #[test]

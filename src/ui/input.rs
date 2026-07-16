@@ -82,11 +82,6 @@ pub struct InputHandler<'lua> {
     ui_prefs: UiPrefsStore,
 }
 
-/// The buffer-bar layouts the bundled default theme understands. `:barstyle`
-/// accepts any name (the theme decides what it means); this set is only used
-/// for help text and to skip the "theme-defined" notice for known names.
-const BAR_STYLES: [&str; 4] = ["linear", "grouped", "per-backend", "tabbed"];
-
 impl<'lua> InputHandler<'lua> {
     // The handler genuinely owns this many collaborators; grouping them into a
     // struct would only move the argument list to a builder for no clarity gain.
@@ -320,10 +315,16 @@ impl<'lua> InputHandler<'lua> {
         self.report_save_error(state, buffer.backend, "buffer order", result);
     }
 
+    /// The bar styles the active theme declares via its `buffer_bar_styles`
+    /// field, or `None` when the theme declares none.
+    fn theme_bar_styles(&self) -> Option<Vec<String>> {
+        crate::config::ui_string_list(self.lua, "buffer_bar_styles")
+            .filter(|styles| !styles.is_empty())
+    }
+
     /// Sets (or with `reset` clears) the runtime buffer-bar style override and
-    /// persists it. Any name is accepted - the theme decides what it means, so
-    /// custom themes can define their own layouts (the bundled theme renders
-    /// unknown names as 'linear'). Names outside the bundled set are echoed
+    /// persists it. Any name is accepted - the theme decides what it means -
+    /// but names outside the theme's declared `buffer_bar_styles` are echoed
     /// back so a typo is noticeable.
     fn set_bar_style(
         &mut self,
@@ -343,15 +344,17 @@ impl<'lua> InputHandler<'lua> {
 
         view.buffer_bar_style = Some(arg.to_string());
         let result = self.ui_prefs.set_buffer_bar(Some(arg));
-        if !BAR_STYLES.contains(&arg) {
-            self.report_info(
-                state,
-                backend,
-                format!(
-                    "Buffer bar style set to '{arg}' (theme-defined; bundled: {}, reset)",
-                    BAR_STYLES.join(", ")
-                ),
-            );
+        if let Some(styles) = self.theme_bar_styles() {
+            if !styles.iter().any(|s| s == arg) {
+                self.report_info(
+                    state,
+                    backend,
+                    format!(
+                        "Buffer bar style set to '{arg}', which the theme does not declare (theme styles: {}, reset)",
+                        styles.join(", ")
+                    ),
+                );
+            }
         }
         if let Some(backend) = backend {
             self.report_save_error(state, backend, "ui prefs", result);
@@ -1304,13 +1307,14 @@ impl<'lua> InputHandler<'lua> {
                     .clone()
                     .map(|s| format!("{s} (override; ':barstyle reset' to clear)"))
                     .unwrap_or_else(|| "theme default".to_string());
+                let styles = self
+                    .theme_bar_styles()
+                    .map(|styles| styles.join(", "))
+                    .unwrap_or_else(|| "none declared by the theme".to_string());
                 self.report_info(
                     state,
                     backend,
-                    format!(
-                        "Buffer bar style: {current}. Bundled: {} (custom themes may define more)",
-                        BAR_STYLES.join(", ")
-                    ),
+                    format!("Buffer bar style: {current}. Theme styles: {styles}"),
                 );
             }
             ["barstyle", arg] => {

@@ -121,10 +121,12 @@
 ---@field render_reactions? fun(event: TircEvent, hovered_key: string|nil): TircReactionPill[]
 ---@field render_quick_reactions? fun(event: TircEvent, emojis: string[], hovered_key: string|nil): TircReactionPill[]
 ---@field user? fun(user: TircUser): TircSpans
----@field render_buffer_tab? fun(buffer: TircBufferTab): TircSpans
+---@field render_buffer_tab? fun(buffer: TircBufferTab, first?: boolean): TircSpans
 ---@field render_buffer_bar? fun(buffers: TircBufferTab[]): TircBufferBar | TircSpans
 ---@field render_unread_separator? fun(width: integer): TircSpans
 ---@field render_date_separator? fun(date: TircDateTime, width: integer): TircSpans
+---@field buffer_bar_styles? string[] bar layout names the theme understands, surfaced by `:barstyle`
+---@field on_bar_click? fun(id: string) handler for clicks on `'custom:<...>'` bar elements
 
 ---@class TircModule
 ---@field version string

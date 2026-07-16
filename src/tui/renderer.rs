@@ -2533,8 +2533,8 @@ mod tests {
             width: 120,
             height: 1,
         };
-        // Slanted declares no `ids`, exercising the legacy first-row mapping.
-        assert!(bar.hits.is_none(), "slanted takes the legacy path");
+        // Slanted renders through the default dispatcher, so it declares ids.
+        assert!(bar.hits.is_some(), "slanted goes through the ids path");
         let tabs = renderer.bar_hits_from_rows(
             &state,
             bar_rect,
@@ -2557,6 +2557,87 @@ mod tests {
         for pair in tabs.windows(2) {
             assert_eq!(pair[1].0.x, pair[0].0.x + pair[0].0.width, "contiguous");
         }
+        Ok(())
+    }
+
+    /// A theme overriding `render_buffer_bar` without declaring `ids` (the
+    /// pre-`ids` contract) must keep working: row-0 elements map to buffers in
+    /// order and stay clickable.
+    #[test]
+    fn theme_without_ids_takes_legacy_first_row_mapping() -> anyhow::Result<(), anyhow::Error> {
+        use crate::core::BackendId;
+        use crate::ui::ViewState;
+
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load(indoc! {"
+            require('tirc.tui.themes.default'):setup({
+              render_buffer_bar = function(self, buffers)
+                local row = {}
+                for _, buffer in ipairs(buffers) do
+                  row[#row + 1] = self:render_buffer_tab(buffer)
+                end
+                return { rows = { row } }
+              end,
+            })
+        "})
+            .exec()?;
+
+        let state = two_backend_state();
+        let mut view = ViewState::new();
+        view.focus(BufferId::status(BackendId(0)));
+
+        let renderer = Renderer::new();
+        renderer.update_render_context(&lua, &view, &state)?;
+        let bar = renderer.build_buffer_bar(&state, &lua);
+        assert!(bar.hits.is_none(), "no ids declared -> legacy path");
+
+        let bar_rect = Rect {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 1,
+        };
+        let tabs = renderer.bar_hits_from_rows(
+            &state,
+            bar_rect,
+            &bar.row_widths,
+            bar.hits.as_deref(),
+            &[0],
+        );
+        assert_eq!(tabs.len(), state.buffers.len(), "one hit box per buffer");
+        assert!(tabs
+            .iter()
+            .zip(state.buffers.keys())
+            .all(|((_, hit), id)| matches!(hit, BarHit::Buffer(b) if b == id)));
+        Ok(())
+    }
+
+    /// Slanted only overrides tab rendering, so the `:barstyle`/`buffer_bar`
+    /// layouts apply to it like to the default theme.
+    #[test]
+    fn slanted_theme_supports_tabbed_layout() -> anyhow::Result<(), anyhow::Error> {
+        use crate::core::BackendId;
+        use crate::ui::ViewState;
+
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.slanted'):setup({ buffer_bar = 'tabbed' })")
+            .exec()?;
+
+        let state = two_backend_state();
+        let mut view = ViewState::new();
+        view.focus(BufferId::status(BackendId(0)));
+
+        let renderer = Renderer::new();
+        renderer.update_render_context(&lua, &view, &state)?;
+        let bar = renderer.build_buffer_bar(&state, &lua);
+
+        assert_eq!(bar.lines.len(), 2, "backend row + buffer row");
+        let hits = bar.hits.as_deref().expect("dispatcher declares ids");
+        assert!(hits[0]
+            .iter()
+            .all(|hit| matches!(hit, Some(BarHit::Backend { .. }))));
         Ok(())
     }
 

@@ -669,14 +669,30 @@ local function has_unique_name(buffer)
   return count <= 1
 end
 
+--- Whether a tab must prefix its backend label to disambiguate a duplicated
+--- buffer name. Only needed in layouts without visible backend context: the
+--- grouped/per-backend/tabbed layouts already show which backend a tab
+--- belongs to, so only 'linear' (and unknown custom styles) disambiguate.
+---@param buffer TircBufferTab
+function Theme:tab_needs_backend_prefix(buffer)
+  local style = self:resolved_buffer_bar_style()
+  if style == 'grouped' or style == 'per-backend' or style == 'tabbed' then
+    return false
+  end
+  return not has_unique_name(buffer)
+end
+
 --- Renders one tab in the buffer bar. Focused tabs are styled brighter;
 --- tabs with a mention use red, tabs with unread activity use white.
+--- `first` is true when the tab is the first element of its bar row, for
+--- themes whose tabs carry leading separators (the default theme ignores it).
 ---@param buffer TircBufferTab
-function Theme:render_buffer_tab(buffer)
+---@param first? boolean
+function Theme:render_buffer_tab(buffer, first)
   local s = self.styles
   local meta = buffer.backend_metadata
   local backend_label = (meta and meta.label) or buffer.backend_name
-  local name = (not has_unique_name(buffer))
+  local name = self:tab_needs_backend_prefix(buffer)
       and (backend_label .. '/' .. buffer.name)
     or buffer.name
 
@@ -737,8 +753,10 @@ end
 
 --- Renders one backend tab for the tabbed layout's first row. The selected
 --- backend is highlighted; unselected backends show mention/unread activity.
+--- `first` is true for the row's first element (see `render_buffer_tab`).
 ---@param group { id: integer, label: string, has_unread: boolean, has_mention: boolean }
-function Theme:render_backend_tab(group)
+---@param first? boolean
+function Theme:render_backend_tab(group, first)
   local s = self.styles
   local style
   if tirc.selected_backend == group.id then
@@ -753,30 +771,47 @@ function Theme:render_backend_tab(group)
   return { { ' ' .. group.label .. ' ', style }, ' ' }
 end
 
+--- The bar layouts this theme understands, surfaced by `:barstyle`. Subclasses
+--- adding layouts should extend this list (and branch in `render_buffer_bar`).
+Theme.buffer_bar_styles = { 'linear', 'grouped', 'per-backend', 'tabbed' }
+
 --- The active bar layout: the runtime `:barstyle` override wins, then the
 --- `buffer_bar` theme option, then 'linear'.
 function Theme:resolved_buffer_bar_style()
   return tirc.buffer_bar_style or self.buffer_bar or 'linear'
 end
 
+--- Base background colour painted behind the whole bar, or nil for the
+--- terminal default. Override in themes with a custom bar palette.
+---@return string?
+function Theme:bar_background()
+  return nil
+end
+
 --- Lays out the whole buffer bar. Returns `{ rows = ..., ids = ... }` (see
 --- `TircBufferBar`): one `rows` entry per rendered line, and one `ids` entry
 --- per top-level row element declaring what a click on it does (a buffer id,
 --- a `backend:`/`backend-select:` marker, or `''` for decoration). Dispatches
---- on the layout resolved by `resolved_buffer_bar_style`; override this (or
---- one of the `render_*_bar` methods) for custom layouts.
+--- on the layout resolved by `resolved_buffer_bar_style` - unknown styles
+--- render as 'linear'. Override one of the `render_*_bar` methods (or the
+--- tab-level `render_buffer_tab`/`render_backend_tab`) for custom looks, or
+--- this method for entirely custom layouts.
 ---@param buffers TircBufferTab[]
 ---@return TircBufferBar
 function Theme:render_buffer_bar(buffers)
   local style = self:resolved_buffer_bar_style()
+  local bar
   if style == 'grouped' then
-    return self:render_grouped_bar(buffers)
+    bar = self:render_grouped_bar(buffers)
   elseif style == 'per-backend' then
-    return self:render_per_backend_bar(buffers)
+    bar = self:render_per_backend_bar(buffers)
   elseif style == 'tabbed' then
-    return self:render_tabbed_bar(buffers)
+    bar = self:render_tabbed_bar(buffers)
+  else
+    bar = self:render_linear_bar(buffers)
   end
-  return self:render_linear_bar(buffers)
+  bar.bg = bar.bg or self:bar_background()
+  return bar
 end
 
 --- One row of all buffer tabs, in buffer order (the classic layout).
@@ -785,7 +820,7 @@ end
 function Theme:render_linear_bar(buffers)
   local row, ids = {}, {}
   for _, buffer in ipairs(buffers) do
-    row[#row + 1] = self:render_buffer_tab(buffer)
+    row[#row + 1] = self:render_buffer_tab(buffer, #row == 0)
     ids[#ids + 1] = buffer.id
   end
   return { rows = { row }, ids = { ids } }
@@ -848,11 +883,13 @@ function Theme:render_tabbed_bar(buffers)
   local backend_row, backend_ids = {}, {}
   local buffer_row, buffer_ids = {}, {}
   for _, group in ipairs(groups) do
-    backend_row[#backend_row + 1] = self:render_backend_tab(group)
+    backend_row[#backend_row + 1] =
+      self:render_backend_tab(group, #backend_row == 0)
     backend_ids[#backend_ids + 1] = marker .. group.id
     if group.id == selected then
       for _, buffer in ipairs(group.buffers) do
-        buffer_row[#buffer_row + 1] = self:render_buffer_tab(buffer)
+        buffer_row[#buffer_row + 1] =
+          self:render_buffer_tab(buffer, #buffer_row == 0)
         buffer_ids[#buffer_ids + 1] = buffer.id
       end
     end
