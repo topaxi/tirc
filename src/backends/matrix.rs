@@ -180,8 +180,17 @@ impl ChatBackend for MatrixBackend {
 
         let known_topics_path = store_path.join("known_topics.json");
         let mut known_topics = load_known_topics(&known_topics_path);
+        let history_cursors = HistoryCursors::default();
         for room in joined {
-            populate_room(&room, id, &events, &mut known_topics, &media_dir).await;
+            populate_room(
+                &room,
+                id,
+                &events,
+                &mut known_topics,
+                &media_dir,
+                &history_cursors,
+            )
+            .await;
         }
         save_known_topics(&known_topics_path, &known_topics);
 
@@ -255,7 +264,17 @@ impl ChatBackend for MatrixBackend {
         }
 
         while let Some(command) = commands.recv().await {
-            apply_command(&client, id, &events, &verifications, &reactions, command).await;
+            apply_command(
+                &client,
+                id,
+                &events,
+                &verifications,
+                &reactions,
+                &history_cursors,
+                &media_dir,
+                command,
+            )
+            .await;
         }
 
         sync.abort();
@@ -623,13 +642,23 @@ fn register_handlers(
     );
 }
 
+/// Per-room pagination cursor for older-history fetches: `Some(token)` = the
+/// next page token from the last `room.messages` call, `None` = the start of
+/// the timeline was reached. Absent = never paginated (the next fetch starts
+/// from the newest messages; event-id dedup absorbs the overlap with the
+/// startup backfill).
+type HistoryCursors = Arc<Mutex<HashMap<String, Option<String>>>>;
+
 /// Applies an outgoing command to the Matrix client.
+#[allow(clippy::too_many_arguments)]
 async fn apply_command(
     client: &Client,
     id: BackendId,
     events: &EventSender,
     verifications: &Verifications,
     reactions: &ReactionIndex,
+    history_cursors: &HistoryCursors,
+    media_dir: &Path,
     command: Command,
 ) {
     match command {
@@ -688,6 +717,18 @@ async fn apply_command(
             }
         }
         Command::ListChannels => list_public_rooms(client, id, events).await,
+        Command::FetchHistory { target, limit, .. } => {
+            fetch_history(
+                client,
+                id,
+                events,
+                history_cursors,
+                media_dir,
+                target,
+                limit,
+            )
+            .await;
+        }
         Command::Verify(action) => apply_verify(client, id, events, verifications, action).await,
         Command::React {
             target,
@@ -1152,6 +1193,7 @@ async fn populate_room(
     events: &EventSender,
     known_topics: &mut HashMap<String, String>,
     media_dir: &Path,
+    history_cursors: &HistoryCursors,
 ) {
     let target = room_target(room);
 
@@ -1241,7 +1283,7 @@ async fn populate_room(
         }
     }
 
-    backfill_room(room, id, events, media_dir).await;
+    backfill_room(room, id, events, media_dir, history_cursors).await;
 }
 
 /// Maps a Matrix power level to a member role (100 = admin, 50 = moderator).
@@ -1751,7 +1793,13 @@ async fn message_event_to_chat(
 
 /// Backfills the most recent messages of a room (oldest-first) so freshly-opened
 /// buffers show history instead of being empty until new activity.
-async fn backfill_room(room: &Room, id: BackendId, events: &EventSender, media_dir: &Path) {
+async fn backfill_room(
+    room: &Room,
+    id: BackendId,
+    events: &EventSender,
+    media_dir: &Path,
+    history_cursors: &HistoryCursors,
+) {
     let mut options = MessagesOptions::backward();
     options.limit = 30u32.into();
 
@@ -1759,9 +1807,28 @@ async fn backfill_room(room: &Room, id: BackendId, events: &EventSender, media_d
         return;
     };
 
-    // `chunk` is newest-first; collect translated messages then emit oldest-first.
+    // Seed the pagination cursor so scroll-triggered fetches continue where
+    // this startup page ended instead of re-fetching the newest messages.
+    history_cursors
+        .lock()
+        .await
+        .insert(room.room_id().to_string(), messages.end.clone());
+
+    emit_history_chunk(messages.chunk, room, id, events, media_dir).await;
+}
+
+/// Emits a page of `room.messages` results as chat events. `chunk` is
+/// newest-first; translated messages are emitted oldest-first so `State`'s
+/// sorted insert sees them in natural order.
+async fn emit_history_chunk(
+    chunk: Vec<TimelineEvent>,
+    room: &Room,
+    id: BackendId,
+    events: &EventSender,
+    media_dir: &Path,
+) {
     let mut chats = Vec::new();
-    for timeline_event in messages.chunk {
+    for timeline_event in chunk {
         if let Some(chat) = backfill_event_to_chat(timeline_event, room, media_dir).await {
             chats.push(chat);
         }
@@ -1769,6 +1836,69 @@ async fn backfill_room(room: &Room, id: BackendId, events: &EventSender, media_d
 
     for chat in chats.into_iter().rev() {
         emit(events, id, chat);
+    }
+}
+
+/// Handles [`Command::FetchHistory`]: pages the room's timeline backward from
+/// the stored cursor. Every path answers with [`BackendEvent::HistoryFetched`].
+async fn fetch_history(
+    client: &Client,
+    id: BackendId,
+    events: &EventSender,
+    history_cursors: &HistoryCursors,
+    media_dir: &Path,
+    target: TargetId,
+    limit: u16,
+) {
+    let done = |at_start: bool| BackendMessage {
+        backend: id,
+        event: BackendEvent::HistoryFetched {
+            target: target.clone(),
+            at_start,
+        },
+    };
+
+    let Some(room) = room_by_target(client, &target) else {
+        let _ = events.send(done(false));
+        return;
+    };
+
+    let from = match history_cursors
+        .lock()
+        .await
+        .get(room.room_id().as_str())
+        .cloned()
+    {
+        // Start of the timeline was already reached.
+        Some(None) => {
+            let _ = events.send(done(true));
+            return;
+        }
+        Some(Some(token)) => Some(token),
+        // Never paginated (e.g. the room joined after startup): fetch the
+        // newest page; event-id dedup absorbs any overlap.
+        None => None,
+    };
+
+    let mut options = MessagesOptions::backward();
+    options.from = from;
+    options.limit = u32::from(limit).into();
+
+    match room.messages(options).await {
+        Ok(messages) => {
+            let at_start = messages.end.is_none() || messages.chunk.is_empty();
+            history_cursors
+                .lock()
+                .await
+                .insert(room.room_id().to_string(), messages.end.clone());
+            emit_history_chunk(messages.chunk, &room, id, events, media_dir).await;
+            let _ = events.send(done(at_start));
+        }
+        Err(err) => {
+            // Retryable: keep the buffer non-exhausted so the user can try again.
+            log::warn!("FetchHistory for {} failed: {err}", target.as_str());
+            let _ = events.send(done(false));
+        }
     }
 }
 
