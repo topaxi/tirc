@@ -44,51 +44,6 @@ function M.shell_quote(s)
   return "'" .. s:gsub("'", "'\\''") .. "'"
 end
 
---- Patterns that already produced a warning, so a broken user pattern logs
---- once instead of on every message.
-local warned_patterns = {}
-
---- Whether `text` mentions `nick` (case-insensitive, word-boundary match) or
---- matches one of the extra Lua `patterns`.
----@param text string
----@param nick string
----@param patterns? string[]
----@return boolean
-function M.is_mention(text, nick, patterns)
-  local lower = text:lower()
-
-  if nick ~= '' then
-    -- Pattern-escape the nick, then require word boundaries on both sides via
-    -- frontier patterns so `dan` does not match inside `danger`.
-    local escaped = nick:lower():gsub('%W', '%%%0')
-    if lower:find('%f[%w_]' .. escaped .. '%f[^%w_]') then
-      return true
-    end
-  end
-
-  for _, pattern in ipairs(patterns or {}) do
-    local ok, found = pcall(string.find, lower, pattern)
-    if ok and found then
-      return true
-    end
-    if not ok and not warned_patterns[pattern] then
-      warned_patterns[pattern] = true
-      tirc.log.warn('notify: invalid pattern', pattern, found)
-    end
-  end
-
-  return false
-end
-
---- Whether `event` is a direct message. IRC queries target a nick; channels
---- are `#`/`&`-prefixed and Matrix rooms are `!`-prefixed. Matrix DMs are not
---- detectable (see module comment).
----@param event TircEvent
----@return boolean
-function M.is_dm(event)
-  return event.target:match('^[#&!]') == nil
-end
-
 --- The notification decision, kept pure for testability: all runtime state
 --- arrives via `ctx`.
 ---@param event TircEvent
@@ -118,11 +73,11 @@ function M.should_notify(event, ctx)
     return false
   end
 
-  if opts.dms and M.is_dm(event) then
+  if opts.dms and utils.is_dm(event) then
     return true
   end
 
-  return M.is_mention(event.body.text, nick, opts.patterns)
+  return utils.is_mention(event.body.text, nick, opts.patterns)
 end
 
 --- Default executor: shells out to `notify-send` (or `opts.command`),

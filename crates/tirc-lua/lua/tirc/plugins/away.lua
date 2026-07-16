@@ -21,7 +21,7 @@
 --- of the `away` event.
 
 local tirc = require('tirc')
-local notify = require('tirc.plugins.notify')
+local utils = require('tirc.utils')
 
 --- Options for the away plugin.
 ---@class TircAwayOptions
@@ -82,9 +82,9 @@ function M.should_reply(event, ctx)
     return false
   end
 
-  if not notify.is_dm(event) then
+  if not utils.is_dm(event) then
     if
-      not (opts.reply_to_mentions and notify.is_mention(event.body.text, nick))
+      not (opts.reply_to_mentions and utils.is_mention(event.body.text, nick))
     then
       return false
     end

@@ -193,7 +193,6 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
     let notify_plugin_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
     set_loaded_modules(lua, "tirc.plugins.notify", notify_plugin_module)?;
 
-    // Requires tirc.plugins.notify at load time, so it must come after it.
     let (name, src) = load_builtin("lua/tirc/plugins/away.lua", TIRC_AWAY_PLUGIN_LUA);
     let away_plugin_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
     set_loaded_modules(lua, "tirc.plugins.away", away_plugin_module)?;
