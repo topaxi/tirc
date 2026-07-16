@@ -26,6 +26,7 @@ use crate::ui::{
 
 use super::lua::{to_lua_event, to_lua_user, STYLE_MARKER};
 use super::preview::{extract_urls, LinkPreview, PreviewRequest, PreviewResult};
+use super::tmux::{wrap_passthrough, wrap_passthrough_positioned, PaneOrigin};
 use super::wrap::wrap_line;
 
 /// How the buffer bar scrolls to keep the focused tab visible.
@@ -134,7 +135,58 @@ pub struct DecodeRequest {
 /// decoded/encoded, so the renderer can stop re-requesting it.
 pub struct DecodedImage {
     pub path: PathBuf,
-    pub protocol: Option<Protocol>,
+    pub protocol: Option<EncodedImage>,
+}
+
+/// An encoded image ready to draw.
+pub enum EncodedImage {
+    /// Drawn through ratatui-image's stateless widget as-is. Used outside tmux,
+    /// and for kitty inside tmux (its unicode placeholders are plain text that
+    /// tmux positions correctly in any pane).
+    Widget(Protocol),
+    /// Raw iTerm2/Sixel escape data for tmux, kept unwrapped but with every ESC
+    /// already doubled for passthrough. Wrapped at draw time in a single
+    /// passthrough that moves the outer terminal's cursor to the pane-absolute
+    /// cell first, so the image lands in this pane even while another pane is
+    /// active.
+    TmuxRaw { data_doubled: String, size: Size },
+}
+
+impl EncodedImage {
+    fn size(&self) -> Size {
+        match self {
+            EncodedImage::Widget(protocol) => protocol.size(),
+            EncodedImage::TmuxRaw { size, .. } => *size,
+        }
+    }
+}
+
+/// Writes a raw graphics escape into the buffer the way ratatui-image's
+/// stateless protocols do: the whole sequence lives in the area's first cell
+/// (forced to width 1), and every other cell of the image area is marked skip
+/// so the diff never paints text over the pixels. Skipped when the image does
+/// not fit `rect`, matching the widget's behavior.
+fn draw_raw_image(buf: &mut ratatui::buffer::Buffer, symbol: &str, size: Size, rect: Rect) {
+    if size.width > rect.width || size.height > rect.height || size.width == 0 || size.height == 0 {
+        return;
+    }
+    let area = Rect::new(rect.x, rect.y, size.width, size.height);
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if (x, y) == (area.left(), area.top()) {
+                continue;
+            }
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_diff_option(ratatui::buffer::CellDiffOption::Skip);
+            }
+        }
+    }
+    if let Some(cell) = buf.cell_mut((area.left(), area.top())) {
+        cell.set_symbol(symbol)
+            .set_diff_option(ratatui::buffer::CellDiffOption::ForcedWidth(
+                std::num::NonZeroU16::new(1).expect("1 is non-zero"),
+            ));
+    }
 }
 
 pub struct Renderer {
@@ -157,7 +209,7 @@ pub struct Renderer {
     /// message list fully repaints every frame and its content scrolls, so an
     /// image must be re-placed from scratch each render. Behind a `RefCell`
     /// because rendered messages borrow `&self` while the cache is populated.
-    image_cache: RefCell<HashMap<PathBuf, Protocol>>,
+    image_cache: RefCell<HashMap<PathBuf, EncodedImage>>,
     /// Channel to the background link-preview worker. `None` until wired at
     /// startup (or permanently when link previews are disabled in config).
     preview_tx: Option<UnboundedSender<PreviewRequest>>,
@@ -170,12 +222,16 @@ pub struct Renderer {
     /// re-rendered cheaply each frame. Its thumbnail (`image_path`) flows through
     /// the same `image_cache` pipeline as any other inline image.
     preview_cache: RefCell<HashMap<String, LinkPreview>>,
-    /// Whether the terminal/pane currently has focus. Inline images are re-emitted
-    /// on every repaint, but graphics-protocol escapes (especially under tmux's
-    /// passthrough) leak into whatever pane is active, so image drawing is
-    /// suppressed while unfocused. Assumed focused until a focus event says
-    /// otherwise.
+    /// Whether the terminal/pane currently has focus. Only used as a fallback:
+    /// when the tmux pane origin is unknown, [`EncodedImage::TmuxRaw`] escapes
+    /// would land at the active pane's cursor, so they are suppressed while
+    /// unfocused. Assumed focused until a focus event says otherwise.
     focused: bool,
+    /// Where this pane's top-left cell sits in the outer terminal, when running
+    /// inside tmux with a cursor-positioned graphics protocol (iTerm2/Sixel).
+    /// Refreshed on focus/resize/tick; `None` outside tmux or when the query
+    /// failed.
+    pane_origin: Option<PaneOrigin>,
     /// Whether quick reactions are offered on the selected message. When `false`
     /// the selected-message highlight and pill bar are not drawn. Set from config.
     quick_reactions_enabled: bool,
@@ -372,6 +428,7 @@ impl Renderer {
             preview_failed: RefCell::new(HashSet::new()),
             preview_cache: RefCell::new(HashMap::new()),
             focused: true,
+            pane_origin: None,
             quick_reactions_enabled: true,
             quick_reaction_emojis: Vec::new(),
         }
@@ -451,10 +508,26 @@ impl Renderer {
         });
     }
 
-    /// Records terminal focus. While unfocused, inline images are not drawn so
-    /// their graphics escapes cannot leak into another (active) tmux pane.
+    /// Records terminal focus. Only consulted as a fallback: without a known
+    /// tmux pane origin, [`EncodedImage::TmuxRaw`] escapes are not drawn while
+    /// unfocused so they cannot leak into another (active) tmux pane.
     pub fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
+    }
+
+    /// Records where this pane sits in the outer terminal (or `None` when the
+    /// tmux query failed). Re-queried on focus, resize, and tick events.
+    /// Returns `true` when the origin changed, so the caller can repaint.
+    pub fn set_pane_origin(&mut self, origin: Option<PaneOrigin>) -> bool {
+        let changed = self.pane_origin != origin;
+        self.pane_origin = origin;
+        changed
+    }
+
+    /// Whether any decoded images are cached, i.e. whether keeping the tmux
+    /// pane origin fresh is currently worth a subprocess per tick.
+    pub fn has_cached_images(&self) -> bool {
+        !self.image_cache.borrow().is_empty()
     }
 
     fn get_layout(&self, bar_height: u16) -> Layout {
@@ -653,7 +726,7 @@ impl Renderer {
         if !self.images_enabled || self.failed.borrow().contains(path) {
             return None;
         }
-        if let Some(size) = self.image_cache.borrow().get(path).map(Protocol::size) {
+        if let Some(size) = self.image_cache.borrow().get(path).map(EncodedImage::size) {
             // Growth keeps the smaller size (fine); only a shrink below the fitted
             // size needs a re-encode, which happens off-thread.
             if size.width <= avail.width && size.height <= avail.height {
@@ -1094,15 +1167,32 @@ impl Renderer {
     /// list, each into its reserved rectangle. Runs after the list so the image
     /// protocol's cells overwrite the blank rows.
     fn draw_images(&self, f: &mut ratatui::Frame, draws: Vec<ImageDraw>) {
-        // Suppress graphics while unfocused: a re-emit here would land in the
-        // active tmux pane, not ours.
-        if !self.focused {
-            return;
-        }
         let cache = self.image_cache.borrow();
         for draw in draws {
-            if let Some(protocol) = cache.get(&draw.path) {
-                f.render_widget(Image::new(protocol), draw.rect);
+            match cache.get(&draw.path) {
+                Some(EncodedImage::Widget(protocol)) => {
+                    f.render_widget(Image::new(protocol), draw.rect);
+                }
+                Some(EncodedImage::TmuxRaw { data_doubled, size }) => {
+                    let symbol = match self.pane_origin {
+                        // Position the outer cursor at this pane's absolute
+                        // cell inside the passthrough, so the image lands here
+                        // even while another tmux pane is active. The absolute
+                        // coordinates are part of the cell symbol, so a layout
+                        // change re-emits the image via the normal cell diff.
+                        Some(origin) => wrap_passthrough_positioned(
+                            data_doubled,
+                            origin.row + draw.rect.y,
+                            origin.col + draw.rect.x,
+                        ),
+                        // Origin unknown: the escape draws at the active
+                        // pane's cursor, which is only ours while focused.
+                        None if self.focused => wrap_passthrough(data_doubled),
+                        None => continue,
+                    };
+                    draw_raw_image(f.buffer_mut(), &symbol, *size, draw.rect);
+                }
+                None => {}
             }
         }
     }
@@ -2811,7 +2901,9 @@ mod tests {
     #[test]
     fn link_preview_text_wraps() -> anyhow::Result<(), anyhow::Error> {
         use crate::backends::BackendInfo;
-        use crate::core::{BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef};
+        use crate::core::{
+            BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef,
+        };
         use crate::tui::preview::{LinkPreview, PreviewResult};
         use crate::ui::{State, ViewState};
         use ratatui::{backend::TestBackend, Terminal};
@@ -3151,7 +3243,7 @@ mod tests {
             .expect("encode stub protocol");
         renderer.insert_decoded(DecodedImage {
             path: path.clone(),
-            protocol: Some(protocol),
+            protocol: Some(EncodedImage::Widget(protocol)),
         });
 
         // Second frame: drawn inline, no fallback line, and no further request.

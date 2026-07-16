@@ -21,6 +21,7 @@ use crate::config::ImageProtocol;
 use crate::ui::{State, ViewState};
 
 use super::renderer::Renderer;
+use super::tmux;
 use super::{DecodeRequest, DecodedImage, PreviewRequest, PreviewResult};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -140,10 +141,30 @@ impl Tui {
         self.input.handle_event(event);
     }
 
-    /// Records terminal focus so inline images are only emitted while our pane is
-    /// active (see [`Renderer::set_focused`](super::renderer::Renderer::set_focused)).
+    /// Records terminal focus, used as the image-drawing fallback when the tmux
+    /// pane origin is unknown (see [`Renderer::set_focused`](super::renderer::Renderer::set_focused)).
     pub fn set_focused(&mut self, focused: bool) {
         self.renderer.set_focused(focused);
+    }
+
+    /// Re-queries tmux for this pane's position in the outer terminal and hands
+    /// it to the renderer. Returns `true` when the origin changed, so the
+    /// caller can repaint and re-emit images at their new absolute position.
+    pub fn refresh_pane_origin(&mut self) -> bool {
+        self.renderer.set_pane_origin(tmux::query_pane_origin())
+    }
+
+    /// Whether the renderer currently holds decoded images (used to skip
+    /// pane-origin refreshes and focus repaints when nothing is on screen).
+    pub fn has_cached_images(&self) -> bool {
+        self.renderer.has_cached_images()
+    }
+
+    /// Forces the next frame to repaint every cell. Used when tmux repainted
+    /// the window and wiped passthrough graphics that cell-diffing would
+    /// otherwise never re-emit.
+    pub fn force_redraw(&mut self) {
+        let _ = self.terminal.clear();
     }
 
     /// Configures the quick-reaction affordance from the user config, forwarded to

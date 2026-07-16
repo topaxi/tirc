@@ -15,11 +15,15 @@ use tirc::backends::{self, ChatBackend};
 use tirc::config::{load_config, ServerConfig, TircConfig};
 use tirc::core::{BackendId, BackendMessage, BufferId, Protocol, TxnAllocator};
 use tirc::tui::preview::{build_client, link_preview_worker};
-use tirc::tui::{DecodeRequest, DecodedImage, PreviewRequest, PreviewResult, Tui};
+use tirc::tui::{DecodeRequest, DecodedImage, EncodedImage, PreviewRequest, PreviewResult, Tui};
 use tirc::ui::{Event, InputHandler, State, ViewState};
 
 use ratatui::layout::Size;
-use ratatui_image::{picker::Picker, protocol::Protocol as EncodedImage, Resize};
+use ratatui_image::{
+    picker::{Picker, ProtocolType},
+    protocol::{iterm2::Iterm2, sixel::Sixel},
+    Resize,
+};
 
 const TICK_RATE: Duration = Duration::from_millis(1000);
 
@@ -153,9 +157,28 @@ async fn root_task(
     // unavailable, so media falls back to its textual line.
     let (decode_tx, decode_rx) = tokio::sync::mpsc::unbounded_channel::<DecodeRequest>();
     let (decoded_tx, mut decoded_rx) = tokio::sync::mpsc::unbounded_channel::<DecodedImage>();
+    // In tmux, the cursor-positioned protocols (iTerm2/Sixel) are encoded
+    // unwrapped and positioned absolutely at draw time, so images land in this
+    // pane even while another pane is active. Kitty stays on the widget path:
+    // its unicode placeholders are position-safe under tmux.
+    let tmux_abs_position = tirc::tui::tmux::in_tmux()
+        && picker.as_ref().is_some_and(|picker| {
+            matches!(
+                picker.protocol_type(),
+                ProtocolType::Iterm2 | ProtocolType::Sixel
+            )
+        });
     if let Some(picker) = picker {
         tui.set_decode_sender(decode_tx);
-        tokio::spawn(image_decode_worker(picker, decode_rx, decoded_tx));
+        tokio::spawn(image_decode_worker(
+            picker,
+            tmux_abs_position,
+            decode_rx,
+            decoded_tx,
+        ));
+    }
+    if tmux_abs_position {
+        tui.refresh_pane_origin();
     }
 
     // Link previews follow the same off-loop model as images: the renderer sends
@@ -213,15 +236,31 @@ async fn root_task(
                 Ok(CrosstermEvent::Mouse(mouse)) => Event::Mouse(mouse),
                 Ok(CrosstermEvent::Paste(text)) => Event::Paste(text),
                 Ok(CrosstermEvent::Resize(_, _)) => {
+                    if tmux_abs_position {
+                        input_handler.refresh_pane_origin();
+                    }
                     input_handler.mark_dirty();
                     continue;
                 }
                 Ok(CrosstermEvent::FocusGained) => {
                     input_handler.set_terminal_focus(true);
+                    if tmux_abs_position {
+                        input_handler.refresh_pane_origin();
+                        // tmux may have repainted the window while we were
+                        // unfocused (e.g. after a window switch), wiping the
+                        // passthrough pixels; unchanged cells would never
+                        // re-emit them, so force a full repaint.
+                        if input_handler.has_cached_images() {
+                            input_handler.force_redraw();
+                        }
+                    }
                     continue;
                 }
                 Ok(CrosstermEvent::FocusLost) => {
                     input_handler.set_terminal_focus(false);
+                    if tmux_abs_position {
+                        input_handler.refresh_pane_origin();
+                    }
                     continue;
                 }
                 Err(_) => continue,
@@ -241,6 +280,12 @@ async fn root_task(
                 idle_ticks += 1;
                 if idle_ticks >= RENDER_HEARTBEAT_TICKS {
                     input_handler.mark_dirty();
+                }
+                // Keep the pane origin fresh so layout changes that fire no
+                // event here (e.g. swap-pane) correct themselves within a
+                // tick. Only worth a subprocess while images are on screen.
+                if tmux_abs_position && input_handler.has_cached_images() {
+                    input_handler.refresh_pane_origin();
                 }
                 Event::Tick
             }
@@ -282,6 +327,7 @@ async fn root_task(
 /// cloning it per job is safe.
 async fn image_decode_worker(
     picker: Picker,
+    tmux_abs_position: bool,
     mut requests: tokio::sync::mpsc::UnboundedReceiver<DecodeRequest>,
     decoded: tokio::sync::mpsc::UnboundedSender<DecodedImage>,
 ) {
@@ -289,7 +335,7 @@ async fn image_decode_worker(
         let picker = picker.clone();
         let decoded = decoded.clone();
         tokio::task::spawn_blocking(move || {
-            let protocol = decode_image(&picker, &request.path, request.avail);
+            let protocol = decode_image(&picker, tmux_abs_position, &request.path, request.avail);
             let _ = decoded.send(DecodedImage {
                 path: request.path,
                 protocol,
@@ -300,14 +346,41 @@ async fn image_decode_worker(
 
 /// Opens, decodes, and encodes one image fitted to `avail`. Returns `None` on any
 /// failure so the caller records the path as unrenderable rather than retrying it.
-fn decode_image(picker: &Picker, path: &std::path::Path, avail: Size) -> Option<EncodedImage> {
+///
+/// With `tmux_abs_position`, the protocol is encoded *without* ratatui-image's
+/// passthrough wrapping (and with its escapes pre-doubled): the renderer wraps
+/// it per frame in a passthrough that positions the outer terminal's cursor at
+/// the pane-absolute cell, which is what keeps images inside this pane while
+/// another tmux pane is active.
+fn decode_image(
+    picker: &Picker,
+    tmux_abs_position: bool,
+    path: &std::path::Path,
+    avail: Size,
+) -> Option<EncodedImage> {
     let image = image::ImageReader::open(path)
         .ok()?
         .with_guessed_format()
         .ok()?
         .decode()
         .ok()?;
-    picker.new_protocol(image, avail, Resize::Fit(None)).ok()
+    if !tmux_abs_position {
+        return picker
+            .new_protocol(image, avail, Resize::Fit(None))
+            .ok()
+            .map(EncodedImage::Widget);
+    }
+    let resize = Resize::Fit(None);
+    let size = resize.size_for(&image, picker.font_size(), avail);
+    let resized = resize.resize(&image, picker.font_size(), size, None);
+    let data = match picker.protocol_type() {
+        ProtocolType::Sixel => Sixel::new(resized, size, false).ok()?.data,
+        _ => Iterm2::new(resized, size, false).ok()?.data,
+    };
+    Some(EncodedImage::TmuxRaw {
+        data_doubled: data.replace('\x1b', "\x1b\x1b"),
+        size,
+    })
 }
 
 /// Resolves when the process receives a termination signal, so the main loop

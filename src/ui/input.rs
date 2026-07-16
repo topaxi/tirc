@@ -119,10 +119,30 @@ impl<'lua> InputHandler<'lua> {
         self.dirty = true;
     }
 
-    /// Records terminal focus (drives whether inline images are emitted) and
-    /// requests a repaint so the change takes effect.
+    /// Records terminal focus (the fallback gate for tmux image drawing when
+    /// the pane origin is unknown) and requests a repaint.
     pub fn set_terminal_focus(&mut self, focused: bool) {
         self.ui.set_focused(focused);
+        self.dirty = true;
+    }
+
+    /// Re-queries the tmux pane origin; repaints when it changed so images
+    /// re-emit at their new absolute position.
+    pub fn refresh_pane_origin(&mut self) {
+        if self.ui.refresh_pane_origin() {
+            self.dirty = true;
+        }
+    }
+
+    /// Whether decoded images are currently cached in the renderer.
+    pub fn has_cached_images(&self) -> bool {
+        self.ui.has_cached_images()
+    }
+
+    /// Forces the next frame to repaint every cell (restores graphics wiped by
+    /// a tmux window repaint) and requests that repaint.
+    pub fn force_redraw(&mut self) {
+        self.ui.force_redraw();
         self.dirty = true;
     }
 
