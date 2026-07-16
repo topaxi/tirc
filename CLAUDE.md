@@ -75,11 +75,16 @@ place rather than appending a duplicate.
 
 ### Input handling (`crates/tirc/src/input.rs`)
 `InputHandler` owns the `Tui`, the backend handles, and a `&Lua`. `handle_event`
-dispatches by `(Mode, Event)`. Command mode (`:`) parses slash-style commands by
-`splitn`-matching the input as a `Box<[&str]>` slice pattern (`m`/`msg`, `me`, `notice`,
-`j`/`join`, `q`/`quit`, `nick`, `whois`, `list`, ...). The accepted command set must stay
-in sync with `COMMAND_NAMES` in `crates/tirc-ui/src/completion.rs`, which feeds command
-completion. Incoming events fire the Lua `"event"` callback before being pushed to state.
+dispatches by `(Mode, Event)`. Command mode (`:`) resolves the typed name vim-style
+through the declarative registry in `crates/tirc-ui/src/commands.rs` (exact canonical
+name or alias first, then unique prefix; ambiguous or unknown names report an error) and
+dispatches on the matched spec's `BuiltinCmd` - adding a `CommandSpec` without a handler
+arm is a compile error. The same registry feeds command-name and per-argument completion
+(`ArgKind`: channels, nicks, buffer labels, fixed choices, bar styles). Lua user commands
+registered via `tirc.create_command(name, fn, { nargs=, complete=, desc= })` participate
+in resolution and completion; builtins shadow them on exact match. Executed `:` lines are
+recalled with Up/Down (a second `History` next to the Insert-mode one). Incoming events
+fire the Lua `"event"` callback before being pushed to state.
 
 ### Lua integration (`crates/tirc-lua`, `crates/tirc-config`)
 - `builtins::register_builtin_modules` registers the native `_tirc` runtime module and
@@ -114,6 +119,9 @@ builds a style on the Lua side (`tirc_lua::theme::create_tirc_theme_lua_module`)
 
 - The `runtime::EventName` enum and the matching `emit_event` call sites must stay in
   sync when adding events.
+- New `:` commands are one `CommandSpec` entry in `BUILTIN_COMMANDS`
+  (`crates/tirc-ui/src/commands.rs`) plus a `BuiltinCmd` handler arm in
+  `InputHandler::handle_command`; name/argument completion derives from the spec.
 - When changing message-routing or formatting behavior, add/extend the Rust unit tests
   that drive normalized events through `State`/the theme rather than testing manually.
 - New shared dependencies go into `[workspace.dependencies]` in the root `Cargo.toml`;
