@@ -9,11 +9,11 @@ use std::time::{Duration, Instant};
 
 use futures::prelude::*;
 use irc::client::prelude::{Capability, Client, Config};
-use irc::proto::{message::Tag, Command as IrcCommand, Message, Prefix, Response};
+use irc::proto::{message::Tag, CapSubCommand, Command as IrcCommand, Message, Prefix, Response};
 
 use crate::core::{
-    BackendEvent, BackendId, BackendMessage, ChatEvent, Command, MemberRole, MembershipChange,
-    MessageBody, MsgKind, Protocol, TargetId, TxnId, UserRef,
+    BackendEvent, BackendId, BackendMessage, ChatEvent, Command, EventId, MemberRole,
+    MembershipChange, MessageBody, MsgKind, Protocol, TargetId, TxnId, UserRef,
 };
 
 use super::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
@@ -101,6 +101,10 @@ impl IrcBackend {
             Capability::Batch,
             Capability::Custom("labeled-response"),
         ])?;
+        // Requested separately: one send_cap_req becomes a single CAP REQ, which
+        // servers ACK/NAK atomically, so a server without chathistory must not
+        // be able to reject the whole main bundle.
+        client.send_cap_req(&[Capability::Custom("draft/chathistory")])?;
         client.identify()?;
 
         let emit = |event: ChatEvent| {
@@ -115,6 +119,13 @@ impl IrcBackend {
         ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut pending_pings: HashMap<String, Instant> = HashMap::new();
         let mut ping_seq: u64 = 0;
+        // History-fetch state: whether the server ACKed draft/chathistory, the
+        // target of the (single) in-flight CHATHISTORY request, and the open
+        // reply batches. One in-flight fetch per connection matches the UI,
+        // which only fetches for the focused buffer.
+        let mut chathistory_supported = false;
+        let mut pending_fetch: Option<TargetId> = None;
+        let mut history_batches = HistoryBatches::default();
 
         loop {
             tokio::select! {
@@ -151,7 +162,36 @@ impl IrcBackend {
                         }
                     }
 
-                    for event in translate(&message, &nickname) {
+                    chathistory_supported |= cap_ack_includes(&message, "draft/chathistory");
+
+                    // A closed chathistory batch answers the in-flight fetch.
+                    // The batched messages themselves flow through `translate`
+                    // below like any live line (server-time sorts them, msgid
+                    // dedups them); only the close frame needs special handling.
+                    if let Some((target, at_start)) = history_batches.observe(&message) {
+                        pending_fetch = None;
+                        let _ = events.send(BackendMessage {
+                            backend: id,
+                            event: BackendEvent::HistoryFetched { target, at_start },
+                        });
+                    }
+
+                    // FAIL CHATHISTORY: answer the fetch as retryable; the raw
+                    // line still surfaces as a status-buffer info line below.
+                    if let IrcCommand::Raw(command, args) = &message.command {
+                        if command == "FAIL" && args.first().is_some_and(|s| s == "CHATHISTORY") {
+                            if let Some(target) = pending_fetch.take() {
+                                let _ = events.send(BackendMessage {
+                                    backend: id,
+                                    event: BackendEvent::HistoryFetched { target, at_start: false },
+                                });
+                            }
+                        }
+                    }
+
+                    let translated = translate(&message, &nickname);
+                    history_batches.track(&message, translated.len());
+                    for event in translated {
                         emit(event);
                     }
                 }
@@ -179,6 +219,19 @@ impl IrcBackend {
                                 }
                             }
                             return Ok(ready_received);
+                        }
+                        Some(Command::FetchHistory { target, before, limit, .. }) => {
+                            if chathistory_supported {
+                                pending_fetch = Some(target.clone());
+                                client.send(chathistory_command(&target, before, limit))?;
+                            } else {
+                                // No cap: answer immediately as exhausted so the
+                                // UI never asks this buffer again.
+                                let _ = events.send(BackendMessage {
+                                    backend: id,
+                                    event: BackendEvent::HistoryFetched { target, at_start: true },
+                                });
+                            }
                         }
                         Some(command) => {
                             apply_command(&client, &nickname_of(&client), command, &emit)?;
@@ -343,8 +396,9 @@ fn apply_command(
         Command::Invite { user, target } => client.send(IrcCommand::INVITE(user, target.0))?,
         Command::Away { message } => client.send(IrcCommand::AWAY(message))?,
         Command::ListChannels => client.send(IrcCommand::LIST(None, None))?,
-        // Quit is handled before apply_command is called (in connect_once).
-        Command::Quit { .. } => {}
+        // Quit and FetchHistory are handled before apply_command is called (in
+        // connect_once): both need connection-loop state.
+        Command::Quit { .. } | Command::FetchHistory { .. } => {}
         // IRC has no native reactions, message deletion, or device verification.
         Command::React { .. } | Command::Redact { .. } | Command::Verify(_) => {}
     }
@@ -352,28 +406,118 @@ fn apply_command(
     Ok(())
 }
 
+/// The value of a message tag, if present.
+fn tag_value<'a>(message: &'a Message, name: &str) -> Option<&'a str> {
+    message
+        .tags
+        .as_ref()?
+        .iter()
+        .find(|tag| tag.0 == name)?
+        .1
+        .as_deref()
+}
+
+/// True when this is a `CAP ... ACK` acknowledging `cap`. The acked caps land
+/// in either trailing slot depending on how many arguments the line had.
+fn cap_ack_includes(message: &Message, cap: &str) -> bool {
+    match &message.command {
+        IrcCommand::CAP(_, CapSubCommand::ACK, a, b) => a
+            .iter()
+            .chain(b.iter())
+            .flat_map(|s| s.split_whitespace())
+            .any(|c| c == cap),
+        _ => false,
+    }
+}
+
+/// The `CHATHISTORY` request for a page of messages older than `before`, or the
+/// latest page when the buffer has no oldest timestamp yet. Sent as a raw
+/// command - the irc crate has no CHATHISTORY variant.
+fn chathistory_command(
+    target: &TargetId,
+    before: Option<chrono::DateTime<chrono::Utc>>,
+    limit: u16,
+) -> IrcCommand {
+    match before {
+        Some(ts) => IrcCommand::Raw(
+            "CHATHISTORY".to_string(),
+            vec![
+                "BEFORE".to_string(),
+                target.0.clone(),
+                format!(
+                    "timestamp={}",
+                    ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                ),
+                limit.to_string(),
+            ],
+        ),
+        None => IrcCommand::Raw(
+            "CHATHISTORY".to_string(),
+            vec![
+                "LATEST".to_string(),
+                target.0.clone(),
+                "*".to_string(),
+                limit.to_string(),
+            ],
+        ),
+    }
+}
+
+/// Tracks open `chathistory` reply batches so the close frame can answer the
+/// pending FetchHistory: batch reference -> (target, messages seen inside).
+#[derive(Default)]
+struct HistoryBatches(HashMap<String, (TargetId, usize)>);
+
+impl HistoryBatches {
+    /// Records batch opens and closes. Returns `Some((target, at_start))` when
+    /// a chathistory batch closed; `at_start` means the batch was empty, i.e.
+    /// the server had nothing older to play back.
+    fn observe(&mut self, message: &Message) -> Option<(TargetId, bool)> {
+        let IrcCommand::BATCH(reference, sub, params) = &message.command else {
+            return None;
+        };
+        if let Some(reference) = reference.strip_prefix('+') {
+            let is_chathistory =
+                matches!(sub, Some(s) if s.to_str().eq_ignore_ascii_case("chathistory"));
+            if let (true, Some(target)) = (is_chathistory, params.iter().flatten().next()) {
+                self.0
+                    .insert(reference.to_string(), (TargetId(target.clone()), 0));
+            }
+            None
+        } else {
+            let reference = reference.strip_prefix('-')?;
+            self.0
+                .remove(reference)
+                .map(|(target, count)| (target, count == 0))
+        }
+    }
+
+    /// Counts translated events that arrived inside an open chathistory batch
+    /// (messages inside a batch carry a `batch=<reference>` tag).
+    fn track(&mut self, message: &Message, translated: usize) {
+        if let Some(reference) = tag_value(message, "batch") {
+            if let Some((_, count)) = self.0.get_mut(reference) {
+                *count += translated;
+            }
+        }
+    }
+}
+
 /// Strips a leading IRC `label` tag value, parsed as a [`TxnId`], for local-echo
 /// correlation.
 fn label_txn(message: &Message) -> Option<TxnId> {
-    message.tags.as_ref()?.iter().find_map(|tag| {
-        if tag.0 == "label" {
-            tag.1.as_ref()?.parse::<u64>().ok().map(TxnId)
-        } else {
-            None
-        }
-    })
+    tag_value(message, "label")?.parse::<u64>().ok().map(TxnId)
+}
+
+/// Extracts the IRCv3 `msgid` tag as an [`EventId`], enabling event-id dedup
+/// when the same message arrives from both history playback and live delivery.
+fn msgid(message: &Message) -> Option<EventId> {
+    tag_value(message, "msgid").map(|id| EventId(id.to_string()))
 }
 
 /// Extracts the IRCv3 `server-time` tag (`@time=...`, RFC3339) as a UTC instant.
 fn server_time(message: &Message) -> Option<chrono::DateTime<chrono::Utc>> {
-    let value = message
-        .tags
-        .as_ref()?
-        .iter()
-        .find(|tag| tag.0 == "time")?
-        .1
-        .as_ref()?;
-    chrono::DateTime::parse_from_rfc3339(value)
+    chrono::DateTime::parse_from_rfc3339(tag_value(message, "time")?)
         .ok()
         .map(|dt| dt.with_timezone(&chrono::Utc))
 }
@@ -528,7 +672,7 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
 
             Some(ChatEvent::Message {
                 target: target_id,
-                id: None,
+                id: msgid(message),
                 sender: UserRef::new(source.unwrap_or(nickname).to_string()),
                 body: MessageBody::plain(body),
                 kind,
@@ -544,7 +688,7 @@ fn translate_one(message: &Message, nickname: &str) -> Option<ChatEvent> {
             match source {
                 Some(source) => Some(ChatEvent::Message {
                     target: target_id,
-                    id: None,
+                    id: msgid(message),
                     sender: UserRef::new(source.to_string()),
                     body: MessageBody::plain(text.clone()),
                     kind: MsgKind::Notice,
@@ -878,6 +1022,81 @@ mod tests {
             }
             other => panic!("expected kick membership, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn msgid_tag_becomes_event_id() {
+        let event = translate_raw("me", "@msgid=abc :alice!u@h PRIVMSG #tirc :hi").unwrap();
+        match event {
+            ChatEvent::Message { id, .. } => assert_eq!(id, Some(EventId("abc".to_string()))),
+            other => panic!("expected message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cap_ack_detects_chathistory() {
+        assert!(cap_ack_includes(
+            &parse(":irc.example.com CAP me ACK :sasl draft/chathistory server-time"),
+            "draft/chathistory",
+        ));
+        assert!(!cap_ack_includes(
+            &parse(":irc.example.com CAP me NAK :draft/chathistory"),
+            "draft/chathistory",
+        ));
+        assert!(!cap_ack_includes(
+            &parse(":irc.example.com CAP me ACK :sasl server-time"),
+            "draft/chathistory",
+        ));
+    }
+
+    #[test]
+    fn chathistory_command_formats_before_and_latest() {
+        let ts = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let before = chathistory_command(&TargetId::from("#tirc"), Some(ts), 50);
+        assert_eq!(
+            String::from(&before).trim_end(),
+            "CHATHISTORY BEFORE #tirc timestamp=2023-11-14T22:13:20.000Z 50"
+        );
+
+        let latest = chathistory_command(&TargetId::from("#tirc"), None, 50);
+        assert_eq!(
+            String::from(&latest).trim_end(),
+            "CHATHISTORY LATEST #tirc * 50"
+        );
+    }
+
+    #[test]
+    fn history_batches_report_close_and_emptiness() {
+        let mut batches = HistoryBatches::default();
+
+        // A non-empty chathistory batch closes as not-at-start.
+        assert_eq!(
+            batches.observe(&parse(":srv BATCH +ref chathistory #tirc")),
+            None
+        );
+        for raw in [
+            "@batch=ref;msgid=a :alice!u@h PRIVMSG #tirc :one",
+            "@batch=ref;msgid=b :alice!u@h PRIVMSG #tirc :two",
+        ] {
+            let message = parse(raw);
+            let translated = translate(&message, "me").len();
+            batches.track(&message, translated);
+        }
+        assert_eq!(
+            batches.observe(&parse(":srv BATCH -ref")),
+            Some((TargetId::from("#tirc"), false))
+        );
+
+        // An empty batch means the start of history was reached.
+        batches.observe(&parse(":srv BATCH +r2 chathistory #tirc"));
+        assert_eq!(
+            batches.observe(&parse(":srv BATCH -r2")),
+            Some((TargetId::from("#tirc"), true))
+        );
+
+        // Non-chathistory batches are ignored.
+        batches.observe(&parse(":srv BATCH +r3 netsplit srv1 srv2"));
+        assert_eq!(batches.observe(&parse(":srv BATCH -r3")), None);
     }
 
     #[test]

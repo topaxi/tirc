@@ -501,6 +501,13 @@ pub enum BackendEvent {
     Latency {
         ms: u64,
     },
+    /// Answer to [`Command::FetchHistory`]: the fetch finished (successfully or
+    /// not). `at_start` is true when no more history exists for `target` (or
+    /// the backend/server cannot provide any), so the UI stops asking.
+    HistoryFetched {
+        target: TargetId,
+        at_start: bool,
+    },
     Event(ChatEvent),
 }
 
@@ -563,6 +570,21 @@ pub enum Command {
         message: Option<String>,
     },
     ListChannels,
+    /// Fetch a page of older messages for `target`. The UI supplies cursor
+    /// hints from its oldest stored message; each backend uses what its
+    /// protocol needs (IRC: `before` timestamp, Mattermost: `before_id`,
+    /// Matrix: its own per-room pagination token). Every handling path must
+    /// answer with [`BackendEvent::HistoryFetched`], even on error or lack of
+    /// support, so the UI's in-flight marker always clears.
+    FetchHistory {
+        target: TargetId,
+        /// Timestamp of the oldest stored message; `None` for an empty buffer
+        /// (backends then fetch the latest page).
+        before: Option<DateTime<Utc>>,
+        /// Event id of the oldest stored message that has one.
+        before_id: Option<EventId>,
+        limit: u16,
+    },
     /// Drives interactive device verification (Matrix SAS). IRC has no analogue
     /// and ignores it.
     Verify(VerifyAction),

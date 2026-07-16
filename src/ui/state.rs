@@ -105,6 +105,19 @@ impl StoredMessage {
     }
 }
 
+/// Older-history fetch state of a buffer, driving the scroll-to-top backfill.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HistoryState {
+    /// No fetch in flight; more history may exist.
+    #[default]
+    Idle,
+    /// A FetchHistory command is in flight; suppresses re-triggering and
+    /// unread indicators for the arriving backfill.
+    Fetching,
+    /// The backend reported the start of history; never ask again.
+    Exhausted,
+}
+
 #[derive(Debug)]
 pub struct ChatBuffer {
     pub messages: Vec<StoredMessage>,
@@ -127,6 +140,8 @@ pub struct ChatBuffer {
     /// viewing this buffer. Messages newer than this marker are shown below a
     /// visual "new messages" separator in the message list.
     pub read_marker: Option<DateTime<Local>>,
+    /// Older-history fetch state, driving the scroll-to-top backfill.
+    pub history: HistoryState,
 }
 
 impl Default for ChatBuffer {
@@ -144,6 +159,7 @@ impl Default for ChatBuffer {
             has_unread: false,
             has_mention: false,
             read_marker: None,
+            history: HistoryState::default(),
         }
     }
 }
@@ -163,6 +179,20 @@ impl ChatBuffer {
     pub fn scroll_up(&mut self, lines: usize) {
         let max = self.messages.len().saturating_sub(1);
         self.scroll_position = self.scroll_position.saturating_add(lines).min(max);
+    }
+
+    /// True when the view is within one viewport of the oldest loaded message
+    /// and no fetch is in flight or known-futile, i.e. scrolling up should
+    /// backfill older history.
+    pub fn wants_history_fetch(&self, viewport_height: usize) -> bool {
+        self.history == HistoryState::Idle
+            && self.scroll_position + viewport_height.max(1) >= self.messages.len()
+    }
+
+    /// The event id of the oldest stored message that has one, used as the
+    /// pagination cursor by backends that page by message id (Mattermost).
+    pub fn oldest_event_id(&self) -> Option<&EventId> {
+        self.messages.iter().find_map(|m| m.event_id())
     }
 
     /// Scroll toward newer messages. Clamps at 0 (the tail).
@@ -352,6 +382,29 @@ impl State {
         }
     }
 
+    /// Records the outcome of a history fetch: the buffer either reached the
+    /// start of history (never ask again) or is ready for another page.
+    pub fn finish_history_fetch(&mut self, backend: BackendId, target: TargetId, at_start: bool) {
+        if let Some(buffer) = self.buffers.get_mut(&BufferId::new(backend, target)) {
+            buffer.history = if at_start {
+                HistoryState::Exhausted
+            } else {
+                HistoryState::Idle
+            };
+        }
+    }
+
+    /// Clears in-flight fetch markers for `backend`'s buffers. Called on
+    /// Disconnected/Error so a fetch lost to a dropped connection cannot leave
+    /// a buffer stuck in `Fetching` forever (its completion event never comes).
+    pub fn reset_history_fetches(&mut self, backend: BackendId) {
+        for (id, buffer) in self.buffers.iter_mut() {
+            if id.backend == backend && buffer.history == HistoryState::Fetching {
+                buffer.history = HistoryState::Idle;
+            }
+        }
+    }
+
     pub fn set_connection_status(&mut self, backend: BackendId, status: ConnectionStatus) {
         if let Some(state) = self.backends.get_mut(&backend) {
             state.connection_status = status;
@@ -535,10 +588,20 @@ impl State {
         // Set activity flags for real incoming live messages from others.
         // - synced: false means we are still delivering initial history (Matrix backfill),
         //   so skip - history should not trigger unread/mention indicators
+        // - history == Fetching: a scroll-triggered backfill is in flight; its
+        //   messages arrive before the HistoryFetched completion event (channel
+        //   FIFO), so they are all suppressed. A live message landing in that
+        //   short window is suppressed too - acceptable, the window is one
+        //   round trip.
         // - pending: own optimistic echo, skip
         // - echo_of.is_some(): confirmed own echo not matched above (rare fallthrough), skip
         // - sender_id == own_nick: server reflection of own message, skip
-        if is_synced && !pending && echo_of.is_none() && sender_id != own_nick {
+        if is_synced
+            && buffer.history != HistoryState::Fetching
+            && !pending
+            && echo_of.is_none()
+            && sender_id != own_nick
+        {
             buffer.has_unread = true;
             if !own_nick.is_empty() {
                 let lower_body = body_text.to_lowercase();
@@ -1458,6 +1521,129 @@ mod tests {
         assert_eq!(buf.scroll_position, 0);
         buf.scroll_to_top(10);
         assert_eq!(buf.scroll_position, 0);
+    }
+
+    #[test]
+    fn wants_history_fetch_predicate() {
+        let mut buf = buffer_with_messages(20);
+
+        // Far from the top: no fetch.
+        assert!(!buf.wants_history_fetch(10));
+        // Within one viewport of the oldest message: fetch.
+        buf.scroll_position = 10;
+        assert!(buf.wants_history_fetch(10));
+        // In flight or exhausted: never re-ask.
+        buf.history = HistoryState::Fetching;
+        assert!(!buf.wants_history_fetch(10));
+        buf.history = HistoryState::Exhausted;
+        assert!(!buf.wants_history_fetch(10));
+
+        // An empty buffer wants its first page.
+        assert!(ChatBuffer::default().wants_history_fetch(10));
+    }
+
+    #[test]
+    fn fetching_history_suppresses_unread_and_mention() {
+        let mut state = test_state();
+        // Buffer created pre-sync so its flags start clear.
+        state.apply(backend(), message("#tirc", "alice", None));
+        state.set_synced(backend());
+        state
+            .buffers
+            .get_mut(&BufferId::new(backend(), "#tirc"))
+            .unwrap()
+            .history = HistoryState::Fetching;
+
+        // Backfill arriving while a fetch is in flight ("me" mentions our nick).
+        state.apply(
+            backend(),
+            ChatEvent::Message {
+                target: TargetId::from("#tirc"),
+                id: None,
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain("hey me, look"),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+        assert!(!buffer(&state, "#tirc").has_unread);
+        assert!(!buffer(&state, "#tirc").has_mention);
+
+        // After the fetch completes, live messages flag activity again.
+        state.finish_history_fetch(backend(), TargetId::from("#tirc"), false);
+        state.apply(
+            backend(),
+            ChatEvent::Message {
+                target: TargetId::from("#tirc"),
+                id: None,
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain("hey me, again"),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+        assert!(buffer(&state, "#tirc").has_unread);
+        assert!(buffer(&state, "#tirc").has_mention);
+    }
+
+    #[test]
+    fn finish_history_fetch_transitions_state() {
+        let mut state = test_state();
+        state.apply(backend(), message("#tirc", "alice", None));
+
+        state.finish_history_fetch(backend(), TargetId::from("#tirc"), false);
+        assert_eq!(buffer(&state, "#tirc").history, HistoryState::Idle);
+
+        state.finish_history_fetch(backend(), TargetId::from("#tirc"), true);
+        assert_eq!(buffer(&state, "#tirc").history, HistoryState::Exhausted);
+
+        // Unknown buffer: no-op, no panic.
+        state.finish_history_fetch(backend(), TargetId::from("#nope"), true);
+    }
+
+    #[test]
+    fn reset_history_fetches_clears_only_fetching() {
+        let mut state = test_state();
+        state.register_backend(BackendInfo {
+            id: BackendId(1),
+            protocol: Protocol::Irc,
+            name: "other".to_string(),
+        });
+        state.apply(backend(), message("#a", "alice", None));
+        state.apply(backend(), message("#b", "alice", None));
+        state.apply(BackendId(1), message("#a", "alice", None));
+
+        state
+            .buffers
+            .get_mut(&BufferId::new(backend(), "#a"))
+            .unwrap()
+            .history = HistoryState::Fetching;
+        state
+            .buffers
+            .get_mut(&BufferId::new(backend(), "#b"))
+            .unwrap()
+            .history = HistoryState::Exhausted;
+        state
+            .buffers
+            .get_mut(&BufferId::new(BackendId(1), "#a"))
+            .unwrap()
+            .history = HistoryState::Fetching;
+
+        state.reset_history_fetches(backend());
+
+        assert_eq!(buffer(&state, "#a").history, HistoryState::Idle);
+        assert_eq!(buffer(&state, "#b").history, HistoryState::Exhausted);
+        assert_eq!(
+            state
+                .buffers
+                .get(&BufferId::new(BackendId(1), "#a"))
+                .unwrap()
+                .history,
+            HistoryState::Fetching,
+            "other backend untouched"
+        );
     }
 
     fn timed_message(target: &str, sender: &str, event_id: &str, ts: i64) -> ChatEvent {

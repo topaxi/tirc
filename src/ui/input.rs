@@ -21,8 +21,11 @@ use crate::tui::lua::{create_lua_sender, to_lua_event};
 use crate::tui::{DecodedImage, PreviewResult, Tui};
 use crate::ui::ConnectionStatus;
 
-use super::state::StoredMessage;
+use super::state::{HistoryState, StoredMessage};
 use super::{MenuAction, MenuItem, MenuTarget, Mode, Selection, State, ViewState};
+
+/// Page size of a scroll-triggered history fetch.
+const HISTORY_FETCH_LIMIT: u16 = 50;
 
 /// Events the main loop feeds to the input handler.
 #[derive(Debug)]
@@ -287,9 +290,7 @@ impl<'lua> InputHandler<'lua> {
         let delta = 3usize;
         match event.kind {
             MouseEventKind::ScrollUp => {
-                if let Some(buffer) = state.focused_buffer_mut(view) {
-                    buffer.scroll_up(delta);
-                }
+                self.scroll_up(state, view, delta);
                 true
             }
             MouseEventKind::ScrollDown => {
@@ -1124,6 +1125,48 @@ impl<'lua> InputHandler<'lua> {
         if let Some(buffer) = state.focused_buffer_mut(view) {
             buffer.scroll_up(lines);
         }
+        self.maybe_fetch_history(state, view);
+    }
+
+    /// Sends [`Command::FetchHistory`] for the focused buffer when the user has
+    /// scrolled to within a viewport of the oldest loaded message. One fetch in
+    /// flight per buffer ([`HistoryState::Fetching`]); exhausted buffers are
+    /// never re-asked.
+    fn maybe_fetch_history(&self, state: &mut State, view: &ViewState) {
+        let Some(focused) = view.focused.clone() else {
+            return;
+        };
+        // Only after initial sync and while connected: during initial backfill
+        // the buffer is still filling, and a disconnected backend drops
+        // commands, so the completion event would never arrive.
+        let ready = state
+            .backends
+            .get(&focused.backend)
+            .is_some_and(|b| b.synced && b.connection_status == ConnectionStatus::Connected);
+        if !ready {
+            return;
+        }
+        let Some(buffer) = state.buffers.get_mut(&focused) else {
+            return;
+        };
+        if !buffer.wants_history_fetch(view.viewport_height as usize) {
+            return;
+        }
+        let before = buffer
+            .messages
+            .first()
+            .map(|m| m.time.with_timezone(&chrono::Utc));
+        let before_id = buffer.oldest_event_id().cloned();
+        buffer.history = HistoryState::Fetching;
+        self.send_to(
+            Some(focused.backend),
+            Command::FetchHistory {
+                target: focused.target,
+                before,
+                before_id,
+                limit: HISTORY_FETCH_LIMIT,
+            },
+        );
     }
 
     fn scroll_down(&self, state: &mut State, view: &ViewState, lines: usize) {
@@ -1209,6 +1252,7 @@ impl<'lua> InputHandler<'lua> {
                 if let Some(buffer) = state.focused_buffer_mut(view) {
                     buffer.scroll_to_top(view.viewport_height as usize);
                 }
+                self.maybe_fetch_history(state, view);
             }
             (Mode::Normal, KeyCode::End) => {
                 if let Some(buffer) = state.focused_buffer_mut(view) {
@@ -1314,27 +1358,40 @@ impl<'lua> InputHandler<'lua> {
                 state.apply(backend, server_info(text));
                 state.set_connection_status(backend, ConnectionStatus::Disconnected);
                 state.set_latency(backend, None);
+                state.reset_history_fetches(backend);
             }
             BackendEvent::Error { message } => {
                 state.apply(backend, server_info(format!("Error: {message}")));
                 state.set_connection_status(backend, ConnectionStatus::Disconnected);
                 state.set_latency(backend, None);
+                state.reset_history_fetches(backend);
             }
             BackendEvent::Latency { ms } => {
                 state.set_latency(backend, Some(ms));
                 state.set_connection_status(backend, ConnectionStatus::Connected);
             }
+            BackendEvent::HistoryFetched { target, at_start } => {
+                state.finish_history_fetch(backend, target, at_start);
+            }
             BackendEvent::Event(event) => {
                 self.emit_lua_event(state, backend, &event);
                 // Anchor the view: if the user has scrolled up in the focused
                 // buffer, advance scroll_position so that the same messages
-                // stay visible when a new one is appended at the tail.
-                let before = state
-                    .focused_buffer_mut(view)
-                    .map(|b| (b.messages.len(), b.scroll_position));
+                // stay visible when a new one is appended at the tail. Skipped
+                // while a history fetch is in flight: backfill inserts above
+                // the viewport, and `scroll_position` counts from the newest
+                // message, so head inserts leave it correct as-is - bumping
+                // would jump the view toward older messages.
+                let before = state.focused_buffer_mut(view).map(|b| {
+                    (
+                        b.messages.len(),
+                        b.scroll_position,
+                        b.history == HistoryState::Fetching,
+                    )
+                });
                 state.apply(backend, event);
-                if let Some((len_before, pos)) = before {
-                    if pos > 0 {
+                if let Some((len_before, pos, fetching)) = before {
+                    if pos > 0 && !fetching {
                         if let Some(buffer) = state.focused_buffer_mut(view) {
                             if buffer.messages.len() > len_before {
                                 buffer.scroll_position = pos + (buffer.messages.len() - len_before);
