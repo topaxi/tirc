@@ -55,6 +55,9 @@ pub struct InputHandler<'lua> {
     /// Files being polled for mtime changes; rebuilt after each reload.
     watched_files: Vec<(PathBuf, SystemTime)>,
     history: History,
+    /// Executed `:` command lines, recalled with Up/Down in Command mode -
+    /// vim's cmdline history, separate from the Insert-mode message history.
+    command_history: History,
     /// Set when something that affects the rendered frame changed; the main
     /// loop renders only when this is set, so idle ticks and mouse moves do not
     /// trigger a repaint.
@@ -123,6 +126,7 @@ impl<'lua> InputHandler<'lua> {
             extra_watch_files,
             watched_files,
             history: History::default(),
+            command_history: History::default(),
             dirty: true,
             dragging_split: false,
             selecting: false,
@@ -1189,6 +1193,9 @@ impl<'lua> InputHandler<'lua> {
         if line.is_empty() {
             return Ok(true);
         }
+        // Recorded before execution - like vim, failed commands stay
+        // recallable for fixing up.
+        self.command_history.push(line.clone());
 
         let (name, rest) = commands::split_line(&line);
         let lua_names = tirc_lua::runtime::user_command_names(self.lua);
@@ -1512,15 +1519,25 @@ impl<'lua> InputHandler<'lua> {
         target
     }
 
-    fn history_up(&mut self) {
+    /// The history matching the mode: Command recalls executed `:` lines,
+    /// everything else the sent messages.
+    fn history_for(&mut self, mode: Mode) -> &mut History {
+        if mode == Mode::Command {
+            &mut self.command_history
+        } else {
+            &mut self.history
+        }
+    }
+
+    fn history_up(&mut self, mode: Mode) {
         let draft = self.ui.input().value().to_string();
-        if let Some(entry) = self.history.step_up(draft) {
+        if let Some(entry) = self.history_for(mode).step_up(draft) {
             self.ui.set_input(&entry);
         }
     }
 
-    fn history_down(&mut self) {
-        if let Some(entry) = self.history.step_down() {
+    fn history_down(&mut self, mode: Mode) {
+        if let Some(entry) = self.history_for(mode).step_down() {
             self.ui.set_input(&entry);
         }
     }
@@ -1800,12 +1817,12 @@ impl<'lua> InputHandler<'lua> {
                 self.ui.reset_input();
                 return Ok(proceed);
             }
-            (Mode::Insert, KeyCode::Up) => {
-                self.history_up();
+            (Mode::Command | Mode::Insert, KeyCode::Up) => {
+                self.history_up(view.mode);
                 view.completion.close();
             }
-            (Mode::Insert, KeyCode::Down) => {
-                self.history_down();
+            (Mode::Command | Mode::Insert, KeyCode::Down) => {
+                self.history_down(view.mode);
                 view.completion.close();
             }
             (Mode::Insert, KeyCode::Enter) => {
