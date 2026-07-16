@@ -11,12 +11,12 @@ use futures::prelude::*;
 use irc::client::prelude::{Capability, Client, Config};
 use irc::proto::{message::Tag, CapSubCommand, Command as IrcCommand, Message, Prefix, Response};
 
-use crate::core::{
+use tirc_core::{
     BackendEvent, BackendId, BackendMessage, ChatEvent, Command, EventId, MemberRole,
     MembershipChange, MessageBody, MsgKind, Protocol, TargetId, TxnId, UserRef,
 };
 
-use crate::core::backend::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
+use tirc_core::backend::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
 
 /// CTCP ACTION wrapper byte sequence (`\x01ACTION <text>\x01`).
 const ACTION_PREFIX: &str = "\u{1}ACTION ";
@@ -207,7 +207,7 @@ impl IrcBackend {
                 }
                 command = commands.recv() => {
                     match command {
-                        Some(crate::core::Command::Quit { reason }) => {
+                        Some(tirc_core::Command::Quit { reason }) => {
                             self.quit_requested = true;
                             // Ignore send error - connection may already be gone.
                             let _ = client.send_quit(reason.unwrap_or_default());
@@ -318,7 +318,7 @@ impl ChatBackend for IrcBackend {
                 _ = tokio::time::sleep(backoff) => {}
                 cmd = commands.recv() => {
                     match cmd {
-                        Some(crate::core::Command::Quit { .. }) | None => {
+                        Some(tirc_core::Command::Quit { .. }) | None => {
                             this.quit_requested = true;
                             break;
                         }

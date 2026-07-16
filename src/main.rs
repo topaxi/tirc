@@ -9,9 +9,9 @@ use tirc::core::ChatEvent;
 
 use anyhow::Context;
 
-use tirc::backends::irc::{IrcBackend, IrcBackendConfig};
-use tirc::backends::matrix::{MatrixBackend, MatrixBackendConfig};
-use tirc::backends::mattermost::{MattermostBackend, MattermostBackendConfig};
+use tirc_backend_irc::{IrcBackend, IrcBackendConfig};
+use tirc_backend_matrix::{MatrixBackend, MatrixBackendConfig};
+use tirc_backend_mattermost::{MattermostBackend, MattermostBackendConfig};
 use tirc::core::backend::{spawn as spawn_backend, ChatBackend};
 use tirc::config::{load_config, ServerConfig, TircConfig};
 use tirc::core::{BackendId, BackendMessage, BufferId, Protocol, TxnAllocator};

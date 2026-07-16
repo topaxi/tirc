@@ -1,3 +1,7 @@
+// matrix-sdk's e2e-encryption code has deeply nested async fns; without a raised
+// limit the compiler overflows while proving the sync loop future is `Send`.
+#![recursion_limit = "256"]
+
 //! Matrix backend: the sole place that touches `matrix-sdk`.
 //!
 //! E2E encryption is enabled: the crypto state (Olm/Megolm keys) is persisted in
@@ -61,13 +65,13 @@ use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{OwnedRoomId, OwnedTransactionId, RoomId, UserId};
 use matrix_sdk::{Client, Room};
 
-use crate::core::{
+use tirc_core::{
     Attachment, AttachmentKind, BackendEvent, BackendId, BackendMessage, BufferKind, ChatEvent,
     Command, EventId, Formatted, MemberRole, MembershipChange, MessageBody, MsgKind, Protocol,
     TargetId, TxnId, UserRef, VerifyAction,
 };
 
-use crate::core::backend::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
+use tirc_core::backend::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
 
 /// Connection parameters for a Matrix backend, built from the user config.
 #[derive(Clone, Debug)]
@@ -1752,7 +1756,7 @@ async fn msgtype_to_body(
 /// live sync handler and history backfill so both render identically. `echo_of`
 /// is recovered from the homeserver-echoed transaction id (the Matrix analogue of
 /// IRC's labeled-response), so our own sends de-duplicate against their optimistic
-/// local copy in [`State`](crate::ui::State). Never drops a message: unknown types
+/// local copy in `State`. Never drops a message: unknown types
 /// surface as a placeholder line.
 async fn message_event_to_chat(
     event: OriginalSyncRoomMessageEvent,
@@ -2161,7 +2165,7 @@ fn emit(events: &EventSender, backend: BackendId, event: ChatEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::TxnId;
+    use tirc_core::TxnId;
     use std::time::Duration;
     use tokio::sync::mpsc;
 

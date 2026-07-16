@@ -5462,6 +5462,9 @@ dependencies = [
  "serde",
  "serde_json",
  "textwrap",
+ "tirc-backend-irc",
+ "tirc-backend-matrix",
+ "tirc-backend-mattermost",
  "tirc-config",
  "tirc-core",
  "tirc-lua",
@@ -5475,6 +5478,52 @@ dependencies = [
  "tui-input",
  "unicode-width",
  "xdg",
+]
+
+[[package]]
+name = "tirc-backend-irc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "irc",
+ "tirc-core",
+ "tokio",
+]
+
+[[package]]
+name = "tirc-backend-matrix"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "log",
+ "matrix-sdk",
+ "serde",
+ "serde_json",
+ "tirc-core",
+ "tokio",
+ "xdg",
+]
+
+[[package]]
+name = "tirc-backend-mattermost"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "log",
+ "reqwest",
+ "serde_json",
+ "tirc-core",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

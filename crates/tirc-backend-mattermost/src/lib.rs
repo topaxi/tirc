@@ -27,12 +27,12 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use crate::core::{
+use tirc_core::{
     Attachment, AttachmentKind, BackendEvent, BackendId, BackendMessage, ChatEvent, Command,
     EventId, MembershipChange, MessageBody, MsgKind, Protocol, TargetId, TxnId, UserRef,
 };
 
-use crate::core::backend::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
+use tirc_core::backend::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
 
 const RECONNECT_BASE_MS: u64 = 1_000;
 const RECONNECT_MAX_MS: u64 = 60_000;
@@ -1049,7 +1049,7 @@ async fn resolve_username(
 #[cfg(test)]
 mod tests {
     use super::{history_post_to_message, make_ws_url, post_attachments, AttachmentKind};
-    use crate::core::{ChatEvent, EventId, TargetId};
+    use tirc_core::{ChatEvent, EventId, TargetId};
 
     #[test]
     fn post_attachments_classify_by_mime_and_build_urls() {

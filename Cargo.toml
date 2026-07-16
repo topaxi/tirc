@@ -75,6 +75,9 @@ tirc-lua = { path = "crates/tirc-lua" }
 tirc-ui = { path = "crates/tirc-ui" }
 tirc-config = { path = "crates/tirc-config" }
 tirc-tui = { path = "crates/tirc-tui" }
+tirc-backend-irc = { path = "crates/tirc-backend-irc" }
+tirc-backend-matrix = { path = "crates/tirc-backend-matrix" }
+tirc-backend-mattermost = { path = "crates/tirc-backend-mattermost" }
 futures = { workspace = true }
 irc = { workspace = true }
 tokio = { workspace = true }

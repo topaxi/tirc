@@ -1,0 +1,13 @@
+[package]
+name = "tirc-backend-irc"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tirc-core = { path = "../tirc-core" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+irc = { workspace = true }
+tokio = { workspace = true }
