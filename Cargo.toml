@@ -73,6 +73,7 @@ edition.workspace = true
 tirc-core = { path = "crates/tirc-core" }
 tirc-lua = { path = "crates/tirc-lua" }
 tirc-ui = { path = "crates/tirc-ui" }
+tirc-config = { path = "crates/tirc-config" }
 futures = { workspace = true }
 irc = { workspace = true }
 tokio = { workspace = true }

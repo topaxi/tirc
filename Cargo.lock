@@ -5462,6 +5462,7 @@ dependencies = [
  "serde",
  "serde_json",
  "textwrap",
+ "tirc-config",
  "tirc-core",
  "tirc-lua",
  "tirc-ui",
@@ -5472,6 +5473,23 @@ dependencies = [
  "tracing-subscriber",
  "tui-input",
  "unicode-width",
+ "xdg",
+]
+
+[[package]]
+name = "tirc-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "indoc",
+ "log",
+ "mlua",
+ "serde",
+ "serde_json",
+ "tirc-core",
+ "tirc-lua",
+ "tirc-ui",
  "xdg",
 ]
 

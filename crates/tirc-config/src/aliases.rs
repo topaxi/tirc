@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Persisted `:alias` buffer names, keyed by backend *name* (IRC host, Matrix
-/// homeserver, Mattermost url) rather than [`crate::core::BackendId`], which is
+/// homeserver, Mattermost url) rather than [`tirc_core::BackendId`], which is
 /// a runtime index into `config.servers` and would shift when servers are
 /// reordered. Entries for servers not currently configured are retained across
 /// saves so disabling a server never loses its aliases. Two configured servers

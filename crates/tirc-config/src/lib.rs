@@ -5,12 +5,10 @@ use indoc::indoc;
 use mlua::{Lua, LuaSerdeExt, Table, Value};
 use serde::Deserialize;
 
-use crate::{
-    core::Protocol,
-    lua::builtins::{register_builtin_modules, TYPE_DEFINITIONS},
-    lua::get_or_create_module,
-    lua::runtime::reset_runtime,
-};
+use tirc_core::Protocol;
+use tirc_lua::builtins::{register_builtin_modules, TYPE_DEFINITIONS};
+use tirc_lua::get_or_create_module;
+use tirc_lua::runtime::reset_runtime;
 
 pub mod aliases;
 pub mod buffer_order;
@@ -275,7 +273,7 @@ pub fn reload_lua_theme(lua: &Lua, config_path: &Path) -> anyhow::Result<()> {
     // In-place iteration-and-nil is used rather than table replacement because
     // LuaJIT's require resolves against the internal table object.
     {
-        let loaded = crate::lua::get_loaded_modules(lua)?;
+        let loaded = tirc_lua::get_loaded_modules(lua)?;
         let keys: Vec<mlua::Value> = loaded
             .pairs::<mlua::Value, mlua::Value>()
             .map(|r| r.map(|(k, _)| k))
@@ -389,15 +387,15 @@ pub fn load_config(lua: &Lua) -> Result<(TircConfig, PathBuf), anyhow::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::backend::BackendInfo;
-    use crate::core::{
+    use tirc_core::backend::BackendInfo;
+    use tirc_core::{
         BackendId, ChatEvent, MembershipChange, MessageBody, MsgKind, Protocol, TargetId, UserRef,
     };
-    use crate::lua::runtime::{
+    use tirc_lua::runtime::{
         call_formatter, get_backend_metadata, register_backend_metadata, ui_string_list,
     };
-    use crate::ui::lua::to_lua_event;
-    use crate::ui::StoredMessage;
+    use tirc_ui::lua::to_lua_event;
+    use tirc_ui::StoredMessage;
 
     fn backend() -> BackendInfo {
         BackendInfo {
@@ -431,9 +429,9 @@ mod tests {
             .exec()
             .unwrap();
 
-        let mut engine = crate::ui::completion::CompletionEngine::new();
-        let query = crate::ui::completion::CompletionQuery {
-            mode: crate::ui::Mode::Insert,
+        let mut engine = tirc_ui::completion::CompletionEngine::new();
+        let query = tirc_ui::completion::CompletionQuery {
+            mode: tirc_ui::Mode::Insert,
             value: "hi @top",
             cursor: 7,
             force: false,
@@ -446,7 +444,7 @@ mod tests {
         assert_eq!(items[1].insert, "plain");
 
         // The registry is cleared on reload so sources do not accumulate.
-        crate::lua::runtime::clear_completion_sources(&lua).unwrap();
+        tirc_lua::runtime::clear_completion_sources(&lua).unwrap();
         assert!(engine.query(&query, &lua).is_none());
     }
 
@@ -722,7 +720,7 @@ mod tests {
                 target: TargetId::from("#tirc"),
                 who: UserRef::new("alice"),
                 change: MembershipChange::Present {
-                    role: crate::core::MemberRole::Member,
+                    role: tirc_core::MemberRole::Member,
                 },
                 time: None,
             },
@@ -884,7 +882,7 @@ mod tests {
 
     #[test]
     fn theme_renders_reaction_pills() {
-        use crate::ui::ReactionState;
+        use tirc_ui::ReactionState;
         let lua = setup_theme();
 
         let mut message = stored(ChatEvent::Message {
@@ -1001,7 +999,7 @@ mod tests {
 
     #[test]
     fn quick_reactions_skip_already_reacted_emojis() {
-        use crate::ui::ReactionState;
+        use tirc_ui::ReactionState;
         let lua = setup_theme();
 
         let mut message = stored(ChatEvent::Message {
