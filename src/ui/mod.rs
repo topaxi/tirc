@@ -1,5 +1,6 @@
 pub mod completion;
 mod input;
+pub mod lua;
 mod state;
 
 pub use self::input::{Event, InputHandler};

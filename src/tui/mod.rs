@@ -1,5 +1,4 @@
 mod hyperlink;
-pub mod lua;
 pub mod preview;
 mod renderer;
 pub mod tmux;

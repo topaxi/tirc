@@ -18,7 +18,7 @@ use crate::core::{
     BackendEvent, BackendId, BackendMessage, BufferId, ChatEvent, Command, EventId, MsgKind,
     TargetId, TxnAllocator, VerifyAction,
 };
-use crate::tui::lua::{create_lua_sender, to_lua_event};
+use crate::ui::lua::{create_lua_sender, to_lua_event};
 use crate::tui::{parse_bar_id, DecodedImage, PreviewResult, Tui};
 use crate::ui::ConnectionStatus;
 

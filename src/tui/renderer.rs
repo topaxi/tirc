@@ -26,7 +26,7 @@ use crate::ui::{
 
 use crate::lua::theme::is_style_table;
 
-use super::lua::{to_lua_event, to_lua_user};
+use crate::ui::lua::{to_lua_event, to_lua_user};
 use super::preview::{extract_urls, LinkPreview, PreviewRequest, PreviewResult};
 use super::tmux::{wrap_passthrough, wrap_passthrough_positioned, PaneOrigin};
 use super::wrap::wrap_line;

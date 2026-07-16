@@ -7,7 +7,7 @@ use crate::core::{
     Attachment, ChatEvent, Command, MemberRole, MembershipChange, MessageBody, MsgKind, Protocol,
     TargetId, TxnAllocator, UserRef,
 };
-use crate::ui::{Member, StoredMessage};
+use super::{Member, StoredMessage};
 
 fn protocol_str(protocol: Protocol) -> &'static str {
     match protocol {

@@ -396,7 +396,7 @@ mod tests {
     use crate::lua::runtime::{
         call_formatter, get_backend_metadata, register_backend_metadata, ui_string_list,
     };
-    use crate::tui::lua::to_lua_event;
+    use crate::ui::lua::to_lua_event;
     use crate::ui::StoredMessage;
 
     fn backend() -> BackendInfo {
