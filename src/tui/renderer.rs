@@ -292,6 +292,10 @@ pub struct Renderer {
     /// re-rendered cheaply each frame. Its thumbnail (`image_path`) flows through
     /// the same `image_cache` pipeline as any other inline image.
     preview_cache: RefCell<HashMap<String, LinkPreview>>,
+    /// URLs hyperlinked this frame; a link marker's `Color::Indexed` value is an
+    /// index into this table (see `super::hyperlink`). Cleared at the top of
+    /// every `render` so indices never go stale across frames.
+    link_urls: RefCell<Vec<String>>,
     /// Whether the terminal/pane currently has focus. Only used as a fallback:
     /// when the tmux pane origin is unknown, [`EncodedImage::TmuxRaw`] escapes
     /// would land at the active pane's cursor, so they are suppressed while
@@ -418,8 +422,14 @@ fn debug_log_line(line: &LogLine) -> Line<'static> {
 }
 
 /// A `[image: name] url` fallback line, shown for an image that could not be
-/// rendered inline. Indented to align under the message body.
-fn image_fallback_line(indent: u16, image: &ImageAttachment) -> Line<'static> {
+/// rendered inline. Indented to align under the message body. The URL span is
+/// link-tagged (`urls` is the frame's hyperlink intern table) so the fallback
+/// stays clickable.
+fn image_fallback_line(
+    indent: u16,
+    image: &ImageAttachment,
+    urls: &mut Vec<String>,
+) -> Line<'static> {
     let mut spans = vec![
         Span::raw(" ".repeat(indent as usize)),
         Span::styled(
@@ -433,7 +443,7 @@ fn image_fallback_line(indent: u16, image: &ImageAttachment) -> Line<'static> {
             Style::default().fg(Color::DarkGray),
         ));
     }
-    Line::from(spans)
+    Line::from(super::hyperlink::tag_link_spans(spans, urls))
 }
 
 /// Builds a trailing pill row (reactions or quick reactions), indented under the
@@ -497,6 +507,7 @@ impl Renderer {
             preview_pending: RefCell::new(HashSet::new()),
             preview_failed: RefCell::new(HashSet::new()),
             preview_cache: RefCell::new(HashMap::new()),
+            link_urls: RefCell::new(Vec::new()),
             focused: true,
             pane_origin: None,
             quick_reactions_enabled: true,
@@ -1016,7 +1027,11 @@ impl Renderer {
                 };
                 match inline {
                     Some((path, size)) => inline_images.push((path.clone(), size)),
-                    None => text.lines.push(image_fallback_line(indent_width, image)),
+                    None => text.lines.push(image_fallback_line(
+                        indent_width,
+                        image,
+                        &mut self.link_urls.borrow_mut(),
+                    )),
                 }
             }
             // The message-attachment images form a vertical strip starting at the
@@ -1352,6 +1367,12 @@ impl Renderer {
         if message_spans.is_empty() {
             return None;
         }
+
+        // Split out URLs into marker-styled spans so the buffer post-pass (see
+        // `super::hyperlink`) can wrap them in OSC 8 hyperlink escapes, even
+        // when the wrapper later splits them across visual lines.
+        let message_spans =
+            super::hyperlink::tag_link_spans(message_spans, &mut self.link_urls.borrow_mut());
 
         let mut reactions = self.render_reaction_pills(lua, &event, hovered_key);
         // For the selected message with a server id to react to, append the
@@ -1944,6 +1965,10 @@ impl Renderer {
         // building the bar, as the theme's render_buffer_bar reads those globals.
         let _ = self.update_render_context(lua, view, state);
 
+        // Reset the frame's hyperlink intern table; message rendering below
+        // refills it and the OSC 8 post-pass at the end of this frame reads it.
+        self.link_urls.borrow_mut().clear();
+
         // Build the bar first so the layout can size its region to fit the rows
         // the theme returned, capped so the message area never collapses.
         // Destructured so the borrow the lines hold on `self` ends once they
@@ -2091,6 +2116,11 @@ impl Renderer {
         if view.menu.open {
             self.render_context_menu(f, view);
         }
+
+        // Rewrite link-marked cells into OSC 8 hyperlinks as the very last step
+        // of the frame, after every overlay: overlays `Clear` their cells (which
+        // wipes the marker), so no hyperlink escape can leak under a popup.
+        super::hyperlink::apply_hyperlinks(f.buffer_mut(), msg_rect, &self.link_urls.borrow());
     }
 
     /// Draws the `:debug` log overlay: a centered bordered pane showing the most
@@ -2871,6 +2901,97 @@ mod tests {
             row_text(title_row).starts_with(' '),
             "preview title is indented"
         );
+
+        Ok(())
+    }
+
+    /// A URL long enough to wrap across visual lines is wrapped in OSC 8
+    /// hyperlink escapes on every row it spans: one open (with a shared id) and
+    /// one close per row, so the wrapped link stays clickable end to end.
+    #[test]
+    fn wrapped_url_gets_osc8_hyperlinks_on_every_row() -> anyhow::Result<(), anyhow::Error> {
+        use crate::backends::BackendInfo;
+        use crate::core::{
+            BackendId, ChatEvent, EventId, MessageBody, MsgKind, Protocol, TargetId, UserRef,
+        };
+        use crate::ui::{State, ViewState};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default'):setup({})")
+            .exec()?;
+
+        let backend = BackendId(0);
+        let mut state = State::new();
+        state.register_backend(BackendInfo {
+            id: backend,
+            protocol: Protocol::Irc,
+            name: "irc.example.com".to_string(),
+        });
+        state.set_nickname(backend, "me".to_string());
+
+        // Much wider than the 40-column terminal, so the URL must wrap.
+        let url = "https://example.com/a/very/long/path/that/never/seems/to/end/at/all";
+        state.apply(
+            backend,
+            ChatEvent::Message {
+                target: TargetId::from("#chan"),
+                id: Some(EventId("$1".to_string())),
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain(format!("look {url}")),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+
+        let mut view = ViewState::new();
+        view.focus(BufferId::new(backend, "#chan"));
+
+        let mut renderer = Renderer::new();
+        let mut terminal = Terminal::new(TestBackend::new(40, 12))?;
+        terminal.draw(|f| renderer.render(f, &state, &mut view, &lua, &Input::default()))?;
+
+        let buffer = terminal.backend().buffer().clone();
+        let area = buffer.area;
+        let open = format!("\x1b]8;id=l0;{url}\x1b\\");
+        let close = "\x1b]8;;\x1b\\";
+        let mut segments: Vec<String> = Vec::new();
+        for y in area.top()..area.bottom() {
+            let row: String = (0..area.width)
+                .map(|x| buffer.cell((x, y)).map(|cell| cell.symbol()).unwrap_or(""))
+                .collect();
+            let opens = row.matches(&open).count();
+            let closes = row.matches(close).count();
+            assert_eq!(opens, closes, "row {y}: every open has a matching close");
+            assert!(opens <= 1, "row {y}: at most one link segment per row");
+            // Collect the visible text between the open and close escapes.
+            if let Some(start) = row.find(&open) {
+                let inner = &row[start + open.len()..];
+                let end = inner.find(close).expect("close follows open");
+                segments.push(inner[..end].to_string());
+            }
+        }
+
+        assert!(
+            segments.len() > 1,
+            "the wrapped URL produces a link segment on multiple rows"
+        );
+        // The escapes do not disturb the visible text: joining the per-row link
+        // segments reconstructs the full URL exactly.
+        assert_eq!(segments.concat(), url, "the full URL is hyperlinked");
+
+        // No marker leaks to the terminal as a real underline color.
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                let cell = buffer.cell((x, y)).expect("cell in area");
+                assert!(
+                    !matches!(cell.underline_color, ratatui::style::Color::Indexed(_)),
+                    "no cell keeps the Indexed underline-color marker"
+                );
+            }
+        }
 
         Ok(())
     }

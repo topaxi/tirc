@@ -324,6 +324,9 @@ fn buffer_text(buffer: &Buffer, rows: RangeInclusive<u16>, x0: u16, x1: u16) -> 
                 line.push_str(cell.symbol());
             }
         }
+        // Link-marked cells carry raw OSC 8 hyperlink escapes in their symbols
+        // (see `super::hyperlink`); strip them so the yanked text is clean.
+        let line = super::hyperlink::strip_osc8(&line);
         // Trim trailing whitespace so the padding the renderer writes to the end
         // of each row does not bloat the copied text.
         lines.push(line.trim_end().to_string());
@@ -391,6 +394,19 @@ mod tests {
         // Only columns 2..=4 are selected.
         let text = buffer_text(&buffer, 0..=0, 2, 4);
         assert_eq!(text, "cde");
+    }
+
+    #[test]
+    fn buffer_text_strips_osc8_hyperlink_escapes() {
+        // The hyperlink post-pass embeds OSC 8 escapes in the first and last
+        // cell symbols of a link run; yanked text must come out clean.
+        let mut buffer = buffer_with(&["e.com   "]);
+        let first = buffer.cell_mut((0, 0)).unwrap();
+        first.set_symbol("\x1b]8;id=l0;https://e.com\x1b\\e");
+        let last = buffer.cell_mut((4, 0)).unwrap();
+        last.set_symbol("m\x1b]8;;\x1b\\");
+        let text = buffer_text(&buffer, 0..=0, 0, 7);
+        assert_eq!(text, "e.com");
     }
 
     #[test]
