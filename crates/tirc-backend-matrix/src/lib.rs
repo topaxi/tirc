@@ -2165,8 +2165,8 @@ fn emit(events: &EventSender, backend: BackendId, event: ChatEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tirc_core::TxnId;
     use std::time::Duration;
+    use tirc_core::TxnId;
     use tokio::sync::mpsc;
 
     #[test]
