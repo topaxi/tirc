@@ -1925,7 +1925,11 @@ async fn fetch_history(
 
     match room.messages(options).await {
         Ok(messages) => {
-            let at_start = messages.end.is_none() || messages.chunk.is_empty();
+            // Only a missing end token means the start of the timeline: the spec
+            // omits `end` when nothing further is available. An empty chunk with
+            // a token is a legitimate mid-history page (e.g. events invisible to
+            // us), so it must not permanently mark the room exhausted.
+            let at_start = messages.end.is_none();
             history_cursors
                 .lock()
                 .await

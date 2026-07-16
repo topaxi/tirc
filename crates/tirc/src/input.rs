@@ -558,13 +558,14 @@ impl<'lua> InputHandler<'lua> {
         let delta = 3usize;
         match event.kind {
             MouseEventKind::ScrollUp => {
+                // Free scrolling desyncs the page-jump trail; drop it.
+                view.page_trail.clear();
                 self.scroll_up(state, view, delta);
                 true
             }
             MouseEventKind::ScrollDown => {
-                if let Some(buffer) = state.focused_buffer_mut(view) {
-                    buffer.scroll_down(delta);
-                }
+                view.page_trail.clear();
+                self.scroll_down(state, view, delta);
                 true
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -1300,31 +1301,39 @@ impl<'lua> InputHandler<'lua> {
                     }
                 }
             }
-            BuiltinCmd::Join => self.send_to(
-                backend,
-                Command::Join {
-                    target: TargetId::from(rest),
-                },
-            ),
-            BuiltinCmd::Part => self.send_to(
-                backend,
-                Command::Part {
-                    target: TargetId::from(rest),
-                    reason: None,
-                },
-            ),
-            BuiltinCmd::Nick => self.send_to(
-                backend,
-                Command::SetNick {
-                    nick: rest.to_string(),
-                },
-            ),
-            BuiltinCmd::Whois => self.send_to(
-                backend,
-                Command::Whois {
-                    user: rest.to_string(),
-                },
-            ),
+            BuiltinCmd::Join => {
+                self.send_to(
+                    backend,
+                    Command::Join {
+                        target: TargetId::from(rest),
+                    },
+                );
+            }
+            BuiltinCmd::Part => {
+                self.send_to(
+                    backend,
+                    Command::Part {
+                        target: TargetId::from(rest),
+                        reason: None,
+                    },
+                );
+            }
+            BuiltinCmd::Nick => {
+                self.send_to(
+                    backend,
+                    Command::SetNick {
+                        nick: rest.to_string(),
+                    },
+                );
+            }
+            BuiltinCmd::Whois => {
+                self.send_to(
+                    backend,
+                    Command::Whois {
+                        user: rest.to_string(),
+                    },
+                );
+            }
             BuiltinCmd::Topic => {
                 if let Some(target) = target {
                     self.send_to(
@@ -1437,7 +1446,9 @@ impl<'lua> InputHandler<'lua> {
                     self.set_bar_style(state, view, backend, &arg);
                 }
             }
-            BuiltinCmd::List => self.send_to(backend, Command::ListChannels),
+            BuiltinCmd::List => {
+                self.send_to(backend, Command::ListChannels);
+            }
             BuiltinCmd::Verify => {
                 if rest.is_empty() {
                     self.send_to(
@@ -1523,10 +1534,13 @@ impl<'lua> InputHandler<'lua> {
         self.apply_queued_ui_actions(state, view);
     }
 
-    /// Enqueues a command to a specific backend, if one is focused.
-    fn send_to(&self, backend: Option<BackendId>, command: Command) {
-        if let Some(handle) = backend.and_then(|id| self.backend(id)) {
-            let _ = handle.send(command);
+    /// Enqueues a command to a specific backend, if one is focused. Returns
+    /// whether the command was actually handed to a backend, for callers whose
+    /// state must not advance on a dropped send (e.g. history fetches).
+    fn send_to(&self, backend: Option<BackendId>, command: Command) -> bool {
+        match backend.and_then(|id| self.backend(id)) {
+            Some(handle) => handle.send(command).is_ok(),
+            None => false,
         }
     }
 
@@ -1650,9 +1664,88 @@ impl<'lua> InputHandler<'lua> {
         }
     }
 
+    /// One page of scrolling in message indices: the index span of the messages
+    /// actually visible in the last rendered frame. `scroll_position` counts
+    /// messages while the screen is rows, so a fixed row count is a poor page:
+    /// wrapped lines, inline images, and link previews make a message taller
+    /// than one row (a row-count page overshoots several screens), and messages
+    /// the theme renders as nothing still occupy indices (it undershoots).
+    /// Falls back to the viewport row count before the first frame.
+    fn page_step(view: &ViewState) -> usize {
+        let indices = || view.layout.message_rows.iter().map(|(_, index)| *index);
+        match (indices().min(), indices().max()) {
+            (Some(min), Some(max)) => max - min + 1,
+            _ => (view.viewport_height as usize).max(1),
+        }
+    }
+
+    /// PageUp: jump up one screenful, remembering the position the jump left
+    /// from so PageDown can return exactly (see [`ViewState::page_trail`]; the
+    /// step is measured on the screen being left, so the reverse key cannot
+    /// re-derive it). When the newest trail entry lies *above* the current
+    /// position - left behind by an earlier PageDown - return to it instead.
+    fn page_up(&self, state: &mut State, view: &mut ViewState, step: usize) {
+        let Some(focused) = view.focused.clone() else {
+            return;
+        };
+        let Some(current) = state.buffers.get(&focused).map(|b| b.scroll_position) else {
+            return;
+        };
+        if let Some(&back) = view.page_trail.last().filter(|&&pos| pos > current) {
+            view.page_trail.pop();
+            if let Some(buffer) = state.buffers.get_mut(&focused) {
+                let max = buffer.messages.len().saturating_sub(1);
+                buffer.scroll_position = back.min(max);
+            }
+            self.maybe_fetch_history(state, view);
+            return;
+        }
+        view.page_trail.push(current);
+        self.scroll_up(state, view, step);
+        // A jump that went nowhere (already pinned at the top) leaves no trail.
+        if state.buffers.get(&focused).map(|b| b.scroll_position) == Some(current) {
+            view.page_trail.pop();
+        }
+    }
+
+    /// PageDown: the mirror of [`Self::page_up`]. Returns to the newest trail
+    /// entry *below* the current position when one exists (an earlier PageUp's
+    /// origin), else jumps down one screenful and leaves a trail entry.
+    fn page_down(&self, state: &mut State, view: &mut ViewState, step: usize) {
+        let Some(focused) = view.focused.clone() else {
+            return;
+        };
+        let Some(current) = state.buffers.get(&focused).map(|b| b.scroll_position) else {
+            return;
+        };
+        if let Some(&back) = view.page_trail.last().filter(|&&pos| pos < current) {
+            view.page_trail.pop();
+            if let Some(buffer) = state.buffers.get_mut(&focused) {
+                buffer.scroll_position = back;
+            }
+            return;
+        }
+        view.page_trail.push(current);
+        self.scroll_down(state, view, step);
+        // A jump that went nowhere (already at the bottom) leaves no trail.
+        if state.buffers.get(&focused).map(|b| b.scroll_position) == Some(current) {
+            view.page_trail.pop();
+        }
+    }
+
     fn scroll_up(&self, state: &mut State, view: &ViewState, lines: usize) {
-        if let Some(buffer) = state.focused_buffer_mut(view) {
-            buffer.scroll_up(lines);
+        if let Some(focused) = view.focused.clone() {
+            if let Some(buffer) = state.buffers.get_mut(&focused) {
+                let before = buffer.scroll_position;
+                buffer.scroll_up(lines);
+                // Cap at the renderer's top-of-history clamp so hitting the top
+                // keeps a full screen instead of shrinking to a lone message.
+                // `max(before)` keeps an already-overshot position (a stale
+                // clamp) from being yanked *down* by an up-scroll.
+                if let Some(top) = view.top_scroll_for(&focused, buffer.messages.len()) {
+                    buffer.scroll_position = buffer.scroll_position.min(top.max(before));
+                }
+            }
         }
         self.maybe_fetch_history(state, view);
     }
@@ -1686,21 +1779,36 @@ impl<'lua> InputHandler<'lua> {
             .first()
             .map(|m| m.time.with_timezone(&chrono::Utc));
         let before_id = buffer.oldest_event_id().cloned();
-        buffer.history = HistoryState::Fetching;
-        self.send_to(
+        // Flip to Fetching only when the command was actually enqueued: a
+        // dropped send would never produce the HistoryFetched completion that
+        // returns the buffer to Idle, silently disabling further fetches.
+        let sent = self.send_to(
             Some(focused.backend),
             Command::FetchHistory {
-                target: focused.target,
+                target: focused.target.clone(),
                 before,
                 before_id,
                 limit: HISTORY_FETCH_LIMIT,
             },
         );
+        if sent {
+            if let Some(buffer) = state.buffers.get_mut(&focused) {
+                buffer.history = HistoryState::Fetching;
+            }
+        }
     }
 
     fn scroll_down(&self, state: &mut State, view: &ViewState, lines: usize) {
-        if let Some(buffer) = state.focused_buffer_mut(view) {
-            buffer.scroll_down(lines);
+        if let Some(focused) = view.focused.clone() {
+            if let Some(buffer) = state.buffers.get_mut(&focused) {
+                // Snap an overshot position back to the top-of-history clamp
+                // first, so the first down-scroll moves the view instead of
+                // consuming invisible offset above the full-screen top.
+                if let Some(top) = view.top_scroll_for(&focused, buffer.messages.len()) {
+                    buffer.scroll_position = buffer.scroll_position.min(top);
+                }
+                buffer.scroll_down(lines);
+            }
         }
     }
 
@@ -1762,7 +1870,7 @@ impl<'lua> InputHandler<'lua> {
             }
         }
 
-        let page = (view.viewport_height as usize).max(1);
+        let page = Self::page_step(view);
 
         match (view.mode, event.code) {
             // Ctrl-L: force a full screen repaint, in any mode. Clears ghosting
@@ -1799,25 +1907,37 @@ impl<'lua> InputHandler<'lua> {
                     b.mark_read();
                 }
             }
-            (Mode::Normal, KeyCode::PageUp) => self.scroll_up(state, view, page),
-            (Mode::Normal, KeyCode::PageDown) => self.scroll_down(state, view, page),
+            (Mode::Normal, KeyCode::PageUp) => self.page_up(state, view, page),
+            (Mode::Normal, KeyCode::PageDown) => self.page_down(state, view, page),
             (Mode::Normal, KeyCode::Char('u'))
                 if event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                self.scroll_up(state, view, page / 2)
+                view.page_trail.clear();
+                self.scroll_up(state, view, (page / 2).max(1))
             }
             (Mode::Normal, KeyCode::Char('d'))
                 if event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                self.scroll_down(state, view, page / 2)
+                view.page_trail.clear();
+                self.scroll_down(state, view, (page / 2).max(1))
             }
             (Mode::Normal, KeyCode::Home) => {
-                if let Some(buffer) = state.focused_buffer_mut(view) {
-                    buffer.scroll_to_top(view.viewport_height as usize);
+                view.page_trail.clear();
+                if let Some(focused) = view.focused.clone() {
+                    if let Some(buffer) = state.buffers.get_mut(&focused) {
+                        // The renderer's clamp is exact (wrapped heights);
+                        // scroll_to_top's rows-as-messages estimate is the
+                        // fallback until a frame near the top computes it.
+                        match view.top_scroll_for(&focused, buffer.messages.len()) {
+                            Some(top) => buffer.scroll_position = top,
+                            None => buffer.scroll_to_top(view.viewport_height as usize),
+                        }
+                    }
                 }
                 self.maybe_fetch_history(state, view);
             }
             (Mode::Normal, KeyCode::End) => {
+                view.page_trail.clear();
                 if let Some(buffer) = state.focused_buffer_mut(view) {
                     buffer.scroll_to_bottom();
                 }

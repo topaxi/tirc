@@ -21,7 +21,7 @@ use tirc_core::{AttachmentKind, BackendId, BufferId, ChatEvent, EventId, TargetI
 use tirc_lua::date_time::date_time_to_table;
 use tirc_ui::{
     BarHit, ChatBuffer, ConnectionStatus, LayoutMap, Member, Mode, ReactionHit, State,
-    StoredMessage, ViewState,
+    StoredMessage, TopScroll, ViewState,
 };
 
 use tirc_lua::theme::is_style_table;
@@ -318,9 +318,15 @@ pub struct Renderer {
 
 /// What [`Renderer::render_messages`] hands back to `render`: the reaction-pill
 /// hit boxes (screen `Rect` paired with the reaction it toggles), the inline
-/// images to draw over the list, and the per-message row spans (paired with the
-/// message's index-from-newest) for click-to-select.
-type MessagesRender = (Vec<(Rect, ReactionHit)>, Vec<ImageDraw>, Vec<(Rect, usize)>);
+/// images to draw over the list, the per-message row spans (paired with the
+/// message's index-from-newest) for click-to-select, and the top-of-history
+/// scroll clamp for the scroll handlers (see [`TopScroll`]).
+type MessagesRender = (
+    Vec<(Rect, ReactionHit)>,
+    Vec<ImageDraw>,
+    Vec<(Rect, usize)>,
+    Option<TopScroll>,
+);
 
 #[derive(Debug, Clone, Default)]
 pub struct RenderedMessage<'a> {
@@ -449,6 +455,45 @@ fn pill_row<'a>(indent_width: u16, pills: &[ReactionPill<'a>]) -> Line<'a> {
         spans.extend(pill.spans.iter().cloned());
     }
     Line::from(spans)
+}
+
+/// The top-of-history scroll clamp for one rendered frame (see [`TopScroll`]):
+/// the largest `scroll_position` at which the oldest message is still drawn on
+/// a full screen, instead of shrinking toward a lone message with blank rows
+/// above.
+///
+/// `heights` are the rendered item heights newest-first (message index paired
+/// with rows, separators included), covering the window `[scroll, oldest]`;
+/// `extra_top_rows` counts rows drawn above the oldest item (its date
+/// separator). Walking oldest-first, the clamp is the smallest index whose run
+/// down to the oldest still fits within `viewport` rows. When even the whole
+/// window underfills the screen (`scroll` overshot the clamp before it was
+/// known), the row deficit bounds how far below `scroll` the clamp can sit
+/// (every message is at least one row), so that estimate is returned and the
+/// next frame, rendering from there, computes the exact value.
+fn top_scroll_hint(
+    heights: &[(usize, u16)],
+    viewport: u16,
+    extra_top_rows: u16,
+    scroll: usize,
+) -> Option<usize> {
+    let mut acc = extra_top_rows;
+    let mut hint = heights.last().map(|(index, _)| *index)?;
+    for (index, h) in heights.iter().rev() {
+        acc = acc.saturating_add(*h);
+        if acc > viewport {
+            return Some(hint);
+        }
+        hint = *index;
+    }
+    if scroll == 0 {
+        // Everything (down to the newest message) fits on one screen: there is
+        // nothing to scroll to.
+        Some(0)
+    } else {
+        let deficit = (viewport.saturating_sub(acc) as usize).max(1);
+        Some(scroll.saturating_sub(deficit))
+    }
 }
 
 /// Records the per-pill hit boxes for one pill row at screen row `row_y`, mirroring
@@ -838,7 +883,7 @@ impl Renderer {
         rect: Rect,
     ) -> MessagesRender {
         let Some((buffer_id, buffer, backend, nickname)) = self.focused(state, view) else {
-            return (vec![], vec![], vec![]);
+            return (vec![], vec![], vec![], None);
         };
 
         let target_name = state.buffer_label(buffer_id, buffer);
@@ -909,10 +954,18 @@ impl Renderer {
         // and is drawn iff `cum + h <= list_area.height` (no partial top clip).
         let mut cum: u16 = 0;
 
+        // Rendered height of every item (message plus the separator rows pushed
+        // just before it), newest-first, keyed by message index. Feeds the
+        // top-of-history scroll clamp computed after the loop.
+        let mut item_heights: Vec<(usize, u16)> = Vec::with_capacity(rendered.len());
+
         for (rm, msg_time, msg_index) in &rendered {
             if rm.message.width() == 0 {
                 continue;
             }
+
+            // Separator rows emitted for this item, counted into its height entry.
+            let mut sep_rows: u16 = 0;
 
             if !separator_inserted {
                 if let Some(marker) = read_marker {
@@ -923,6 +976,7 @@ impl Renderer {
                         // First read message after one or more unread ones: inject separator.
                         messages.push(ListItem::new(self.render_unread_separator(lua, rect.width)));
                         cum = cum.saturating_add(1);
+                        sep_rows = sep_rows.saturating_add(1);
                         separator_inserted = true;
                     }
                 }
@@ -939,6 +993,7 @@ impl Renderer {
                         self.render_date_separator(lua, &sep_time, rect.width),
                     ));
                     cum = cum.saturating_add(1);
+                    sep_rows = sep_rows.saturating_add(1);
                 }
             }
             prev_date = Some(current_date);
@@ -1238,6 +1293,7 @@ impl Renderer {
             }
 
             cum = cum.saturating_add(h);
+            item_heights.push((*msg_index, h.saturating_add(sep_rows)));
             messages.push(ListItem::new(text));
         }
 
@@ -1258,7 +1314,22 @@ impl Renderer {
 
         f.render_widget(list, rect);
 
-        (reaction_hits, image_draws, message_rows)
+        // Top-of-history scroll clamp for the scroll handlers: only computable
+        // when this frame's window extends to the oldest message (the window is
+        // the `take` above; message indices past it were not measured). The
+        // final date separator occupies one row above the oldest item.
+        let window = (rect.height as usize) + (rect.height as usize) / 2;
+        let top_scroll = if scroll + window >= total {
+            top_scroll_hint(&item_heights, list_area.height, 1, scroll).map(|hint| TopScroll {
+                buffer: buffer_id.clone(),
+                len: total,
+                scroll: hint,
+            })
+        } else {
+            None
+        };
+
+        (reaction_hits, image_draws, message_rows, top_scroll)
     }
 
     /// Draws the inline images recorded by [`Self::render_messages`] over the
@@ -2015,8 +2086,11 @@ impl Renderer {
 
         view.viewport_height = msg_rect.height;
 
-        let (reaction_hits, image_draws, message_rows) =
+        let (reaction_hits, image_draws, message_rows, top_scroll) =
             self.render_messages(f, state, view, lua, msg_rect);
+        // Refreshed (or cleared) every frame so the scroll handlers never act
+        // on a hint from a window that no longer reaches the oldest message.
+        view.top_scroll = top_scroll;
         self.draw_images(f, image_draws);
 
         // Compute per-row horizontal scroll so each row's anchor tab (focused
@@ -2347,6 +2421,52 @@ mod tests {
     ) -> Result<Vec<Span<'lua>>, anyhow::Error> {
         let value = run_lua_code(lua, table)?;
         renderer.lua_value_to_spans(lua, value)
+    }
+
+    /// Newest-first single-row heights for messages `lo..hi` (from newest).
+    fn flat_heights(lo: usize, hi: usize) -> Vec<(usize, u16)> {
+        (lo..=hi).map(|index| (index, 1)).collect()
+    }
+
+    #[test]
+    fn top_scroll_hint_stops_where_the_screen_stays_full() {
+        // 50 one-row messages (indices 0..=49 from newest), 10-row viewport,
+        // 1 row for the final date separator: the oldest 9 messages plus the
+        // separator fill the screen, so the clamp is index 41.
+        let heights = flat_heights(30, 49);
+        assert_eq!(top_scroll_hint(&heights, 10, 1, 30), Some(41));
+    }
+
+    #[test]
+    fn top_scroll_hint_respects_wrapped_heights() {
+        // The oldest message is 8 rows tall: with a 10-row viewport and the
+        // separator row, only one more single-row message fits above the clamp.
+        let mut heights = flat_heights(30, 48);
+        heights.push((49, 8));
+        assert_eq!(top_scroll_hint(&heights, 10, 1, 30), Some(48));
+    }
+
+    #[test]
+    fn top_scroll_hint_is_zero_when_everything_fits() {
+        // 5 messages on a 10-row screen with scroll at the tail: no scrolling.
+        let heights = flat_heights(0, 4);
+        assert_eq!(top_scroll_hint(&heights, 10, 1, 0), Some(0));
+    }
+
+    #[test]
+    fn top_scroll_hint_estimates_downward_when_overscrolled() {
+        // Scrolled to 49 with only the oldest message in the window: the
+        // screen is 8 rows short, so the clamp is at most 8 messages below.
+        let heights = vec![(49usize, 1u16)];
+        assert_eq!(top_scroll_hint(&heights, 10, 1, 49), Some(41));
+    }
+
+    #[test]
+    fn top_scroll_hint_keeps_a_single_oversized_message_reachable() {
+        // The oldest message alone overflows the viewport: the clamp is the
+        // oldest message itself, never past it.
+        let heights = vec![(20usize, 2u16), (21, 30)];
+        assert_eq!(top_scroll_hint(&heights, 10, 1, 20), Some(21));
     }
 
     #[test]

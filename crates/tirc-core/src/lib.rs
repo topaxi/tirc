@@ -106,17 +106,30 @@ pub struct EventId(pub String);
 pub struct TxnId(pub u64);
 
 /// Hands out monotonically increasing [`TxnId`]s for local-echo correlation.
-/// Process-global; ids only need to be unique among in-flight outgoing messages.
-#[derive(Debug, Default)]
+/// Process-global. Seeded from the current unix time in milliseconds: Matrix
+/// persists our transaction ids and hands them back on backfilled own messages,
+/// so ids must not repeat across runs or a historical echo could be mistaken
+/// for one of this session's sends.
+#[derive(Debug)]
 pub struct TxnAllocator(AtomicU64);
 
 impl TxnAllocator {
-    pub const fn new() -> Self {
-        TxnAllocator(AtomicU64::new(1))
+    pub fn new() -> Self {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(1);
+        TxnAllocator(AtomicU64::new(millis))
     }
 
     pub fn next(&self) -> TxnId {
         TxnId(self.0.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+impl Default for TxnAllocator {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

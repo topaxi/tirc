@@ -590,14 +590,32 @@ impl State {
         let has_id = id.is_some();
         let buffer = self.buffer_mut(backend, target);
 
+        // Skip duplicate events (same message re-delivered from both backfill and
+        // live sync, or from SDK re-delivery on re-join). Checked before the echo
+        // replacement so a re-delivered copy of an already-stored own message can
+        // never re-match a message via its transaction id.
+        if let Some(ref event_id) = id {
+            if buffer.messages.iter().any(|m| m.has_event_id(event_id)) {
+                return;
+            }
+        }
+
         // Replace the optimistic local echo when the server confirms it, adopting
         // the server timestamp in place of the local send time. The echo was
         // appended at `Local::now()`; the confirmed server time may be earlier
         // (clock skew, or a historical send), so re-insert it at the correct
         // chronological position rather than retiming it in place - leaving it
         // put would break the sorted invariant for every later insert.
+        // Only a still-pending message is a candidate: confirmed messages keep
+        // their `echo_of`, and Matrix backfill returns our own historical sends
+        // with their (per-run, possibly colliding) transaction ids, so matching
+        // a confirmed message would let a backfilled event steal its line.
         if let Some(txn) = echo_of {
-            if let Some(pos) = buffer.messages.iter().position(|m| m.txn() == Some(txn)) {
+            if let Some(pos) = buffer
+                .messages
+                .iter()
+                .position(|m| m.pending && m.txn() == Some(txn))
+            {
                 let mut slot = buffer.messages.remove(pos);
                 slot.event = event;
                 slot.pending = false;
@@ -605,14 +623,6 @@ impl State {
                     slot.time = time.with_timezone(&Local);
                 }
                 buffer.insert_message(slot);
-                return;
-            }
-        }
-
-        // Skip duplicate events (same message re-delivered from both backfill and
-        // live sync, or from SDK re-delivery on re-join).
-        if let Some(ref event_id) = id {
-            if buffer.messages.iter().any(|m| m.has_event_id(event_id)) {
                 return;
             }
         }
@@ -1087,6 +1097,16 @@ impl Selection {
     }
 }
 
+/// A renderer-computed top-of-history scroll clamp (see
+/// [`ViewState::top_scroll`]). Tagged with the buffer and its message count so
+/// the hint invalidates itself when the buffer changes or grows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopScroll {
+    pub buffer: BufferId,
+    pub len: usize,
+    pub scroll: usize,
+}
+
 /// View-layer state: which buffer is focused and the input mode. Kept separate
 /// from domain [`State`] so a future split-pane layout can track focus/scroll
 /// per pane without touching the domain model.
@@ -1098,6 +1118,15 @@ pub struct ViewState {
     /// Updated by the renderer after each draw; used by scroll key handlers to
     /// compute page-height steps without a second terminal size query.
     pub viewport_height: u16,
+    /// The top-of-history scroll clamp from the most recent render, when the
+    /// render window reached the oldest message: the largest `scroll_position`
+    /// at which the oldest message still renders on a full screen. Scrolling
+    /// past it only shrinks the visible message count toward a single line
+    /// (`scroll_position` counts messages while the viewport is rows, so the
+    /// state layer cannot compute this itself - only the renderer knows the
+    /// wrapped heights). Read by the scroll key handlers via
+    /// [`ViewState::top_scroll_for`]; `None` when the top is off-window.
+    pub top_scroll: Option<TopScroll>,
     /// Per-row horizontal scroll offsets of the buffer bar (columns). Persisted
     /// across frames so "follow" mode can scroll minimally without jumping each
     /// frame; resized by the renderer to the row count of the current bar.
@@ -1147,6 +1176,12 @@ pub struct ViewState {
     /// The completion popup above the input line. Managed by the input
     /// handler's refresh-on-edit hook; drawn by the renderer when open.
     pub completion: CompletionPopup,
+    /// Scroll positions that page jumps (PageUp/PageDown) left from in the
+    /// focused buffer, most recent last. A page step is measured on the screen
+    /// being *left* (content heights vary), so the reverse key cannot re-derive
+    /// where it came from - it pops this trail instead and returns exactly.
+    /// Cleared on focus change and by every non-page scroll movement.
+    pub page_trail: Vec<usize>,
 }
 
 /// Minimum sidebar width in columns. Narrow enough for short nicks while still
@@ -1159,6 +1194,17 @@ const SIDEBAR_MESSAGE_RESERVE: u16 = 20;
 impl ViewState {
     pub fn new() -> Self {
         ViewState::default()
+    }
+
+    /// The top-of-history scroll clamp for `buffer`, if the most recent render
+    /// computed one that is still valid: same buffer and unchanged message
+    /// count (an insert shifts what any message index means, so a stale hint
+    /// must not clamp).
+    pub fn top_scroll_for(&self, buffer: &BufferId, len: usize) -> Option<usize> {
+        self.top_scroll
+            .as_ref()
+            .filter(|top| top.buffer == *buffer && top.len == len)
+            .map(|top| top.scroll)
     }
 
     /// The sidebar width to use for a horizontal split of `total_width` columns.
@@ -1279,6 +1325,8 @@ impl ViewState {
             .insert(buffer.backend, buffer.clone());
         self.focused = Some(buffer);
         self.exit_message_selection();
+        // Trail positions are indices into the previous buffer's messages.
+        self.page_trail.clear();
     }
 
     /// The backend a tabbed bar layout should show: the explicitly selected one
@@ -1900,6 +1948,64 @@ mod tests {
         assert_eq!(buf.messages[1].time.timestamp(), 2000);
     }
 
+    /// An own message sent with a `TxnId` and an own historical message from a
+    /// previous run can carry the *same* transaction id (Matrix persists them
+    /// per device and hands them back on backfill). The backfilled copy must
+    /// insert as its own line, never steal the already-confirmed message.
+    #[test]
+    fn backfilled_own_message_does_not_steal_confirmed_message() {
+        let mut state = test_state();
+        let txn = TxnId(3);
+        let own = |event_id: &str, ts: i64| ChatEvent::Message {
+            target: TargetId::from("#tirc"),
+            id: Some(tirc_core::EventId(event_id.to_string())),
+            sender: UserRef::new("me"),
+            body: MessageBody::plain("hi"),
+            kind: MsgKind::Text,
+            echo_of: Some(txn),
+            time: chrono::DateTime::from_timestamp(ts, 0),
+        };
+
+        // A confirmed message from this session.
+        state.apply(backend(), own("$new", 2000));
+        // Scroll-back delivers an older own message with a colliding txn.
+        state.apply(backend(), own("$old", 1000));
+
+        let buf = buffer(&state, "#tirc");
+        assert_eq!(buf.messages.len(), 2, "backfill must add a line");
+        assert!(buf.messages[0].has_event_id(&tirc_core::EventId("$old".into())));
+        assert!(buf.messages[1].has_event_id(&tirc_core::EventId("$new".into())));
+    }
+
+    /// A re-delivered copy of an already-stored event (same event id) must be
+    /// dropped by the id dedup even when it carries an `echo_of`, instead of
+    /// re-entering the echo-replacement path.
+    #[test]
+    fn redelivered_event_with_echo_of_is_deduped() {
+        let mut state = test_state();
+        let txn = TxnId(9);
+        let echo = ChatEvent::Message {
+            target: TargetId::from("#tirc"),
+            id: Some(tirc_core::EventId("$echo".to_string())),
+            sender: UserRef::new("me"),
+            body: MessageBody::plain("hi"),
+            kind: MsgKind::Text,
+            echo_of: Some(txn),
+            time: chrono::DateTime::from_timestamp(1000, 0),
+        };
+
+        // Optimistic copy, then its server echo.
+        state.apply(backend(), message("#tirc", "me", Some(txn)));
+        state.apply(backend(), echo.clone());
+        assert_eq!(buffer(&state, "#tirc").messages.len(), 1);
+
+        // The same event arrives again (backfill overlapping live sync).
+        state.apply(backend(), echo);
+        let buf = buffer(&state, "#tirc");
+        assert_eq!(buf.messages.len(), 1);
+        assert!(!buf.messages[0].pending);
+    }
+
     #[test]
     fn join_for_already_present_member_renders_no_line() {
         let mut state = test_state();
@@ -2032,11 +2138,16 @@ mod tests {
         // per-backend memory for the first one.
         let other = BackendId(1);
         let b = BufferId::new(other, "#b");
+        view.page_trail.push(7);
         view.focus(b.clone());
         assert_eq!(view.selected_backend, Some(other));
         assert_eq!(view.effective_selected_backend(), Some(other));
         assert_eq!(view.last_focused_per_backend.get(&backend()), Some(&a));
         assert_eq!(view.last_focused_per_backend.get(&other), Some(&b));
+        assert!(
+            view.page_trail.is_empty(),
+            "trail positions index the previous buffer's messages"
+        );
     }
 
     #[test]
