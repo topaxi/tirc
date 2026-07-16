@@ -353,6 +353,10 @@ async fn connect_once(
 
     let joined = get_joined_channels(&session, &team_id).await?;
     let mut channel_names: HashMap<String, String> = HashMap::new();
+    // user id -> username cache for history posts, which carry only user ids
+    // (live WS posts carry `sender_name` instead).
+    let mut usernames: HashMap<String, String> =
+        HashMap::from([(session.user_id.clone(), username.clone())]);
 
     for ch in &joined {
         let display = channel_display_name(ch);
@@ -486,7 +490,7 @@ async fn connect_once(
                     Some(cmd) => {
                         apply_command(
                             id, &session, events, &mut sink,
-                            &team_id, &mut channel_names, &username, cmd,
+                            &team_id, &mut channel_names, &mut usernames, &username, cmd,
                         ).await?;
                     }
                 }
@@ -815,6 +819,7 @@ async fn apply_command(
     _sink: &mut WsSink,
     team_id: &str,
     channel_names: &mut HashMap<String, String>,
+    usernames: &mut HashMap<String, String>,
     my_username: &str,
     cmd: Command,
 ) -> anyhow::Result<()> {
@@ -938,6 +943,53 @@ async fn apply_command(
             }
         }
 
+        Command::FetchHistory {
+            target,
+            before_id,
+            limit,
+            ..
+        } => {
+            let path = match &before_id {
+                Some(post) => format!(
+                    "channels/{}/posts?before={}&per_page={limit}",
+                    target.as_str(),
+                    post.0
+                ),
+                None => format!("channels/{}/posts?per_page={limit}", target.as_str()),
+            };
+            let at_start = match session.get(&path).await {
+                Ok(v) => {
+                    // `order` is newest-first post ids; `posts` maps id -> post.
+                    // Emit oldest-first so `State`'s sorted insert appends.
+                    let order: Vec<&str> = v["order"]
+                        .as_array()
+                        .map(|a| a.iter().filter_map(Value::as_str).collect())
+                        .unwrap_or_default();
+                    for post_id in order.iter().rev() {
+                        let post = &v["posts"][*post_id];
+                        let user_id = post["user_id"].as_str().unwrap_or_default();
+                        let sender = resolve_username(session, usernames, user_id).await;
+                        if let Some(event) =
+                            history_post_to_message(post, &target, sender, &session.base_url)
+                        {
+                            send_event(id, events, event);
+                        }
+                    }
+                    // A short page means the channel has no older posts.
+                    order.len() < limit as usize
+                }
+                Err(err) => {
+                    log::warn!("FetchHistory for {} failed: {err}", target.as_str());
+                    false
+                }
+            };
+            send_backend(
+                id,
+                events,
+                BackendEvent::HistoryFetched { target, at_start },
+            );
+        }
+
         // Unsupported commands are silently ignored.
         _ => {}
     }
@@ -945,9 +997,59 @@ async fn apply_command(
     Ok(())
 }
 
+/// Converts a REST history post into a [`ChatEvent::Message`]. Returns `None`
+/// for system posts (joins, header changes - non-empty `type`) and posts
+/// without an id. The post id doubles as the event id, so overlap with live
+/// WS posts is absorbed by `State`'s dedup.
+fn history_post_to_message(
+    post: &Value,
+    target: &TargetId,
+    sender: String,
+    base_url: &str,
+) -> Option<ChatEvent> {
+    if !post["type"].as_str().unwrap_or_default().is_empty() {
+        return None;
+    }
+    let post_id = post["id"].as_str().filter(|s| !s.is_empty())?;
+    let message = post["message"].as_str().unwrap_or_default().to_string();
+    let attachments = post_attachments(post, base_url);
+
+    Some(ChatEvent::Message {
+        target: target.clone(),
+        id: Some(EventId(post_id.to_string())),
+        sender: UserRef::new(sender),
+        body: MessageBody::with_attachments(message, attachments),
+        kind: MsgKind::Text,
+        echo_of: None,
+        time: post["create_at"]
+            .as_i64()
+            .and_then(chrono::DateTime::from_timestamp_millis),
+    })
+}
+
+/// Resolves a Mattermost user id to a username via the cache, fetching it from
+/// the REST API on a miss and falling back to the raw id (mirroring how the
+/// reaction path degrades when the name is unknown).
+async fn resolve_username(
+    session: &MmSession,
+    usernames: &mut HashMap<String, String>,
+    user_id: &str,
+) -> String {
+    if let Some(name) = usernames.get(user_id) {
+        return name.clone();
+    }
+    let name = match session.get(&format!("users/{user_id}")).await {
+        Ok(user) => user["username"].as_str().unwrap_or(user_id).to_string(),
+        Err(_) => user_id.to_string(),
+    };
+    usernames.insert(user_id.to_string(), name.clone());
+    name
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{make_ws_url, post_attachments, AttachmentKind};
+    use super::{history_post_to_message, make_ws_url, post_attachments, AttachmentKind};
+    use crate::core::{ChatEvent, EventId, TargetId};
 
     #[test]
     fn post_attachments_classify_by_mime_and_build_urls() {
@@ -974,6 +1076,64 @@ mod tests {
     fn post_without_files_has_no_attachments() {
         let post = serde_json::json!({ "message": "hi" });
         assert!(post_attachments(&post, "https://mm.example.com").is_empty());
+    }
+
+    #[test]
+    fn history_post_to_message_maps_fields() {
+        let post = serde_json::json!({
+            "id": "post1",
+            "user_id": "u1",
+            "message": "hello",
+            "create_at": 1_700_000_000_000i64,
+            "type": "",
+            "metadata": { "files": [
+                { "id": "abc", "name": "cat.png", "mime_type": "image/png" },
+            ]}
+        });
+        let target = TargetId::from("chan1");
+        let event = history_post_to_message(
+            &post,
+            &target,
+            "alice".to_string(),
+            "https://mm.example.com",
+        )
+        .expect("regular post maps to a message");
+        match event {
+            ChatEvent::Message {
+                id,
+                sender,
+                body,
+                echo_of,
+                time,
+                ..
+            } => {
+                assert_eq!(id, Some(EventId("post1".to_string())));
+                assert_eq!(sender.id, "alice");
+                assert_eq!(body.text, "hello");
+                assert_eq!(body.attachments.len(), 1);
+                assert_eq!(echo_of, None);
+                assert_eq!(time.unwrap().timestamp_millis(), 1_700_000_000_000);
+            }
+            other => panic!("expected message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn system_post_maps_to_none() {
+        let post = serde_json::json!({
+            "id": "post2",
+            "user_id": "u1",
+            "message": "alice joined the channel",
+            "type": "system_join_channel",
+        });
+        let target = TargetId::from("chan1");
+        assert!(history_post_to_message(
+            &post,
+            &target,
+            "alice".to_string(),
+            "https://mm.example.com"
+        )
+        .is_none());
     }
 
     #[test]
