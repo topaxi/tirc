@@ -319,6 +319,12 @@ setmetatable(M, {
       return _tirc.__get_ui()
     end
 
+    -- `__`-prefixed keys are private host internals; they are only reachable
+    -- via `require('_tirc')`, never through the public `tirc` facade.
+    if type(key) == 'string' and key:sub(1, 2) == '__' then
+      return nil
+    end
+
     return _tirc[key]
   end,
   __newindex = function(t, key, value)
