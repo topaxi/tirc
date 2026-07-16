@@ -67,7 +67,7 @@ use crate::core::{
     TargetId, TxnId, UserRef, VerifyAction,
 };
 
-use super::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
+use crate::core::backend::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
 
 /// Connection parameters for a Matrix backend, built from the user config.
 #[derive(Clone, Debug)]

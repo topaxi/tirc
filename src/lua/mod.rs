@@ -1,6 +1,9 @@
 use mlua::{Lua, Table, Value};
 
+pub mod builtins;
 pub mod date_time;
+pub mod runtime;
+pub mod theme;
 
 pub fn get_loaded_modules(lua: &Lua) -> mlua::Result<mlua::Table> {
     let globals = lua.globals();

@@ -16,7 +16,7 @@ use crate::core::{
     MembershipChange, MessageBody, MsgKind, Protocol, TargetId, TxnId, UserRef,
 };
 
-use super::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
+use crate::core::backend::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
 
 /// CTCP ACTION wrapper byte sequence (`\x01ACTION <text>\x01`).
 const ACTION_PREFIX: &str = "\u{1}ACTION ";

@@ -2,13 +2,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use indoc::indoc;
-use mlua::{IntoLuaMulti, Lua, LuaSerdeExt, Table, Value};
+use mlua::{Lua, LuaSerdeExt, Table, Value};
 use serde::Deserialize;
 
 use crate::{
-    core::{BackendId, Protocol},
-    lua::{date_time::create_date_time_module, get_or_create_module, set_loaded_modules},
-    tui::lua::create_tirc_theme_lua_module,
+    core::Protocol,
+    lua::builtins::{register_builtin_modules, TYPE_DEFINITIONS},
+    lua::get_or_create_module,
+    lua::runtime::reset_runtime,
 };
 
 pub mod aliases;
@@ -195,322 +196,6 @@ fn get_default_config() -> &'static str {
     "}
 }
 
-/// The closed set of side-effect events themes/plugins can subscribe to via
-/// `tirc.on(name, fn)`. Keeping this an enum (rather than formatting a registry
-/// key from an arbitrary string on every emit) is the single source of truth for
-/// valid event names and avoids a per-emit allocation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EventName {
-    /// A normalized [`ChatEvent`](crate::core::ChatEvent) arrived from a backend.
-    Event,
-}
-
-impl EventName {
-    /// The (static) registry key under which this event's handlers are stored.
-    fn registry_key(self) -> &'static str {
-        match self {
-            EventName::Event => "tirc-event-event",
-        }
-    }
-
-    fn parse(name: &str) -> Option<Self> {
-        match name {
-            "event" => Some(EventName::Event),
-            _ => None,
-        }
-    }
-}
-
-/// Backs the `tirc.log.*` helpers: routes a message from Lua through the `log`
-/// facade (captured by the `:debug` pane). The `tirc::lua` target keeps Lua
-/// output at the same verbosity as the rest of the crate under the default filter.
-fn lua_log(_: &Lua, (level, message): (String, String)) -> mlua::Result<()> {
-    match level.as_str() {
-        "error" => log::error!(target: "tirc::lua", "{message}"),
-        "warn" => log::warn!(target: "tirc::lua", "{message}"),
-        "info" => log::info!(target: "tirc::lua", "{message}"),
-        "debug" => log::debug!(target: "tirc::lua", "{message}"),
-        _ => log::trace!(target: "tirc::lua", "{message}"),
-    }
-    Ok(())
-}
-
-fn register_event(lua: &Lua, (name, func): (String, mlua::Function)) -> mlua::Result<()> {
-    let event = EventName::parse(&name)
-        .ok_or_else(|| mlua::Error::external(anyhow!("unknown event name: {name}")))?;
-    let key = event.registry_key();
-
-    match lua.named_registry_value::<mlua::Value>(key)? {
-        mlua::Value::Table(tbl) => {
-            let len = tbl.raw_len();
-            tbl.set(len + 1, func)?;
-        }
-        _ => {
-            let tbl = lua.create_table()?;
-            tbl.set(1, func)?;
-            lua.set_named_registry_value(key, tbl)?;
-        }
-    }
-
-    // Track event name so reload_lua_theme can clear it
-    let tracked: mlua::Value = lua.named_registry_value("tirc-registered-events")?;
-    let tracked = match tracked {
-        mlua::Value::Table(t) => t,
-        _ => {
-            let t = lua.create_table()?;
-            lua.set_named_registry_value("tirc-registered-events", &t)?;
-            t
-        }
-    };
-    tracked.set(name, true)?;
-
-    Ok(())
-}
-
-/// Dispatches a fire-and-forget event to every handler registered via
-/// `tirc.on(name, ...)`. Handler return values are ignored.
-pub fn emit_event<Args>(lua: &Lua, event: EventName, args: Args) -> mlua::Result<()>
-where
-    Args: IntoLuaMulti + Clone,
-{
-    if let mlua::Value::Table(tbl) = lua.named_registry_value(event.registry_key())? {
-        for func in tbl.sequence_values::<mlua::Function>() {
-            func?.call::<()>(args.clone())?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Returns the theme object stored as `tirc.ui`, or `None` when none is set.
-fn ui_object(lua: &Lua) -> Option<Table> {
-    match lua.named_registry_value::<Value>("tirc-ui").ok()? {
-        Value::Table(tbl) => Some(tbl),
-        _ => None,
-    }
-}
-
-/// Backs the `tirc.ui` property getter; exposed to Lua as `_tirc.__get_ui`.
-fn get_ui(lua: &Lua, _: ()) -> mlua::Result<Value> {
-    lua.named_registry_value::<Value>("tirc-ui")
-}
-
-/// Reads a string-sequence field from the `tirc.ui` theme object (through its
-/// metatable chain, so class-level fields are found). `None` when no theme is
-/// set or the field is absent/not a table. Used for theme-declared metadata
-/// like `buffer_bar_styles`.
-pub fn ui_string_list(lua: &Lua, name: &str) -> Option<Vec<String>> {
-    let ui = ui_object(lua)?;
-    match ui.get::<Value>(name).ok()? {
-        Value::Table(list) => Some(
-            list.sequence_values::<String>()
-                .filter_map(Result::ok)
-                .collect(),
-        ),
-        _ => None,
-    }
-}
-
-/// Backs the `tirc.ui` property setter; exposed to Lua as `_tirc.__set_ui`.
-///
-/// Stores `value` as the theme object verbatim, preserving its metatable so Rust
-/// can call its formatters method-style. Assigning `tirc.ui` replaces the whole
-/// object; to combine themes, extend or patch the existing object in Lua rather
-/// than relying on a merge here.
-fn set_ui(lua: &Lua, value: Value) -> mlua::Result<()> {
-    lua.set_named_registry_value("tirc-ui", value)
-}
-
-/// Invokes the UI formatter named `name` on the `tirc.ui` theme object.
-///
-/// Returns `None` when no theme or no such formatter is set, otherwise the
-/// formatter's `mlua::Result` (an `Err` if the Lua callback raised). The caller
-/// is responsible for rendering errors.
-///
-/// Formatters are called method-style: the `tirc.ui` object is passed as the
-/// receiver (the implicit `self` of a `:` method) ahead of `args`, so a formatter
-/// can use `self` to reach sibling methods and styles.
-pub fn call_formatter<Args>(lua: &Lua, name: &str, args: Args) -> Option<mlua::Result<mlua::Value>>
-where
-    Args: IntoLuaMulti,
-{
-    let ui = ui_object(lua)?;
-    let func: mlua::Function = match ui.get(name) {
-        Ok(Some(func)) => func,
-        _ => return None,
-    };
-
-    let mut args = match args.into_lua_multi(lua) {
-        Ok(args) => args,
-        Err(err) => return Some(Err(err)),
-    };
-    args.push_front(mlua::Value::Table(ui));
-
-    Some(func.call(args))
-}
-
-/// Registry key holding the sequence of Lua completion-source specs.
-const COMPLETION_SOURCES_KEY: &str = "tirc-completion-sources";
-
-/// Returns the `tirc-completion-sources` registry table, creating it on first
-/// access. A sequence of spec tables registered via
-/// `tirc.register_completion_source`, consulted by the completion engine after
-/// the builtin sources.
-pub fn completion_sources_registry(lua: &Lua) -> mlua::Result<Table> {
-    match lua.named_registry_value::<Value>(COMPLETION_SOURCES_KEY)? {
-        Value::Table(tbl) => Ok(tbl),
-        _ => {
-            let tbl = lua.create_table()?;
-            lua.set_named_registry_value(COMPLETION_SOURCES_KEY, &tbl)?;
-            Ok(tbl)
-        }
-    }
-}
-
-/// Backs `tirc.register_completion_source`: appends a completion-source spec
-/// table (`{ name, mode, trigger, complete }`) to the registry. The spec is
-/// validated lazily when the engine queries it, so registration itself never
-/// fails on shape errors; missing core fields are rejected here to catch
-/// typos early.
-fn register_completion_source(lua: &Lua, spec: Table) -> mlua::Result<()> {
-    if !spec.contains_key("mode")? {
-        return Err(mlua::Error::external(anyhow!(
-            "completion source is missing 'mode'"
-        )));
-    }
-    if !matches!(spec.get::<Value>("trigger")?, Value::Table(_)) {
-        return Err(mlua::Error::external(anyhow!(
-            "completion source is missing a 'trigger' table"
-        )));
-    }
-    if !matches!(spec.get::<Value>("complete")?, Value::Function(_)) {
-        return Err(mlua::Error::external(anyhow!(
-            "completion source is missing a 'complete' function"
-        )));
-    }
-    let registry = completion_sources_registry(lua)?;
-    registry.set(registry.raw_len() + 1, spec)?;
-    Ok(())
-}
-
-/// Registry key holding the per-backend metadata table (`id -> metadata`).
-const BACKEND_METADATA_KEY: &str = "tirc-backend-metadata";
-
-/// Returns the `tirc-backend-metadata` registry table, creating it on first
-/// access. Maps `BackendId.0` (integer) to the server's `metadata` Lua table.
-fn backend_metadata_registry(lua: &Lua) -> mlua::Result<Table> {
-    match lua.named_registry_value::<Value>(BACKEND_METADATA_KEY)? {
-        Value::Table(tbl) => Ok(tbl),
-        _ => {
-            let tbl = lua.create_table()?;
-            lua.set_named_registry_value(BACKEND_METADATA_KEY, &tbl)?;
-            Ok(tbl)
-        }
-    }
-}
-
-/// Stores the `metadata` value for `id` so themes can read it back while
-/// rendering. The value is kept as-is (an arbitrary Lua table), never copied.
-pub fn set_backend_metadata(lua: &Lua, id: BackendId, value: Value) -> mlua::Result<()> {
-    backend_metadata_registry(lua)?.set(id.0, value)
-}
-
-/// Returns the stored metadata table for `id`, or `None` when the backend has no
-/// metadata. Used by the render helpers to attach `backend.metadata`.
-pub fn get_backend_metadata(lua: &Lua, id: BackendId) -> Option<Value> {
-    match backend_metadata_registry(lua)
-        .ok()?
-        .get::<Value>(id.0)
-        .ok()?
-    {
-        Value::Nil => None,
-        value => Some(value),
-    }
-}
-
-/// Copies the `metadata` table of `config.servers[id + 1]` (Lua is 1-based) from
-/// the evaluated `config` global into the per-backend store. A no-op when the
-/// server entry carries no `metadata`. Relies on the existing identity that
-/// `BackendId(index)` corresponds to the `index`-th configured server.
-pub fn register_backend_metadata(lua: &Lua, id: BackendId) -> mlua::Result<()> {
-    let Value::Table(config) = lua.globals().get::<Value>("config")? else {
-        return Ok(());
-    };
-    let Value::Table(servers) = config.get::<Value>("servers")? else {
-        return Ok(());
-    };
-    let Value::Table(server) = servers.get::<Value>(id.0 + 1)? else {
-        return Ok(());
-    };
-
-    match server.get::<Value>("metadata")? {
-        Value::Nil => Ok(()),
-        metadata => set_backend_metadata(lua, id, metadata),
-    }
-}
-
-fn get_version() -> semver::Version {
-    semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("Unable to parse version")
-}
-
-fn get_version_lua_value(lua: &Lua) -> mlua::Table {
-    let version = get_version();
-    let table = lua.create_table().expect("Unable to create table");
-    let metatable = lua.create_table().expect("Unable to create metatable");
-
-    table
-        .set("major", version.major)
-        .expect("Unable to set major");
-    table
-        .set("minor", version.minor)
-        .expect("Unable to set minor");
-    table
-        .set("patch", version.patch)
-        .expect("Unable to set patch");
-
-    metatable
-        .set(
-            "__tostring",
-            lua.create_function(|_, version: mlua::Table| {
-                let major: u8 = version.get("major").expect("Unable to get major");
-                let minor: u8 = version.get("minor").expect("Unable to get minor");
-                let patch: u8 = version.get("patch").expect("Unable to get patch");
-
-                Ok(format!("{}.{}.{}", major, minor, patch))
-            })
-            .expect("Unable to create __tostring function"),
-        )
-        .expect("Unable to set __tostring");
-
-    table
-        .set_metatable(Some(metatable))
-        .expect("Unable to set metatable");
-
-    table
-}
-
-const TIRC_INIT_LUA: &str = include_str!("../../lua/tirc/init.lua");
-const TIRC_CONFIG_LUA: &str = include_str!("../../lua/tirc/config.lua");
-const TIRC_UTILS_LUA: &str = include_str!("../../lua/tirc/utils.lua");
-const TIRC_CLASS_LUA: &str = include_str!("../../lua/tirc/class.lua");
-const TIRC_THEME_LUA: &str = include_str!("../../lua/tirc/tui/theme.lua");
-const TIRC_DEFAULT_THEME_LUA: &str = include_str!("../../lua/tirc/tui/themes/default.lua");
-const TIRC_SLANTED_THEME_LUA: &str = include_str!("../../lua/tirc/tui/themes/slanted.lua");
-
-/// Bundled Lua sources written to the config `types/` directory so an editor's
-/// Lua language server can resolve `require('tirc.*')` and the `---@class` types
-/// (`TircEvent`, `TircUi`, `TircTheme`, ...) when editing `init.lua`. Keyed by
-/// their require path relative to `types/`.
-const TYPE_DEFINITIONS: &[(&str, &str)] = &[
-    ("tirc/init.lua", TIRC_INIT_LUA),
-    ("tirc/config.lua", TIRC_CONFIG_LUA),
-    ("tirc/utils.lua", TIRC_UTILS_LUA),
-    ("tirc/class.lua", TIRC_CLASS_LUA),
-    ("tirc/tui/theme.lua", TIRC_THEME_LUA),
-    ("tirc/tui/themes/default.lua", TIRC_DEFAULT_THEME_LUA),
-    ("tirc/tui/themes/slanted.lua", TIRC_SLANTED_THEME_LUA),
-];
-
 /// `.luarc.json` pointing the Lua language server at the exported definitions.
 const LUARC_JSON: &str = r#"{
   "runtime": {
@@ -553,102 +238,6 @@ fn write_type_definitions(config_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// In debug (non-test) builds, reads a builtin Lua file from the source tree so
-/// edits are picked up without recompiling. Falls back to the embedded string if
-/// the file cannot be read (e.g. the binary has moved off the build machine).
-/// In test and release builds the embedded string is always used so tests are
-/// not affected by local WIP edits to the Lua files.
-///
-/// Returns `(chunk_name, source)` where `chunk_name` is the real path in debug
-/// builds and the `{builtin}/...` sentinel in release/test builds.
-fn load_builtin(
-    relative: &str,
-    embedded: &'static str,
-) -> (String, std::borrow::Cow<'static, str>) {
-    #[cfg(all(debug_assertions, not(test)))]
-    {
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
-        if let Ok(content) = std::fs::read_to_string(&src) {
-            return (src.display().to_string(), std::borrow::Cow::Owned(content));
-        }
-    }
-    (
-        format!("{{builtin}}/{relative}"),
-        std::borrow::Cow::Borrowed(embedded),
-    )
-}
-
-/// Returns the absolute paths to all builtin Lua source files in the repo.
-///
-/// Only available in debug (non-test) builds where `CARGO_MANIFEST_DIR` points
-/// at the live source tree. Used to include builtins in the file-watch list so
-/// that edits trigger a hot reload without recompiling.
-#[cfg(all(debug_assertions, not(test)))]
-pub fn builtin_lua_paths() -> Vec<std::path::PathBuf> {
-    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    [
-        "lua/tirc/init.lua",
-        "lua/tirc/config.lua",
-        "lua/tirc/utils.lua",
-        "lua/tirc/class.lua",
-        "lua/tirc/tui/theme.lua",
-        "lua/tirc/tui/themes/default.lua",
-        "lua/tirc/tui/themes/slanted.lua",
-    ]
-    .iter()
-    .map(|p| base.join(p))
-    .filter(|p| p.exists())
-    .collect()
-}
-
-/// Registers the `_tirc` runtime module and all builtin `tirc.*` Lua modules.
-///
-/// In release builds this is filesystem-free (embedded strings only), which
-/// makes it safe to call from tests. In debug builds the sources are read from
-/// the repo so edits are hot-reloadable without recompiling.
-pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
-    let tirc_mod = get_or_create_module(lua, "_tirc")?;
-
-    tirc_mod.set("version", get_version_lua_value(lua))?;
-    tirc_mod.set("on", lua.create_function(register_event)?)?;
-    tirc_mod.set(
-        "register_completion_source",
-        lua.create_function(register_completion_source)?,
-    )?;
-    tirc_mod.set("__log", lua.create_function(lua_log)?)?;
-    tirc_mod.set("__get_ui", lua.create_function(get_ui)?)?;
-    tirc_mod.set("__set_ui", lua.create_function(set_ui)?)?;
-
-    create_date_time_module(lua)?;
-    create_tirc_theme_lua_module(lua)?;
-
-    let (name, src) = load_builtin("lua/tirc/init.lua", TIRC_INIT_LUA);
-    let public_tirc_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
-    set_loaded_modules(lua, "tirc", public_tirc_module)?;
-
-    let (name, src) = load_builtin("lua/tirc/config.lua", TIRC_CONFIG_LUA);
-    let config_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
-    set_loaded_modules(lua, "tirc.config", config_module)?;
-
-    let (name, src) = load_builtin("lua/tirc/utils.lua", TIRC_UTILS_LUA);
-    let utils_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
-    set_loaded_modules(lua, "tirc.utils", utils_module)?;
-
-    let (name, src) = load_builtin("lua/tirc/class.lua", TIRC_CLASS_LUA);
-    let class_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
-    set_loaded_modules(lua, "tirc.class", class_module)?;
-
-    let (name, src) = load_builtin("lua/tirc/tui/themes/default.lua", TIRC_DEFAULT_THEME_LUA);
-    let default_theme_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
-    set_loaded_modules(lua, "tirc.tui.themes.default", default_theme_module)?;
-
-    let (name, src) = load_builtin("lua/tirc/tui/themes/slanted.lua", TIRC_SLANTED_THEME_LUA);
-    let slanted_theme_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
-    set_loaded_modules(lua, "tirc.tui.themes.slanted", slanted_theme_module)?;
-
-    Ok(())
-}
-
 /// Registers builtins, sets config_dir, reads and evaluates the config file.
 ///
 /// Does NOT touch package.path - that is set once in load_config and must
@@ -678,26 +267,9 @@ pub fn reload_lua_theme(lua: &Lua, config_path: &Path) -> anyhow::Result<()> {
         .parent()
         .ok_or_else(|| anyhow!("config path has no parent directory"))?;
 
-    // Clear the UI formatter table so tirc.use(theme) starts from scratch
-    lua.set_named_registry_value("tirc-ui", mlua::Value::Nil)?;
-
-    // Clear all event handlers registered via tirc.on(name, fn)
-    let tracked: mlua::Value = lua.named_registry_value("tirc-registered-events")?;
-    if let mlua::Value::Table(tracked) = tracked {
-        let names: Vec<String> = tracked
-            .pairs::<String, mlua::Value>()
-            .map(|r| r.map(|(k, _)| k))
-            .collect::<mlua::Result<_>>()?;
-        for name in names {
-            let decorated = format!("tirc-event-{}", name);
-            lua.set_named_registry_value(&decorated, mlua::Value::Nil)?;
-        }
-    }
-    lua.set_named_registry_value("tirc-registered-events", mlua::Value::Nil)?;
-
-    // Clear Lua completion sources so :reload replaces them instead of
-    // appending duplicates.
-    lua.set_named_registry_value(COMPLETION_SOURCES_KEY, mlua::Value::Nil)?;
+    // Clear the theme object, event handlers, and Lua completion sources so
+    // tirc.use(theme) and re-registration start from scratch.
+    reset_runtime(lua)?;
 
     // Clear package.loaded in-place so user modules are re-required from disk.
     // In-place iteration-and-nil is used rather than table replacement because
@@ -817,9 +389,12 @@ pub fn load_config(lua: &Lua) -> Result<(TircConfig, PathBuf), anyhow::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::BackendInfo;
+    use crate::core::backend::BackendInfo;
     use crate::core::{
         BackendId, ChatEvent, MembershipChange, MessageBody, MsgKind, Protocol, TargetId, UserRef,
+    };
+    use crate::lua::runtime::{
+        call_formatter, get_backend_metadata, register_backend_metadata, ui_string_list,
     };
     use crate::tui::lua::to_lua_event;
     use crate::ui::StoredMessage;
@@ -871,8 +446,7 @@ mod tests {
         assert_eq!(items[1].insert, "plain");
 
         // The registry is cleared on reload so sources do not accumulate.
-        lua.set_named_registry_value(COMPLETION_SOURCES_KEY, mlua::Value::Nil)
-            .unwrap();
+        crate::lua::runtime::clear_completion_sources(&lua).unwrap();
         assert!(engine.query(&query, &lua).is_none());
     }
 

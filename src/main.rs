@@ -12,7 +12,7 @@ use anyhow::Context;
 use tirc::backends::irc::{IrcBackend, IrcBackendConfig};
 use tirc::backends::matrix::{MatrixBackend, MatrixBackendConfig};
 use tirc::backends::mattermost::{MattermostBackend, MattermostBackendConfig};
-use tirc::backends::{self, ChatBackend};
+use tirc::core::backend::{spawn as spawn_backend, ChatBackend};
 use tirc::config::{load_config, ServerConfig, TircConfig};
 use tirc::core::{BackendId, BackendMessage, BufferId, Protocol, TxnAllocator};
 use tirc::tui::preview::{build_client, link_preview_worker};
@@ -149,7 +149,7 @@ async fn root_task(
             continue;
         }
         let id = BackendId(index);
-        tirc::config::register_backend_metadata(lua, id)?;
+        tirc::lua::runtime::register_backend_metadata(lua, id)?;
         let backend = build_backend(id, server)?;
         let info = backend.info();
         for (target, name) in &server.aliases {
@@ -171,7 +171,7 @@ async fn root_task(
         backend_names.insert(info.name.clone(), id);
         state.register_backend(info);
         view.focus_if_unset(BufferId::status(id));
-        handles.push(backends::spawn(backend, event_tx.clone()));
+        handles.push(spawn_backend(backend, event_tx.clone()));
     }
     drop(event_tx);
 

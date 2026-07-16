@@ -32,7 +32,7 @@ use crate::core::{
     EventId, MembershipChange, MessageBody, MsgKind, Protocol, TargetId, TxnId, UserRef,
 };
 
-use super::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
+use crate::core::backend::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
 
 const RECONNECT_BASE_MS: u64 = 1_000;
 const RECONNECT_MAX_MS: u64 = 60_000;

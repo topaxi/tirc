@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use ratatui::layout::Rect;
 
 use super::completion::CompletionPopup;
-use crate::backends::BackendInfo;
+use crate::core::backend::BackendInfo;
 use crate::core::{
     BackendId, BufferId, BufferKind, ChatEvent, EventId, MemberRole, MembershipChange, MessageBody,
     TargetId, TxnId, UserRef,

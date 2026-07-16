@@ -8,11 +8,12 @@ use crossterm::event::{
 };
 use mlua::Lua;
 
-use crate::backends::BackendHandle;
+use crate::core::backend::BackendHandle;
 use crate::config::{
-    aliases::AliasStore, buffer_order::BufferOrderStore, collect_user_watched_paths, emit_event,
-    reload_lua_theme, ui_prefs::UiPrefsStore, EventName, QuickReactions, SelectionMode,
+    aliases::AliasStore, buffer_order::BufferOrderStore, collect_user_watched_paths,
+    reload_lua_theme, ui_prefs::UiPrefsStore, QuickReactions, SelectionMode,
 };
+use crate::lua::runtime::{emit_event, EventName};
 use crate::core::{
     BackendEvent, BackendId, BackendMessage, BufferId, ChatEvent, Command, EventId, MsgKind,
     TargetId, TxnAllocator, VerifyAction,
@@ -227,7 +228,7 @@ impl<'lua> InputHandler<'lua> {
         let mut paths = collect_user_watched_paths(lua, config_dir, config_path, extra_watch_files);
 
         #[cfg(all(debug_assertions, not(test)))]
-        paths.extend(crate::config::builtin_lua_paths());
+        paths.extend(crate::lua::builtins::builtin_lua_paths());
 
         paths
             .into_iter()
@@ -357,7 +358,7 @@ impl<'lua> InputHandler<'lua> {
     /// The bar styles the active theme declares via its `buffer_bar_styles`
     /// field, or `None` when the theme declares none.
     fn theme_bar_styles(&self) -> Option<Vec<String>> {
-        crate::config::ui_string_list(self.lua, "buffer_bar_styles")
+        crate::lua::runtime::ui_string_list(self.lua, "buffer_bar_styles")
             .filter(|styles| !styles.is_empty())
     }
 
@@ -954,7 +955,7 @@ impl<'lua> InputHandler<'lua> {
                     // Theme-defined element: hand the id back to the theme's
                     // handler, then apply any UI actions it queued.
                     if let Some(Err(err)) =
-                        crate::config::call_formatter(self.lua, "on_bar_click", id)
+                        crate::lua::runtime::call_formatter(self.lua, "on_bar_click", id)
                     {
                         log::warn!("on_bar_click failed: {err}");
                     }
@@ -2024,7 +2025,7 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::BackendInfo;
+    use crate::core::backend::BackendInfo;
     use crate::core::{BufferId, MessageBody, MsgKind, Protocol, TargetId, UserRef};
 
     fn state_with_buffers(channels: &[&str]) -> (State, BackendId) {

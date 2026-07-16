@@ -15,7 +15,7 @@ use tui_input::Input;
 
 use tracing::Level;
 
-use crate::backends::BackendInfo;
+use crate::core::backend::BackendInfo;
 use crate::core::{AttachmentKind, BackendId, BufferId, ChatEvent, EventId, TargetId};
 use crate::logging::LogLine;
 use crate::lua::date_time::date_time_to_table;
@@ -24,7 +24,9 @@ use crate::ui::{
     StoredMessage, ViewState,
 };
 
-use super::lua::{to_lua_event, to_lua_user, STYLE_MARKER};
+use crate::lua::theme::is_style_table;
+
+use super::lua::{to_lua_event, to_lua_user};
 use super::preview::{extract_urls, LinkPreview, PreviewRequest, PreviewResult};
 use super::tmux::{wrap_passthrough, wrap_passthrough_positioned, PaneOrigin};
 use super::wrap::wrap_line;
@@ -359,16 +361,6 @@ impl Default for Renderer {
     }
 }
 
-/// A table is a styled span `{ value, style }` iff its second element is a table
-/// tagged by `theme.style` (identity, not shape). Removes the old fragile
-/// "length 2 and `from_value` happens to succeed" heuristic.
-fn is_style_table(table: &mlua::Table) -> bool {
-    table
-        .metatable()
-        .and_then(|mt| mt.get::<Option<bool>>(STYLE_MARKER).ok().flatten())
-        .unwrap_or(false)
-}
-
 /// A message's image attachments, in order, with the data the renderer needs to
 /// show each inline or (failing that) as a text fallback. Empty for non-message
 /// events.
@@ -693,7 +685,7 @@ impl Renderer {
     where
         Args: mlua::IntoLuaMulti,
     {
-        match crate::config::call_formatter(lua, name, args) {
+        match crate::lua::runtime::call_formatter(lua, name, args) {
             None => Ok(vec![]),
             Some(Ok(value)) => self.lua_value_to_spans(lua, value),
             Some(Err(err)) => Ok(vec![Self::string_to_span(
@@ -761,7 +753,7 @@ impl Renderer {
     /// rows, each row an array of spans - into styled [`Line`]s. A missing
     /// formatter or non-table result yields no rows.
     fn format_preview_lines(&self, lua: &mlua::Lua, preview: mlua::Table) -> Vec<Line<'_>> {
-        let value = match crate::config::call_formatter(lua, "link_preview", preview) {
+        let value = match crate::lua::runtime::call_formatter(lua, "link_preview", preview) {
             Some(Ok(value)) => value,
             _ => return Vec::new(),
         };
@@ -1404,7 +1396,7 @@ impl Renderer {
         hovered_key: Option<&str>,
     ) -> Vec<ReactionPill<'_>> {
         let value =
-            match crate::config::call_formatter(lua, "render_reactions", (event, hovered_key)) {
+            match crate::lua::runtime::call_formatter(lua, "render_reactions", (event, hovered_key)) {
                 Some(Ok(value)) => value,
                 _ => return vec![],
             };
@@ -1431,7 +1423,7 @@ impl Renderer {
         else {
             return vec![];
         };
-        let value = match crate::config::call_formatter(
+        let value = match crate::lua::runtime::call_formatter(
             lua,
             "render_quick_reactions",
             (event, emojis, hovered_key),
@@ -1500,7 +1492,7 @@ impl Renderer {
         )?;
         t.set("backend_id", id.backend.0)?;
         t.set("backend_name", backend_name)?;
-        if let Some(metadata) = crate::config::get_backend_metadata(lua, id.backend) {
+        if let Some(metadata) = crate::lua::runtime::get_backend_metadata(lua, id.backend) {
             t.set("backend_metadata", metadata)?;
         }
         t.set("has_unread", buffer.has_unread)?;
@@ -1770,7 +1762,7 @@ impl Renderer {
             }
         };
 
-        match crate::config::call_formatter(lua, "render_buffer_bar", &tabs) {
+        match crate::lua::runtime::call_formatter(lua, "render_buffer_bar", &tabs) {
             Some(Ok(mlua::Value::Table(table))) => {
                 let style = Self::bar_bg_style(&table);
                 let scroll_mode = Self::bar_scroll_mode(&table);
@@ -2334,7 +2326,7 @@ mod tests {
     use ratatui::style::Color;
     use ratatui::text::Span;
 
-    use crate::tui::lua::create_tirc_theme_lua_module;
+    use crate::lua::theme::create_tirc_theme_lua_module;
 
     fn run_lua_code(lua: &mlua::Lua, code: &str) -> mlua::Result<mlua::Value> {
         lua.load(code).eval()
@@ -2477,14 +2469,14 @@ mod tests {
 
     #[test]
     fn build_bar_tabs_produces_contiguous_hit_boxes() -> anyhow::Result<(), anyhow::Error> {
-        use crate::backends::BackendInfo;
+        use crate::core::backend::BackendInfo;
         use crate::core::{
             BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef,
         };
         use crate::ui::{State, ViewState};
 
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load("require('tirc.tui.themes.default'):setup({})")
             .exec()?;
 
@@ -2550,14 +2542,14 @@ mod tests {
 
     #[test]
     fn buffer_tab_table_uses_alias_and_keeps_raw_target() -> anyhow::Result<(), anyhow::Error> {
-        use crate::backends::BackendInfo;
+        use crate::core::backend::BackendInfo;
         use crate::core::{
             BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef,
         };
         use crate::ui::State;
 
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load("require('tirc.tui.themes.default'):setup({})")
             .exec()?;
 
@@ -2598,13 +2590,13 @@ mod tests {
     /// elements (not a separate per-tab re-measure) is what makes this hold.
     #[test]
     fn slanted_theme_hit_boxes_cover_full_bar_width() -> anyhow::Result<(), anyhow::Error> {
-        use crate::backends::BackendInfo;
+        use crate::core::backend::BackendInfo;
         use crate::core::BackendId;
         use crate::core::{ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef};
         use crate::ui::{State, ViewState};
 
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load("require('tirc.tui.themes.slanted'):setup({})")
             .exec()?;
 
@@ -2679,7 +2671,7 @@ mod tests {
         use crate::ui::ViewState;
 
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load(indoc! {"
             require('tirc.tui.themes.default'):setup({
               render_buffer_bar = function(self, buffers)
@@ -2731,7 +2723,7 @@ mod tests {
         use crate::ui::ViewState;
 
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load("require('tirc.tui.themes.slanted'):setup({ buffer_bar = 'tabbed' })")
             .exec()?;
 
@@ -2754,7 +2746,7 @@ mod tests {
     #[test]
     fn default_theme_render_buffer_bar_returns_single_row() -> anyhow::Result<(), anyhow::Error> {
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load("require('tirc.tui.themes.default'):setup({})")
             .exec()?;
 
@@ -2777,7 +2769,7 @@ mod tests {
         tirc_mod.set("buffers", buffers.clone())?;
 
         let renderer = Renderer::new();
-        let value = crate::config::call_formatter(&lua, "render_buffer_bar", &buffers)
+        let value = crate::lua::runtime::call_formatter(&lua, "render_buffer_bar", &buffers)
             .expect("render_buffer_bar registered")
             .expect("render_buffer_bar callback");
         let rows = renderer.rows_to_lines_and_widths(&lua, value)?.0;
@@ -2794,7 +2786,7 @@ mod tests {
     /// rows above the newer one (each message here is body + reaction = 2 rows).
     #[test]
     fn reaction_hit_boxes_track_bottom_to_top_layout() -> anyhow::Result<(), anyhow::Error> {
-        use crate::backends::BackendInfo;
+        use crate::core::backend::BackendInfo;
         use crate::core::{
             BackendId, ChatEvent, EventId, MessageBody, MsgKind, Protocol, TargetId, UserRef,
         };
@@ -2802,7 +2794,7 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal};
 
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load("require('tirc.tui.themes.default'):setup({})")
             .exec()?;
 
@@ -2888,7 +2880,7 @@ mod tests {
     /// on the message's own line.
     #[test]
     fn link_preview_renders_below_message() -> anyhow::Result<(), anyhow::Error> {
-        use crate::backends::BackendInfo;
+        use crate::core::backend::BackendInfo;
         use crate::core::{
             BackendId, ChatEvent, EventId, MessageBody, MsgKind, Protocol, TargetId, UserRef,
         };
@@ -2896,7 +2888,7 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal};
 
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load("require('tirc.tui.themes.default'):setup({})")
             .exec()?;
 
@@ -2990,7 +2982,7 @@ mod tests {
     /// one close per row, so the wrapped link stays clickable end to end.
     #[test]
     fn wrapped_url_gets_osc8_hyperlinks_on_every_row() -> anyhow::Result<(), anyhow::Error> {
-        use crate::backends::BackendInfo;
+        use crate::core::backend::BackendInfo;
         use crate::core::{
             BackendId, ChatEvent, EventId, MessageBody, MsgKind, Protocol, TargetId, UserRef,
         };
@@ -2998,7 +2990,7 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal};
 
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load("require('tirc.tui.themes.default'):setup({})")
             .exec()?;
 
@@ -3081,7 +3073,7 @@ mod tests {
     /// than `List` dropping the whole over-tall item and hiding the message).
     #[test]
     fn link_preview_dropped_when_it_would_not_fit() -> anyhow::Result<(), anyhow::Error> {
-        use crate::backends::BackendInfo;
+        use crate::core::backend::BackendInfo;
         use crate::core::{
             BackendId, ChatEvent, EventId, MessageBody, MsgKind, Protocol, TargetId, UserRef,
         };
@@ -3089,7 +3081,7 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal};
 
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load("require('tirc.tui.themes.default'):setup({})")
             .exec()?;
 
@@ -3246,14 +3238,14 @@ mod tests {
         // Tab 0 [0..10): fully left of window → excluded.
         // Tab 1 [10..20): rel_start=0, rel_end=min(10,15)=10 → box (x=0, w=10).
         // Tab 2 [20..30): rel_start=10, rel_end=min(20,15)=15 → box (x=10, w=5).
-        use crate::backends::BackendInfo;
+        use crate::core::backend::BackendInfo;
         use crate::core::{
             BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef,
         };
         use crate::ui::{State, ViewState};
 
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load("require('tirc.tui.themes.default'):setup({})")
             .exec()?;
 
@@ -3388,7 +3380,7 @@ mod tests {
     #[test]
     fn theme_anchors_override_automatic_row_anchor() -> anyhow::Result<(), anyhow::Error> {
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         // A theme whose bar declares an explicit anchor on the second element
         // of row 1 and leaves row 2 automatic (0).
         lua.load(indoc! {"
@@ -3419,7 +3411,7 @@ mod tests {
     #[test]
     fn on_bar_click_actions_are_queued_by_lua_helpers() -> anyhow::Result<(), anyhow::Error> {
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load(indoc! {"
             local tirc = require('tirc')
             tirc.focus_buffer('0:#a')
@@ -3483,7 +3475,7 @@ mod tests {
     /// Builds a state with two IRC backends and one channel each, the shared
     /// fixture for the bar-layout tests.
     fn two_backend_state() -> crate::ui::State {
-        use crate::backends::BackendInfo;
+        use crate::core::backend::BackendInfo;
         use crate::core::{
             BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef,
         };
@@ -3521,7 +3513,7 @@ mod tests {
         view: &crate::ui::ViewState,
     ) -> anyhow::Result<(usize, Option<Vec<Vec<Option<BarHit>>>>)> {
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load(format!("require('tirc.tui.themes.default'):setup({setup})"))
             .exec()?;
 
@@ -3565,7 +3557,7 @@ mod tests {
         view.focus(BufferId::new(BackendId(0), "#a"));
 
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load("require('tirc.tui.themes.default'):setup({ buffer_bar = 'tabbed' })")
             .exec()?;
         let renderer = Renderer::new();
@@ -3652,7 +3644,7 @@ mod tests {
     #[test]
     fn date_separator_contains_date() -> anyhow::Result<(), anyhow::Error> {
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load("require('tirc.tui.themes.default'):setup({})")
             .exec()?;
 
@@ -3677,7 +3669,7 @@ mod tests {
     /// dated. Two messages on consecutive days must yield separators for both.
     #[test]
     fn oldest_message_has_date_separator_at_top() -> anyhow::Result<(), anyhow::Error> {
-        use crate::backends::BackendInfo;
+        use crate::core::backend::BackendInfo;
         use crate::core::{
             BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef,
         };
@@ -3686,7 +3678,7 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal};
 
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load("require('tirc.tui.themes.default'):setup({})")
             .exec()?;
 
@@ -3757,7 +3749,7 @@ mod tests {
     /// several rows) instead of overflowing off the right edge on a single row.
     #[test]
     fn link_preview_text_wraps() -> anyhow::Result<(), anyhow::Error> {
-        use crate::backends::BackendInfo;
+        use crate::core::backend::BackendInfo;
         use crate::core::{
             BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef,
         };
@@ -3766,7 +3758,7 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal};
 
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load("require('tirc.tui.themes.default'):setup({})")
             .exec()?;
 
@@ -3863,7 +3855,7 @@ mod tests {
     #[test]
     fn image_attachment_without_graphics_renders_fallback_line() -> anyhow::Result<(), anyhow::Error>
     {
-        use crate::backends::BackendInfo;
+        use crate::core::backend::BackendInfo;
         use crate::core::{
             Attachment, AttachmentKind, BackendId, ChatEvent, EventId, MessageBody, MsgKind,
             Protocol, TargetId, UserRef,
@@ -3872,7 +3864,7 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal};
 
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load("require('tirc.tui.themes.default'):setup({})")
             .exec()?;
 
@@ -3933,13 +3925,13 @@ mod tests {
     /// send would silently fail.
     #[test]
     fn read_only_room_hints_in_insert_mode() -> anyhow::Result<(), anyhow::Error> {
-        use crate::backends::BackendInfo;
+        use crate::core::backend::BackendInfo;
         use crate::core::{BackendId, ChatEvent, Protocol, TargetId};
         use crate::ui::{Mode, State, ViewState};
         use ratatui::{backend::TestBackend, Terminal};
 
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load("require('tirc.tui.themes.default'):setup({})")
             .exec()?;
 
@@ -4010,7 +4002,7 @@ mod tests {
     /// `insert_decoded`, a second render draws it inline and the fallback is gone.
     #[test]
     fn image_decode_is_requested_then_rendered_inline() -> anyhow::Result<(), anyhow::Error> {
-        use crate::backends::BackendInfo;
+        use crate::core::backend::BackendInfo;
         use crate::core::{
             Attachment, AttachmentKind, BackendId, ChatEvent, EventId, MessageBody, MsgKind,
             Protocol, TargetId, UserRef,
@@ -4020,7 +4012,7 @@ mod tests {
         use ratatui_image::{picker::Picker, Resize};
 
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load("require('tirc.tui.themes.default'):setup({})")
             .exec()?;
 
@@ -4123,7 +4115,7 @@ mod tests {
     /// at the last text row.
     #[test]
     fn link_preview_gutter_continues_beside_thumbnail() -> anyhow::Result<(), anyhow::Error> {
-        use crate::backends::BackendInfo;
+        use crate::core::backend::BackendInfo;
         use crate::core::{
             BackendId, ChatEvent, EventId, MessageBody, MsgKind, Protocol, TargetId, UserRef,
         };
@@ -4132,7 +4124,7 @@ mod tests {
         use ratatui_image::{picker::Picker, Resize};
 
         let lua = mlua::Lua::new();
-        crate::config::register_builtin_modules(&lua)?;
+        crate::lua::builtins::register_builtin_modules(&lua)?;
         lua.load("require('tirc.tui.themes.default'):setup({})")
             .exec()?;
 

@@ -16,7 +16,7 @@ use nucleo_matcher::{Matcher, Utf32Str};
 use ratatui::layout::Rect;
 
 use super::state::Mode;
-use crate::config::completion_sources_registry;
+use crate::lua::runtime::completion_sources_registry;
 
 /// Upper bound on the items a single query returns; the popup scrolls within
 /// its ~8 visible rows, so anything beyond this is noise.
