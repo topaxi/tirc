@@ -19,7 +19,6 @@
 
 local tirc = require('tirc')
 local utils = require('tirc.utils')
-local _tirc = require('_tirc')
 
 --- Options for the notify plugin.
 ---@class TircNotifyOptions
@@ -117,8 +116,8 @@ function M:setup(opts)
 
   tirc.on('event', function(event)
     local ctx = {
-      terminal_focused = _tirc.terminal_focused,
-      focused_buffer = _tirc.focused_buffer,
+      terminal_focused = tirc.terminal_focused,
+      focused_buffer = tirc.focused_buffer,
       opts = opts,
     }
 
