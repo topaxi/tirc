@@ -3,10 +3,12 @@
 //!
 //! A [`CompletionSource`] pairs a declarative [`Trigger`] (what part of the
 //! input activates it, per [`Mode`]) with a `complete` function producing
-//! [`CompletionItem`]s for the extracted query. Builtin sources (command
-//! names, emoji shortcodes) are Rust; additional sources can be registered
-//! from Lua via `tirc.register_completion_source` and are consulted after the
-//! builtins. All indices in this module are **char indices**, matching
+//! [`CompletionItem`]s for the extracted query. Command-mode name completion
+//! is derived directly from the command registry ([`commands`]); the emoji
+//! source is a builtin [`CompletionSource`]; additional sources can be
+//! registered from Lua via `tirc.register_completion_source` and are
+//! consulted after the builtins. All indices in this module are **char
+//! indices**, matching
 //! `tui_input::Input::cursor()`; conversion to byte offsets happens only at
 //! the string-slicing boundary.
 
@@ -15,43 +17,9 @@ use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization};
 use nucleo_matcher::{Matcher, Utf32Str};
 use ratatui::layout::Rect;
 
+use super::commands;
 use super::state::Mode;
 use tirc_lua::runtime::completion_sources_registry;
-
-/// Every command name the input handler's `handle_command` accepts, paired
-/// with whether it takes arguments (drives the trailing space on completion
-/// accept). Keep in sync with the match arms in `InputHandler::handle_command`
-/// (`src/input.rs` in the binary).
-pub const COMMAND_NAMES: &[(&str, bool)] = &[
-    ("q", false),
-    ("quit", false),
-    ("m", true),
-    ("msg", true),
-    ("me", true),
-    ("desc", true),
-    ("describe", true),
-    ("notice", true),
-    ("j", true),
-    ("join", true),
-    ("p", true),
-    ("part", true),
-    ("n", true),
-    ("nick", true),
-    ("whois", true),
-    ("topic", true),
-    ("away", true),
-    ("kick", true),
-    ("invite", true),
-    ("alias", true),
-    ("unalias", false),
-    ("bufmove", true),
-    ("barstyle", true),
-    ("list", false),
-    ("verify", true),
-    ("redraw", false),
-    ("debug", false),
-    ("reload", false),
-];
 
 /// Upper bound on the items a single query returns; the popup scrolls within
 /// its ~8 visible rows, so anything beyond this is noise.
@@ -135,16 +103,22 @@ impl Default for CompletionEngine {
 impl CompletionEngine {
     pub fn new() -> Self {
         CompletionEngine {
-            sources: vec![Box::new(CommandNameSource), Box::new(EmojiSource)],
+            sources: vec![Box::new(EmojiSource)],
             matcher: Matcher::default(),
         }
     }
 
     /// Finds the first source whose mode and trigger match the query and
-    /// returns its span (char range to replace) and items. Builtin sources are
-    /// consulted before Lua-registered ones; the first span match with a
+    /// returns its span (char range to replace) and items. Command-mode
+    /// name completion (registry-derived) runs first, then the builtin
+    /// sources, then Lua-registered ones; the first span match with a
     /// non-empty item list wins.
     pub fn query(&mut self, ctx: &CompletionQuery, lua: &Lua) -> Option<QueryResult> {
+        if ctx.mode == Mode::Command {
+            if let Some(result) = self.command_name_query(ctx) {
+                return Some(result);
+            }
+        }
         for source in &self.sources {
             if !source.modes().contains(&ctx.mode) {
                 continue;
@@ -159,6 +133,16 @@ impl CompletionEngine {
             }
         }
         self.query_lua_sources(ctx, lua)
+    }
+
+    /// Completes command names at the start of the Command-mode input, from
+    /// the command registry: every canonical name and alias, with a trailing
+    /// space when the command takes arguments.
+    fn command_name_query(&mut self, ctx: &CompletionQuery) -> Option<QueryResult> {
+        let min_chars = if ctx.force { 0 } else { 1 };
+        let (start, end, query) = line_start_span(ctx.value, ctx.cursor, min_chars)?;
+        let items = command_name_items(&query, &mut self.matcher);
+        (!items.is_empty()).then_some(((start, end), items))
     }
 
     /// Consults sources registered from Lua via
@@ -281,36 +265,28 @@ fn decode_lua_items(list: &mlua::Table) -> mlua::Result<Vec<CompletionItem>> {
     Ok(items)
 }
 
-/// Completes command names at the start of the Command-mode input, from
-/// [`COMMAND_NAMES`].
-struct CommandNameSource;
-
-impl CompletionSource for CommandNameSource {
-    fn modes(&self) -> &[Mode] {
-        &[Mode::Command]
-    }
-
-    fn trigger(&self) -> Trigger {
-        Trigger::LineStart { min_chars: 1 }
-    }
-
-    fn complete(&self, query: &str, matcher: &mut Matcher) -> Vec<CompletionItem> {
-        let candidates = COMMAND_NAMES.iter().map(|&(name, args)| {
-            let insert = if args {
-                format!("{name} ")
-            } else {
-                name.to_string()
-            };
-            (
-                name,
-                CompletionItem {
-                    label: name.to_string(),
-                    insert,
-                },
-            )
-        });
-        fuzzy_rank(matcher, query, candidates)
-    }
+/// Fuzzy-ranks every registry command name and alias against `query`. The
+/// insert text carries a trailing space when the command takes arguments.
+fn command_name_items(query: &str, matcher: &mut Matcher) -> Vec<CompletionItem> {
+    let candidates = commands::BUILTIN_COMMANDS.iter().flat_map(|spec| {
+        std::iter::once(spec.name)
+            .chain(spec.aliases.iter().copied())
+            .map(move |name| {
+                let insert = if spec.nargs.takes_args() {
+                    format!("{name} ")
+                } else {
+                    name.to_string()
+                };
+                (
+                    name,
+                    CompletionItem {
+                        label: name.to_string(),
+                        insert,
+                    },
+                )
+            })
+    });
+    fuzzy_rank(matcher, query, candidates)
 }
 
 /// Completes emoji shortcodes after a `:` sigil in Insert mode, backed by the
@@ -690,17 +666,17 @@ mod tests {
     }
 
     #[test]
-    fn test_command_source_trailing_space() {
+    fn test_command_name_items_trailing_space() {
         let mut matcher = Matcher::default();
-        let items = CommandNameSource.complete("jo", &mut matcher);
+        let items = command_name_items("jo", &mut matcher);
         let join = items.iter().find(|i| i.label == "join").unwrap();
         assert_eq!(join.insert, "join ");
     }
 
     #[test]
-    fn test_command_source_short_aliases() {
+    fn test_command_name_items_short_aliases() {
         let mut matcher = Matcher::default();
-        let items = CommandNameSource.complete("q", &mut matcher);
+        let items = command_name_items("q", &mut matcher);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"q"));
         assert!(labels.contains(&"quit"));
@@ -710,16 +686,25 @@ mod tests {
     }
 
     #[test]
-    fn test_command_names_unique_and_nonempty() {
-        let names: Vec<&str> = super::COMMAND_NAMES
-            .iter()
-            .map(|&(name, _)| name)
-            .collect();
-        assert!(names.iter().all(|name| !name.is_empty()));
-        let mut deduped = names.clone();
-        deduped.sort_unstable();
-        deduped.dedup();
-        assert_eq!(deduped.len(), names.len());
+    fn test_command_name_query_only_inside_first_word() {
+        let mut engine = CompletionEngine::new();
+        let ctx = CompletionQuery {
+            mode: Mode::Command,
+            value: "jo",
+            cursor: 2,
+            force: false,
+        };
+        let ((start, end), items) = engine.command_name_query(&ctx).unwrap();
+        assert_eq!((start, end), (0, 2));
+        assert!(items.iter().any(|i| i.label == "join"));
+
+        let ctx = CompletionQuery {
+            mode: Mode::Command,
+            value: "join #rust",
+            cursor: 7,
+            force: false,
+        };
+        assert_eq!(engine.command_name_query(&ctx), None);
     }
 
     #[test]
