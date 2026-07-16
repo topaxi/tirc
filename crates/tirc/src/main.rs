@@ -5,19 +5,19 @@ use std::time::Duration;
 use crossterm::event::{Event as CrosstermEvent, EventStream};
 use futures::StreamExt;
 
-use tirc::core::ChatEvent;
+use tirc_core::ChatEvent;
 
 use anyhow::Context;
 
 use tirc_backend_irc::{IrcBackend, IrcBackendConfig};
 use tirc_backend_matrix::{MatrixBackend, MatrixBackendConfig};
 use tirc_backend_mattermost::{MattermostBackend, MattermostBackendConfig};
-use tirc::core::backend::{spawn as spawn_backend, ChatBackend};
-use tirc::config::{load_config, ServerConfig, TircConfig};
-use tirc::core::{BackendId, BackendMessage, BufferId, Protocol, TxnAllocator};
-use tirc::tui::preview::{build_client, link_preview_worker};
-use tirc::tui::{DecodeRequest, DecodedImage, EncodedImage, PreviewRequest, PreviewResult, Tui};
-use tirc::ui::{State, ViewState};
+use tirc_core::backend::{spawn as spawn_backend, ChatBackend};
+use tirc_config::{load_config, ServerConfig, TircConfig};
+use tirc_core::{BackendId, BackendMessage, BufferId, Protocol, TxnAllocator};
+use tirc_tui::preview::{build_client, link_preview_worker};
+use tirc_tui::{DecodeRequest, DecodedImage, EncodedImage, PreviewRequest, PreviewResult, Tui};
+use tirc_ui::{State, ViewState};
 
 use crate::input::{Event, InputHandler};
 
@@ -138,9 +138,9 @@ async fn root_task(
     let mut view = ViewState::new();
     let mut handles = Vec::new();
 
-    let alias_store = tirc::config::aliases::AliasStore::load();
-    let order_store = tirc::config::buffer_order::BufferOrderStore::load();
-    let ui_prefs = tirc::config::ui_prefs::UiPrefsStore::load();
+    let alias_store = tirc_config::aliases::AliasStore::load();
+    let order_store = tirc_config::buffer_order::BufferOrderStore::load();
+    let ui_prefs = tirc_config::ui_prefs::UiPrefsStore::load();
     view.buffer_bar_style = ui_prefs.buffer_bar().map(str::to_string);
 
     // Config buffer ranks count globally across servers so servers keep their
@@ -153,7 +153,7 @@ async fn root_task(
             continue;
         }
         let id = BackendId(index);
-        tirc::lua::runtime::register_backend_metadata(lua, id)?;
+        tirc_lua::runtime::register_backend_metadata(lua, id)?;
         let backend = build_backend(id, server)?;
         let info = backend.info();
         for (target, name) in &server.aliases {
@@ -203,7 +203,7 @@ async fn root_task(
     // unwrapped and positioned absolutely at draw time, so images land in this
     // pane even while another pane is active. Kitty stays on the widget path:
     // its unicode placeholders are position-safe under tmux.
-    let tmux_abs_position = tirc::tui::tmux::in_tmux()
+    let tmux_abs_position = tirc_tui::tmux::in_tmux()
         && picker.as_ref().is_some_and(|picker| {
             matches!(
                 picker.protocol_type(),
@@ -458,7 +458,7 @@ async fn terminate_signal() {
 fn main() -> Result<(), anyhow::Error> {
     // Install log capture first so config loading and everything after is
     // recorded for the `:debug` pane.
-    tirc::logging::init();
+    tirc_core::logging::init();
 
     let lua = mlua::Lua::new();
     let (config, config_path) = load_config(&lua)?;

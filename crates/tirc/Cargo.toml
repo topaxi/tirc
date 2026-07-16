@@ -1,0 +1,27 @@
+[package]
+name = "tirc"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tirc-core = { path = "../tirc-core" }
+tirc-lua = { path = "../tirc-lua" }
+tirc-config = { path = "../tirc-config" }
+tirc-ui = { path = "../tirc-ui" }
+tirc-tui = { path = "../tirc-tui" }
+tirc-backend-irc = { path = "../tirc-backend-irc" }
+tirc-backend-matrix = { path = "../tirc-backend-matrix" }
+tirc-backend-mattermost = { path = "../tirc-backend-mattermost" }
+anyhow = { workspace = true }
+arboard = { workspace = true }
+chrono = { workspace = true }
+crossterm = { workspace = true }
+futures = { workspace = true }
+image = { workspace = true }
+log = { workspace = true }
+mlua = { workspace = true }
+ratatui = { workspace = true }
+ratatui-image = { workspace = true }
+tokio = { workspace = true }
+tui-input = { workspace = true }
+xdg = { workspace = true }

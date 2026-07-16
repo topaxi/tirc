@@ -8,23 +8,23 @@ use crossterm::event::{
 };
 use mlua::Lua;
 
-use tirc::core::backend::BackendHandle;
-use tirc::config::{
+use tirc_core::backend::BackendHandle;
+use tirc_config::{
     aliases::AliasStore, buffer_order::BufferOrderStore, collect_user_watched_paths,
     reload_lua_theme, ui_prefs::UiPrefsStore, QuickReactions, SelectionMode,
 };
-use tirc::lua::runtime::{emit_event, EventName};
-use tirc::core::{
+use tirc_lua::runtime::{emit_event, EventName};
+use tirc_core::{
     BackendEvent, BackendId, BackendMessage, BufferId, ChatEvent, Command, EventId, MsgKind,
     TargetId, TxnAllocator, VerifyAction,
 };
-use tirc::ui::lua::{create_lua_sender, to_lua_event};
-use tirc::tui::{parse_bar_id, DecodedImage, PreviewResult, Tui};
-use tirc::ui::ConnectionStatus;
+use tirc_ui::lua::{create_lua_sender, to_lua_event};
+use tirc_tui::{parse_bar_id, DecodedImage, PreviewResult, Tui};
+use tirc_ui::ConnectionStatus;
 
-use tirc::ui::completion::{self, CompletionEngine, CompletionQuery};
-use tirc::ui::{HistoryState, StoredMessage};
-use tirc::ui::{BarHit, MenuAction, MenuItem, MenuTarget, Mode, Selection, State, ViewState};
+use tirc_ui::completion::{self, CompletionEngine, CompletionQuery};
+use tirc_ui::{HistoryState, StoredMessage};
+use tirc_ui::{BarHit, MenuAction, MenuItem, MenuTarget, Mode, Selection, State, ViewState};
 
 /// Page size of a scroll-triggered history fetch.
 const HISTORY_FETCH_LIMIT: u16 = 50;
@@ -194,7 +194,7 @@ impl<'lua> InputHandler<'lua> {
         let mut paths = collect_user_watched_paths(lua, config_dir, config_path, extra_watch_files);
 
         #[cfg(all(debug_assertions, not(test)))]
-        paths.extend(tirc::lua::builtins::builtin_lua_paths());
+        paths.extend(tirc_lua::builtins::builtin_lua_paths());
 
         paths
             .into_iter()
@@ -324,7 +324,7 @@ impl<'lua> InputHandler<'lua> {
     /// The bar styles the active theme declares via its `buffer_bar_styles`
     /// field, or `None` when the theme declares none.
     fn theme_bar_styles(&self) -> Option<Vec<String>> {
-        tirc::lua::runtime::ui_string_list(self.lua, "buffer_bar_styles")
+        tirc_lua::runtime::ui_string_list(self.lua, "buffer_bar_styles")
             .filter(|styles| !styles.is_empty())
     }
 
@@ -806,7 +806,7 @@ impl<'lua> InputHandler<'lua> {
 
     /// Copies the current selection's text to the system clipboard and clears the
     /// selection. Reads the text from the last rendered frame (see
-    /// [`Tui::selection_text`](tirc::tui::Tui::selection_text)). Clipboard
+    /// [`Tui::selection_text`](tirc_tui::Tui::selection_text)). Clipboard
     /// failures (e.g. a headless box with no display) are logged and surfaced as
     /// a one-line status notice rather than crashing.
     fn yank_selection(&mut self, state: &mut State, view: &mut ViewState) {
@@ -917,7 +917,7 @@ impl<'lua> InputHandler<'lua> {
                     // Theme-defined element: hand the id back to the theme's
                     // handler, then apply any UI actions it queued.
                     if let Some(Err(err)) =
-                        tirc::lua::runtime::call_formatter(self.lua, "on_bar_click", id)
+                        tirc_lua::runtime::call_formatter(self.lua, "on_bar_click", id)
                     {
                         log::warn!("on_bar_click failed: {err}");
                     }
@@ -1168,7 +1168,7 @@ impl<'lua> InputHandler<'lua> {
 
     /// Returns `false` when the command requests application exit (`:q`).
     ///
-    /// Keep the command set in sync with [`tirc::ui::completion::COMMAND_NAMES`], which feeds
+    /// Keep the command set in sync with [`tirc_ui::completion::COMMAND_NAMES`], which feeds
     /// command-mode completion.
     fn handle_command(
         &mut self,
@@ -1402,7 +1402,7 @@ impl<'lua> InputHandler<'lua> {
         target: &str,
     ) -> TargetId {
         let target = TargetId::from(target);
-        let buffer = tirc::core::BufferId::new(backend, target.clone());
+        let buffer = tirc_core::BufferId::new(backend, target.clone());
         if let Some(b) = state.focused_buffer_mut(view) {
             b.advance_read_marker();
         }
@@ -1929,7 +1929,7 @@ fn parse_verify(arg: &str) -> VerifyAction {
 /// neighbour is chosen from the removed buffer's former index clamped into the
 /// new (shorter) list, which lands on the next buffer to the right, or the new
 /// last buffer when the closed one was rightmost.
-fn close_buffer(state: &mut State, view: &mut ViewState, id: &tirc::core::BufferId) {
+fn close_buffer(state: &mut State, view: &mut ViewState, id: &tirc_core::BufferId) {
     if id.target.is_status() {
         return;
     }
@@ -1987,8 +1987,8 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tirc::core::backend::BackendInfo;
-    use tirc::core::{BufferId, MessageBody, MsgKind, Protocol, TargetId, UserRef};
+    use tirc_core::backend::BackendInfo;
+    use tirc_core::{BufferId, MessageBody, MsgKind, Protocol, TargetId, UserRef};
 
     fn state_with_buffers(channels: &[&str]) -> (State, BackendId) {
         let backend = BackendId(0);
