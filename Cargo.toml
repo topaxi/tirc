@@ -1,9 +1,12 @@
-[package]
-name = "tirc"
+[workspace]
+resolver = "2"
+members = [".", "crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
+[workspace.dependencies]
 futures = "0.3"
 irc = { version = "1.1", default-features = false, features = [
   "ctcp",
@@ -60,3 +63,44 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 ] }
 emojis = "0.9.0"
 nucleo-matcher = "0.3.1"
+
+[package]
+name = "tirc"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tirc-core = { path = "crates/tirc-core" }
+futures = { workspace = true }
+irc = { workspace = true }
+tokio = { workspace = true }
+crossterm = { workspace = true }
+ratatui = { workspace = true }
+tui-input = { workspace = true }
+anyhow = { workspace = true }
+mlua = { workspace = true }
+xdg = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+indoc = { workspace = true }
+indexmap = { workspace = true }
+semver = { workspace = true }
+chrono = { workspace = true }
+textwrap = { workspace = true }
+itertools = { workspace = true }
+unicode-width = { workspace = true }
+async-trait = { workspace = true }
+arboard = { workspace = true }
+reqwest = { workspace = true }
+tokio-tungstenite = { workspace = true }
+matrix-sdk = { workspace = true }
+ratatui-image = { workspace = true }
+image = { workspace = true }
+tracing = { workspace = true }
+tracing-log = { workspace = true }
+linkify = { workspace = true }
+scraper = { workspace = true }
+tracing-subscriber = { workspace = true }
+emojis = { workspace = true }
+nucleo-matcher = { workspace = true }

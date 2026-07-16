@@ -486,10 +486,6 @@ impl<'lua> InputHandler<'lua> {
         changed
     }
 
-    pub fn ui(&self) -> &Tui {
-        &self.ui
-    }
-
     pub fn render_ui(&mut self, state: &State, view: &mut ViewState) -> Result<(), anyhow::Error> {
         self.ui.render(self.lua, state, view)
     }

@@ -5462,6 +5462,7 @@ dependencies = [
  "serde",
  "serde_json",
  "textwrap",
+ "tirc-core",
  "tokio",
  "tokio-tungstenite",
  "tracing",
@@ -5470,6 +5471,23 @@ dependencies = [
  "tui-input",
  "unicode-width",
  "xdg",
+]
+
+[[package]]
+name = "tirc-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "indexmap",
+ "log",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
 ]
 
 [[package]]
