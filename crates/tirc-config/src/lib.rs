@@ -193,6 +193,9 @@ fn get_default_config() -> &'static str {
         -- Desktop notifications on highlights/DMs (requires notify-send):
         -- tirc.use(require('tirc.plugins.notify'))
 
+        -- Auto-reply to DMs while :away (adds a :back command):
+        -- tirc.use(require('tirc.plugins.away'))
+
         return config
     "}
 }
@@ -1432,6 +1435,210 @@ mod tests {
         let captured: mlua::Table = lua.globals().get("captured").expect("executor called");
         assert_eq!(captured.get::<String>("summary").unwrap(), "alice (#tirc)");
         assert_eq!(captured.get::<String>("body").unwrap(), "hello Rincewind");
+    }
+
+    /// Calls the away plugin's pure `should_reply` with an injected context.
+    /// `ctx` is a Lua table literal with `away`, optional `last_reply`, `now`,
+    /// and `opts` fields; pass fully-formed options (no normalize).
+    fn should_reply(lua: &Lua, event: &mlua::Table, ctx: &str) -> bool {
+        let f: mlua::Function = lua
+            .load(format!(
+                indoc::indoc! {"
+                    local away = require('tirc.plugins.away')
+                    return function(event)
+                      return away.should_reply(event, {})
+                    end
+                "},
+                ctx
+            ))
+            .eval()
+            .expect("should_reply wrapper");
+        f.call(event).expect("should_reply call")
+    }
+
+    const AWAY_IRC_CTX: &str =
+        "{ away = true, last_reply = {}, now = 1000, opts = { protocols = { irc = true } } }";
+
+    #[test]
+    fn away_should_reply_decision_matrix() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        // DMs (non-channel target) get a reply while away...
+        let dm = notify_event(&lua, "alice", "alice", "hi there");
+        assert!(should_reply(&lua, &dm, AWAY_IRC_CTX));
+        // ...but not while back.
+        assert!(!should_reply(
+            &lua,
+            &dm,
+            "{ away = false, last_reply = {}, now = 1000, opts = { protocols = { irc = true } } }"
+        ));
+
+        // The protocol gate: test backend is IRC, so matrix-only opts skip it
+        // (the default - servers RPL_AWAY natively).
+        assert!(!should_reply(
+            &lua,
+            &dm,
+            "{ away = true, last_reply = {}, now = 1000, opts = { protocols = { matrix = true } } }"
+        ));
+
+        // Own echoes never trigger a reply, nick compared case-insensitively.
+        let own = notify_event(&lua, "rincewind", "alice", "note to self");
+        assert!(!should_reply(&lua, &own, AWAY_IRC_CTX));
+
+        // Pending optimistic echoes and redacted messages stay silent.
+        for flag in ["pending", "redacted"] {
+            let event = notify_event(&lua, "alice", "alice", "hi");
+            event.set(flag, true).unwrap();
+            assert!(
+                !should_reply(&lua, &event, AWAY_IRC_CTX),
+                "{flag} message must not get a reply"
+            );
+        }
+
+        // Notices are automated replies themselves; answering them loops.
+        let notice = notify_stored_event(
+            &lua,
+            stored(ChatEvent::Message {
+                target: TargetId::from("alice"),
+                id: None,
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain("I am currently away"),
+                kind: MsgKind::Notice,
+                echo_of: None,
+                time: None,
+            }),
+            "alice",
+        );
+        assert!(!should_reply(&lua, &notice, AWAY_IRC_CTX));
+
+        // Non-message events stay silent.
+        let membership = notify_stored_event(
+            &lua,
+            stored(ChatEvent::Membership {
+                target: TargetId::from("#tirc"),
+                who: UserRef::new("alice"),
+                change: MembershipChange::Join { realname: None },
+                time: None,
+            }),
+            "#tirc",
+        );
+        assert!(!should_reply(&lua, &membership, AWAY_IRC_CTX));
+
+        // Channel messages only reply on a mention, and only when opted in.
+        let mention = notify_event(&lua, "alice", "#tirc", "rincewind: around?");
+        assert!(!should_reply(&lua, &mention, AWAY_IRC_CTX));
+        let mention_ctx = "{ away = true, last_reply = {}, now = 1000, \
+             opts = { protocols = { irc = true }, reply_to_mentions = true } }";
+        assert!(should_reply(&lua, &mention, mention_ctx));
+        let chatter = notify_event(&lua, "alice", "#tirc", "hello world");
+        assert!(!should_reply(&lua, &chatter, mention_ctx));
+
+        // Cooldown: a recent reply to the same sender suppresses, an old one
+        // does not (default 300s).
+        assert!(!should_reply(
+            &lua,
+            &dm,
+            "{ away = true, last_reply = { ['0:alice'] = 900 }, now = 1000, \
+               opts = { protocols = { irc = true } } }"
+        ));
+        assert!(should_reply(
+            &lua,
+            &dm,
+            "{ away = true, last_reply = { ['0:alice'] = 600 }, now = 1000, \
+               opts = { protocols = { irc = true } } }"
+        ));
+    }
+
+    #[test]
+    fn away_setup_tracks_state_and_replies() {
+        use tirc_lua::runtime::{emit_event, EventName};
+
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        lua.load(indoc::indoc! {"
+            local tirc = require('tirc')
+            replies = {}
+            clock = 1000
+            tirc.use(require('tirc.plugins.away'), {
+              protocols = { irc = true },
+              reply = function(event, text)
+                replies[#replies + 1] = text
+              end,
+              now = function()
+                return clock
+              end,
+            })
+        "})
+            .exec()
+            .unwrap();
+
+        let away = lua
+            .load("return require('tirc.plugins.away')")
+            .eval::<mlua::Table>()
+            .unwrap();
+        let is_away = || -> bool {
+            away.get::<mlua::Function>("is_away")
+                .unwrap()
+                .call::<bool>(())
+                .unwrap()
+        };
+        let reply_count = || -> usize {
+            lua.globals()
+                .get::<mlua::Table>("replies")
+                .unwrap()
+                .raw_len()
+        };
+        let send_dm = || {
+            let event = notify_event(&lua, "alice", "alice", "you there?");
+            let sender_stub = lua.create_table().unwrap();
+            emit_event(&lua, EventName::Event, (event, sender_stub)).unwrap();
+        };
+
+        // Not away: no reply.
+        send_dm();
+        assert!(!is_away());
+        assert_eq!(reply_count(), 0);
+
+        // Away: the first DM gets the prefixed message.
+        emit_event(&lua, EventName::Away, Some("gone fishing".to_string())).unwrap();
+        send_dm();
+        assert!(is_away());
+        assert_eq!(reply_count(), 1);
+        let text: String = lua
+            .globals()
+            .get::<mlua::Table>("replies")
+            .unwrap()
+            .get(1)
+            .unwrap();
+        assert_eq!(text, "[away] gone fishing");
+
+        // The same sender within the cooldown is suppressed...
+        send_dm();
+        assert_eq!(reply_count(), 1);
+        // ...but replied to again once the cooldown elapsed.
+        lua.load("clock = clock + 400").exec().unwrap();
+        send_dm();
+        assert_eq!(reply_count(), 2);
+
+        // Back: no more replies.
+        emit_event(&lua, EventName::Away, None::<String>).unwrap();
+        send_dm();
+        assert!(!is_away());
+        assert_eq!(reply_count(), 2);
+    }
+
+    #[test]
+    fn away_setup_registers_back_command() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        lua.load("require('tirc').use(require('tirc.plugins.away'))")
+            .exec()
+            .unwrap();
+
+        assert_eq!(tirc_lua::runtime::user_command_names(&lua), ["back"]);
     }
 
     #[test]

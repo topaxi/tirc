@@ -89,6 +89,24 @@ pub struct InputHandler<'lua> {
     /// The completion engine queried after every Command/Insert-mode edit;
     /// popup state lives on [`ViewState::completion`].
     completion: CompletionEngine,
+    /// Current away message; `Some` while away. Source of truth for the
+    /// `:away` no-arg toggle. Not re-sent to backends on reconnect.
+    away_message: Option<String>,
+}
+
+/// The away message used when `:away` is invoked without one.
+const DEFAULT_AWAY_MESSAGE: &str = "AFK";
+
+/// Next away state for `:away <rest>`: text sets it, no-arg toggles (default
+/// message when not away, clear when away).
+fn next_away_state(current: &Option<String>, rest: &str) -> Option<String> {
+    if !rest.is_empty() {
+        Some(rest.to_string())
+    } else if current.is_some() {
+        None
+    } else {
+        Some(DEFAULT_AWAY_MESSAGE.to_string())
+    }
 }
 
 impl<'lua> InputHandler<'lua> {
@@ -137,6 +155,7 @@ impl<'lua> InputHandler<'lua> {
             buffer_order,
             ui_prefs,
             completion: CompletionEngine::new(),
+            away_message: None,
         }
     }
 
@@ -223,6 +242,11 @@ impl<'lua> InputHandler<'lua> {
         let notice_text = match reload_lua_theme(self.lua, &self.config_path) {
             Ok(()) => {
                 self.refresh_watched_files();
+                // Handlers were cleared and re-registered; re-emit the away
+                // state so plugins tracking it (e.g. tirc.plugins.away) recover.
+                if self.away_message.is_some() {
+                    let _ = emit_event(self.lua, EventName::Away, self.away_message.clone());
+                }
                 "Theme reloaded successfully".to_owned()
             }
             Err(err) => format!("Reload error: {err}").replace(['\r', '\n'], " "),
@@ -373,9 +397,9 @@ impl<'lua> InputHandler<'lua> {
     }
 
     /// Applies UI actions a Lua callback queued via `tirc.focus_buffer` /
-    /// `tirc.select_backend` (stored on `_tirc.__ui_actions`), then clears the
-    /// queue. Unknown buffers/backends and malformed entries are ignored so a
-    /// theme bug cannot corrupt view state.
+    /// `tirc.select_backend` / `tirc.set_away` (stored on `_tirc.__ui_actions`),
+    /// then clears the queue. Unknown buffers/backends and malformed entries are
+    /// ignored so a theme bug cannot corrupt view state.
     fn apply_queued_ui_actions(&mut self, state: &mut State, view: &mut ViewState) {
         let Ok(actions) = (|| -> mlua::Result<Option<mlua::Table>> {
             let tirc: mlua::Table = self
@@ -423,6 +447,11 @@ impl<'lua> InputHandler<'lua> {
                     if state.backends.contains_key(&backend) {
                         view.selected_backend = Some(backend);
                     }
+                }
+                Ok("set_away") => {
+                    // Absent key means nil means "back".
+                    let message = action.get::<Option<String>>("message").unwrap_or(None);
+                    self.set_away(message);
                 }
                 _ => {}
             }
@@ -1307,12 +1336,15 @@ impl<'lua> InputHandler<'lua> {
                     );
                 }
             }
-            BuiltinCmd::Away => self.send_to(
-                backend,
-                Command::Away {
-                    message: (!rest.is_empty()).then(|| rest.to_string()),
-                },
-            ),
+            BuiltinCmd::Away => {
+                let message = next_away_state(&self.away_message, rest);
+                let info = match &message {
+                    Some(m) => format!("Away: {m}"),
+                    None => "No longer away".to_string(),
+                };
+                self.set_away(message);
+                self.report_info(state, backend, info);
+            }
             BuiltinCmd::Kick => {
                 if let Some(backend) = backend {
                     // :kick [#channel] <nick> [reason...]
@@ -1496,6 +1528,22 @@ impl<'lua> InputHandler<'lua> {
         if let Some(handle) = backend.and_then(|id| self.backend(id)) {
             let _ = handle.send(command);
         }
+    }
+
+    /// Applies a new away state: broadcasts [`Command::Away`] to every backend
+    /// (native away where the protocol supports it) and fires the Lua `away`
+    /// event so plugins can track it. No-op when the state is unchanged.
+    fn set_away(&mut self, message: Option<String>) {
+        if self.away_message == message {
+            return;
+        }
+        self.away_message = message.clone();
+        for handle in &self.backends {
+            let _ = handle.send(Command::Away {
+                message: message.clone(),
+            });
+        }
+        let _ = emit_event(self.lua, EventName::Away, message);
     }
 
     /// Ensures a buffer exists for `(backend, target)` and focuses it.
@@ -2258,5 +2306,27 @@ mod tests {
         let result = h.step_down();
         assert!(result.is_some());
         assert!(h.index.is_none());
+    }
+
+    #[test]
+    fn away_text_sets_the_message() {
+        assert_eq!(
+            next_away_state(&None, "gone fishing"),
+            Some("gone fishing".to_string())
+        );
+        // A new message replaces the current one without toggling back.
+        assert_eq!(
+            next_away_state(&Some("afk".to_string()), "lunch"),
+            Some("lunch".to_string())
+        );
+    }
+
+    #[test]
+    fn away_no_arg_toggles() {
+        assert_eq!(
+            next_away_state(&None, ""),
+            Some(DEFAULT_AWAY_MESSAGE.to_string())
+        );
+        assert_eq!(next_away_state(&Some("afk".to_string()), ""), None);
     }
 }

@@ -18,6 +18,9 @@ use tirc_core::BackendId;
 pub enum EventName {
     /// A normalized [`ChatEvent`](tirc_core::ChatEvent) arrived from a backend.
     Event,
+    /// The user's away state changed (via `:away` or `tirc.set_away`). Payload:
+    /// the away message as a string, or nil when back.
+    Away,
 }
 
 impl EventName {
@@ -25,12 +28,14 @@ impl EventName {
     fn registry_key(self) -> &'static str {
         match self {
             EventName::Event => "tirc-event-event",
+            EventName::Away => "tirc-event-away",
         }
     }
 
     fn parse(name: &str) -> Option<Self> {
         match name {
             "event" => Some(EventName::Event),
+            "away" => Some(EventName::Away),
             _ => None,
         }
     }

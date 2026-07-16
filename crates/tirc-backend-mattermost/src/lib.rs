@@ -160,6 +160,21 @@ impl MmSession {
         Ok(resp_body)
     }
 
+    async fn put(&self, path: &str, body: &Value) -> anyhow::Result<Value> {
+        let url = format!("{}/api/v4/{}", self.base_url, path);
+        let resp = self.http.put(&url).json(body).send().await?;
+        let status = resp.status();
+        let resp_body: Value = resp.json().await?;
+        if !status.is_success() {
+            let msg = resp_body["message"]
+                .as_str()
+                .unwrap_or("request failed")
+                .to_string();
+            anyhow::bail!("PUT {path} failed ({status}): {msg}");
+        }
+        Ok(resp_body)
+    }
+
     async fn delete_req(&self, path: &str) -> anyhow::Result<()> {
         let url = format!("{}/api/v4/{}", self.base_url, path);
         let resp = self.http.delete(&url).send().await?;
@@ -988,6 +1003,39 @@ async fn apply_command(
                 events,
                 BackendEvent::HistoryFetched { target, at_start },
             );
+        }
+
+        Command::Away { message } => {
+            // Manual status: the server may flip it back to "online" on user
+            // activity from other clients; that is server behavior.
+            let status = if message.is_some() { "away" } else { "online" };
+            if let Err(err) = session
+                .put(
+                    &format!("users/{}/status", session.user_id),
+                    &json!({ "user_id": session.user_id, "status": status }),
+                )
+                .await
+            {
+                log::warn!("Away: status update failed: {err}");
+            }
+            // Surface the away message as a custom status; cleared when back.
+            let custom = format!("users/{}/status/custom", session.user_id);
+            match message {
+                Some(text) => {
+                    if let Err(err) = session
+                        .put(&custom, &json!({ "emoji": "zzz", "text": text }))
+                        .await
+                    {
+                        log::warn!("Away: custom status failed: {err}");
+                    }
+                }
+                None => {
+                    if let Err(err) = session.delete_req(&custom).await {
+                        // Absent custom status or older servers; not actionable.
+                        log::debug!("Away: clearing custom status failed: {err}");
+                    }
+                }
+            }
         }
 
         // Unsupported commands are silently ignored.

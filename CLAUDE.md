@@ -117,6 +117,9 @@ builds a style on the Lua side (`tirc_lua::theme::create_tirc_theme_lua_module`)
 - `plugins/notify.lua` - bundled desktop-notification plugin (`notify-send` on
   highlights/DMs); the canonical example of an `tirc.on('event', ...)` plugin with
   pure, Rust-test-covered decision logic.
+- `plugins/away.lua` - bundled away plugin: hooks the `away` event fired by the
+  `:away` builtin (which broadcasts native away to all backends), auto-replies to
+  DMs while away, and registers a `:back` user command via `tirc.set_away`.
 
 ## Conventions
 

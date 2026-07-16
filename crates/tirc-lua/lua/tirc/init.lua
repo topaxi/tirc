@@ -1,4 +1,4 @@
----@alias EventName 'event'
+---@alias EventName 'event' | 'away'
 ---@alias FormatterName 'buffer_title' | 'userlist_title' | 'message_time' | 'message_text' | 'link_preview' | 'user' | 'render_buffer_tab'
 
 --- A buffer entry passed to the `render_buffer_tab` formatter.
@@ -57,7 +57,7 @@
 --- `event` callback. `type` selects which fields are present.
 ---@class TircEvent
 ---@field type 'message' | 'edit' | 'redaction' | 'reaction' | 'membership' | 'topic' | 'rename' | 'quit' | 'server_info'
----@field backend { id: integer, protocol: 'irc' | 'matrix', name: string, nickname: string, metadata?: table<string, any> } `nickname` is your own nick/user id on this backend, rename-aware
+---@field backend { id: integer, protocol: 'irc' | 'matrix' | 'mattermost', name: string, nickname: string, metadata?: table<string, any> } `nickname` is your own nick/user id on this backend, rename-aware
 ---@field target string buffer target (channel/room/nick)
 ---@field target_name string friendly buffer name (Matrix room name); equals `target` for IRC
 ---@field pending boolean optimistic local echo not yet confirmed
@@ -195,7 +195,8 @@
 ---@field is_focused_buffer fun(buffer: TircBufferTab): boolean
 ---@field focus_buffer fun(id: string) queue focusing a buffer by its opaque id (applied after the current callback)
 ---@field select_backend fun(backend_id: integer) queue selecting a backend for the tabbed bar (applied after the current callback)
----@field on fun(event_name: EventName, callback: fun(event: TircEvent, sender: TircSender))
+---@field set_away fun(message: string|nil) queue setting (message) or clearing (nil) the away state on all backends (applied after the current callback)
+---@field on fun(event_name: 'event', callback: fun(event: TircEvent, sender: TircSender)) | fun(event_name: 'away', callback: fun(message: string|nil))
 ---@field register_completion_source fun(source: TircCompletionSource)
 ---@field create_command fun(name: string, handler: fun(ctx: TircCommandContext, sender: TircSender|nil), opts?: TircCommandOpts) register a `:` user command; builtin names shadow it on exact match; cleared and re-registered on `:reload`
 ---@field log TircLog logging helpers that write to the `:debug` pane
@@ -251,6 +252,14 @@ end
 ---@param backend_id integer
 function M.select_backend(backend_id)
   queue_ui_action { type = 'select_backend', id = backend_id }
+end
+
+--- Sets or clears the away state on every backend (native away where the
+--- protocol supports it) and fires the `away` event. Applied by the host after
+--- the current callback returns. Pass a message to go away, nil to come back.
+---@param message string|nil
+function M.set_away(message)
+  queue_ui_action { type = 'set_away', message = message }
 end
 
 --- Joins varargs into one message, stringifying each part (like `print`).

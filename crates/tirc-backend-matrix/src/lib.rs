@@ -39,6 +39,7 @@ use matrix_sdk::encryption::verification::{
 };
 use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
 use matrix_sdk::room::MessagesOptions;
+use matrix_sdk::ruma::api::client::presence::set_presence;
 use matrix_sdk::ruma::events::key::verification::request::ToDeviceKeyVerificationRequestEvent;
 use matrix_sdk::ruma::events::reaction::ReactionEventContent;
 use matrix_sdk::ruma::events::relation::Annotation;
@@ -61,6 +62,7 @@ use matrix_sdk::ruma::events::{
     AnySyncMessageLikeEvent, AnySyncStateEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
     SyncStateEvent,
 };
+use matrix_sdk::ruma::presence::PresenceState;
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{OwnedRoomId, OwnedTransactionId, RoomId, UserId};
 use matrix_sdk::{Client, Room};
@@ -218,10 +220,23 @@ impl ChatBackend for MatrixBackend {
         );
 
         // Drive the SDK sync loop in the background; it resumes from the store's
-        // token (set by sync_once) so it delivers only new events.
+        // token (set by sync_once) so it delivers only new events. Every sync
+        // long-poll advertises a presence state to the homeserver (the default
+        // is Online, which would revert an away presence within one poll), so
+        // the desired state is tracked in a watch channel and the in-flight
+        // sync is restarted whenever `Command::Away` changes it. Cancelling a
+        // sync mid-poll is safe: the token only advances on processed
+        // responses, so the restart resumes from the same point.
+        let (presence_tx, mut presence_rx) = tokio::sync::watch::channel(PresenceState::Online);
         let sync_client = client.clone();
         let sync = tokio::spawn(async move {
-            let _ = sync_client.sync(SyncSettings::default()).await;
+            loop {
+                let desired = presence_rx.borrow_and_update().clone();
+                tokio::select! {
+                    _ = sync_client.sync(SyncSettings::default().set_presence(desired)) => break,
+                    _ = presence_rx.changed() => continue,
+                }
+            }
         });
 
         // Periodic round-trip probe: call whoami() every 30s and emit the RTT
@@ -276,6 +291,7 @@ impl ChatBackend for MatrixBackend {
                 &reactions,
                 &history_cursors,
                 &media_dir,
+                &presence_tx,
                 command,
             )
             .await;
@@ -663,6 +679,7 @@ async fn apply_command(
     reactions: &ReactionIndex,
     history_cursors: &HistoryCursors,
     media_dir: &Path,
+    presence_tx: &tokio::sync::watch::Sender<PresenceState>,
     command: Command,
 ) {
     match command {
@@ -769,6 +786,24 @@ async fn apply_command(
                 }
             } else {
                 log::warn!("React remove: no known reaction to redact");
+            }
+        }
+        Command::Away { message } => {
+            let Some(user_id) = client.user_id() else {
+                return;
+            };
+            let presence = if message.is_some() {
+                PresenceState::Unavailable
+            } else {
+                PresenceState::Online
+            };
+            // Keep the sync loop advertising the same state, or the next
+            // long-poll would revert the presence set below.
+            let _ = presence_tx.send(presence.clone());
+            let mut request = set_presence::v3::Request::new(user_id.to_owned(), presence);
+            request.status_msg = message;
+            if let Err(err) = client.send(request).await {
+                log::warn!("Away: set_presence failed: {err}");
             }
         }
         // IRC-only commands are not handled here.

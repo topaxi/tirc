@@ -62,6 +62,7 @@ const TIRC_BAR_ROW_LUA: &str = include_str!("../lua/tirc/tui/bar_row.lua");
 const TIRC_DEFAULT_THEME_LUA: &str = include_str!("../lua/tirc/tui/themes/default.lua");
 const TIRC_SLANTED_THEME_LUA: &str = include_str!("../lua/tirc/tui/themes/slanted.lua");
 const TIRC_NOTIFY_PLUGIN_LUA: &str = include_str!("../lua/tirc/plugins/notify.lua");
+const TIRC_AWAY_PLUGIN_LUA: &str = include_str!("../lua/tirc/plugins/away.lua");
 
 /// Bundled Lua sources written to the config `types/` directory so an editor's
 /// Lua language server can resolve `require('tirc.*')` and the `---@class` types
@@ -77,6 +78,7 @@ pub const TYPE_DEFINITIONS: &[(&str, &str)] = &[
     ("tirc/tui/themes/default.lua", TIRC_DEFAULT_THEME_LUA),
     ("tirc/tui/themes/slanted.lua", TIRC_SLANTED_THEME_LUA),
     ("tirc/plugins/notify.lua", TIRC_NOTIFY_PLUGIN_LUA),
+    ("tirc/plugins/away.lua", TIRC_AWAY_PLUGIN_LUA),
 ];
 
 /// In debug (non-test) builds, reads a builtin Lua file from the source tree so
@@ -117,6 +119,7 @@ const BUILTIN_LUA_FILES: &[&str] = &[
     "lua/tirc/tui/themes/default.lua",
     "lua/tirc/tui/themes/slanted.lua",
     "lua/tirc/plugins/notify.lua",
+    "lua/tirc/plugins/away.lua",
 ];
 
 /// Returns the absolute paths to all builtin Lua source files in the repo.
@@ -189,6 +192,11 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
     let (name, src) = load_builtin("lua/tirc/plugins/notify.lua", TIRC_NOTIFY_PLUGIN_LUA);
     let notify_plugin_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
     set_loaded_modules(lua, "tirc.plugins.notify", notify_plugin_module)?;
+
+    // Requires tirc.plugins.notify at load time, so it must come after it.
+    let (name, src) = load_builtin("lua/tirc/plugins/away.lua", TIRC_AWAY_PLUGIN_LUA);
+    let away_plugin_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
+    set_loaded_modules(lua, "tirc.plugins.away", away_plugin_module)?;
 
     Ok(())
 }
