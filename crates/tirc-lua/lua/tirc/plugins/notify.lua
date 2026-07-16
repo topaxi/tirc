@@ -59,24 +59,22 @@ function M.should_notify(event, ctx)
     return false
   end
 
-  -- IRC nicks are case-insensitive; own echoes never notify.
-  local nick = event.backend.nickname
-  if nick ~= '' and event.sender.id:lower() == nick:lower() then
+  -- Own echoes never notify.
+  if event:is_own() then
     return false
   end
 
   -- Suppress only when the user is actually looking at this buffer: terminal
   -- focused and the message's buffer is the focused one.
-  local buffer_id = event.backend.id .. ':' .. event.target
-  if ctx.terminal_focused and ctx.focused_buffer == buffer_id then
+  if ctx.terminal_focused and ctx.focused_buffer == event:buffer_id() then
     return false
   end
 
-  if opts.dms and utils.is_dm(event) then
+  if opts.dms and event:is_dm() then
     return true
   end
 
-  return utils.is_mention(event.body.text, nick, opts.patterns)
+  return event:is_mention(opts.patterns)
 end
 
 --- Default executor: shells out to `notify-send` (or `opts.command`),

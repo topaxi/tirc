@@ -101,6 +101,11 @@ fire the Lua `"event"` callback before being pushed to state.
   invoked with `runtime::call_formatter`.
 - `ui::lua::to_lua_event` (tirc-ui) converts a stored message into the Lua table shape
   that themes consume.
+- Rust-created event/buffer-tab/datetime tables carry shared method metatables
+  (`event:is_dm()`, `buffer:is_focused()`, `dt:format(fmt)`). The `__index` targets are
+  the `tirc.event`/`tirc.buffer` Lua modules (datetime methods are native); the
+  metatables live under named registry keys (`tirc_lua::meta`) and are re-pointed by
+  `register_builtin_modules` on every reload, so they never go stale.
 
 ### Rendering (`crates/tirc-tui/src/`)
 `Tui` (`ui.rs`) drives the `ratatui` terminal; `renderer.rs` builds the layout and, for

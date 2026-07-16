@@ -21,7 +21,6 @@
 --- of the `away` event.
 
 local tirc = require('tirc')
-local utils = require('tirc.utils')
 
 --- Options for the away plugin.
 ---@class TircAwayOptions
@@ -73,8 +72,7 @@ function M.should_reply(event, ctx)
   end
 
   -- Own echoes never trigger a reply.
-  local nick = event.backend.nickname
-  if nick ~= '' and event.sender.id:lower() == nick:lower() then
+  if event:is_own() then
     return false
   end
 
@@ -82,10 +80,8 @@ function M.should_reply(event, ctx)
     return false
   end
 
-  if not utils.is_dm(event) then
-    if
-      not (opts.reply_to_mentions and utils.is_mention(event.body.text, nick))
-    then
+  if not event:is_dm() then
+    if not (opts.reply_to_mentions and event:is_mention()) then
       return false
     end
   end

@@ -8,6 +8,7 @@ use mlua::{Lua, Table};
 
 use super::date_time::create_date_time_module;
 use super::hash::create_tirc_hash_lua_module;
+use super::meta::{register_method_metatable, BUFFER_META_KEY, EVENT_META_KEY};
 use super::runtime::{
     create_user_command, get_ui, lua_log, register_completion_source, register_event, set_ui,
 };
@@ -57,6 +58,8 @@ fn get_version_lua_value(lua: &Lua) -> mlua::Table {
 const TIRC_INIT_LUA: &str = include_str!("../lua/tirc/init.lua");
 const TIRC_CONFIG_LUA: &str = include_str!("../lua/tirc/config.lua");
 const TIRC_UTILS_LUA: &str = include_str!("../lua/tirc/utils.lua");
+const TIRC_EVENT_LUA: &str = include_str!("../lua/tirc/event.lua");
+const TIRC_BUFFER_LUA: &str = include_str!("../lua/tirc/buffer.lua");
 const TIRC_HASH_LUA: &str = include_str!("../lua/tirc/hash.lua");
 const TIRC_CLASS_LUA: &str = include_str!("../lua/tirc/class.lua");
 const TIRC_THEME_LUA: &str = include_str!("../lua/tirc/tui/theme.lua");
@@ -75,6 +78,8 @@ pub const TYPE_DEFINITIONS: &[(&str, &str)] = &[
     ("tirc/init.lua", TIRC_INIT_LUA),
     ("tirc/config.lua", TIRC_CONFIG_LUA),
     ("tirc/utils.lua", TIRC_UTILS_LUA),
+    ("tirc/event.lua", TIRC_EVENT_LUA),
+    ("tirc/buffer.lua", TIRC_BUFFER_LUA),
     ("tirc/hash.lua", TIRC_HASH_LUA),
     ("tirc/class.lua", TIRC_CLASS_LUA),
     ("tirc/tui/theme.lua", TIRC_THEME_LUA),
@@ -118,6 +123,8 @@ const BUILTIN_LUA_FILES: &[&str] = &[
     "lua/tirc/init.lua",
     "lua/tirc/config.lua",
     "lua/tirc/utils.lua",
+    "lua/tirc/event.lua",
+    "lua/tirc/buffer.lua",
     "lua/tirc/hash.lua",
     "lua/tirc/class.lua",
     "lua/tirc/tui/theme.lua",
@@ -180,6 +187,20 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
     let (name, src) = load_builtin("lua/tirc/utils.lua", TIRC_UTILS_LUA);
     let utils_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
     set_loaded_modules(lua, "tirc.utils", utils_module)?;
+
+    // Method modules backing the shared metatables the host attaches to the
+    // event/buffer-tab tables it creates. Re-registering re-points the stored
+    // metatables at the freshly loaded modules, keeping `:reload` (and the
+    // debug hot-reload of these files) effective.
+    let (name, src) = load_builtin("lua/tirc/event.lua", TIRC_EVENT_LUA);
+    let event_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
+    register_method_metatable(lua, EVENT_META_KEY, &event_module)?;
+    set_loaded_modules(lua, "tirc.event", event_module)?;
+
+    let (name, src) = load_builtin("lua/tirc/buffer.lua", TIRC_BUFFER_LUA);
+    let buffer_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
+    register_method_metatable(lua, BUFFER_META_KEY, &buffer_module)?;
+    set_loaded_modules(lua, "tirc.buffer", buffer_module)?;
 
     let (name, src) = load_builtin("lua/tirc/class.lua", TIRC_CLASS_LUA);
     let class_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;

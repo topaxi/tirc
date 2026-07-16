@@ -1513,6 +1513,8 @@ impl Renderer {
                 },
             )?;
         }
+        // Shared `tirc.buffer` method metatable (`buffer:is_focused()`, ...).
+        tirc_lua::meta::attach_method_metatable(lua, &t, tirc_lua::meta::BUFFER_META_KEY)?;
         Ok(t)
     }
 
@@ -2799,6 +2801,8 @@ mod tests {
         tab.set("target", "#tirc")?;
         tab.set("backend_id", 0)?;
         tab.set("backend_name", "irc.example.com")?;
+        // Real tabs carry the tirc.buffer method metatable (buffer_tab_table).
+        tirc_lua::meta::attach_method_metatable(&lua, &tab, tirc_lua::meta::BUFFER_META_KEY)?;
         buffers.push(tab)?;
 
         // Themes read _tirc.buffers in has_unique_name; seed it before calling

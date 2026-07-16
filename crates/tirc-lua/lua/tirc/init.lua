@@ -3,7 +3,7 @@
 
 --- A buffer entry passed to the `render_buffer_tab` formatter.
 ---@class TircBufferTab
----@field id string opaque buffer identifier (pass to tirc.is_focused_buffer)
+---@field id string opaque buffer identifier (matches `event:buffer_id()` and `tirc.focused_buffer`)
 ---@field name string display name (may differ from target for Matrix rooms)
 ---@field target string raw target identifier (IRC channel/nick or Matrix room id)
 ---@field backend_id integer id of the backend this buffer belongs to (for grouping)
@@ -13,6 +13,9 @@
 ---@field has_mention boolean true when the user's nick was mentioned in an unseen message
 ---@field is_status boolean true for the backend's status/server buffer
 ---@field is_system boolean true for a homeserver system buffer (e.g. a Matrix server-notices room)
+---@field is_focused fun(self: TircBufferTab): boolean whether this buffer is the currently focused one
+---@field focus fun(self: TircBufferTab) queue focusing this buffer (applied after the current callback)
+---@field backend_label fun(self: TircBufferTab): string the backend's `metadata.label`, falling back to its name
 
 --- The buffer bar layout returned by `render_buffer_bar`: one `TircSpans` per row.
 ---@class TircBufferBar
@@ -78,6 +81,10 @@
 ---@field text? string set for 'server_info'
 ---@field raw? string wire representation escape hatch
 ---@field reactions? table<string, TircReaction> emoji key -> aggregated state
+---@field is_dm fun(self: TircEvent): boolean whether this is a direct message (Matrix DMs are indistinguishable from rooms)
+---@field is_mention fun(self: TircEvent, patterns?: string[]): boolean whether the text mentions your own nick (word-boundary) or matches one of `patterns`
+---@field is_own fun(self: TircEvent): boolean whether you sent this event (echo of an own message)
+---@field buffer_id fun(self: TircEvent): string the opaque id of this event's buffer, matching `TircBufferTab.id`/`tirc.focused_buffer`
 
 --- Aggregated state for one reaction key on a message.
 ---@class TircReaction
@@ -105,6 +112,8 @@
 ---@field nickname string alias of `name` for back-compat
 ---@field role 'owner' | 'admin' | 'op' | 'halfop' | 'voice' | 'member'
 
+--- A calendar date-time. Supports `tostring(dt)` and strftime-style
+--- formatting via `dt:format('%H:%M')`.
 ---@class TircDateTime
 ---@field year integer
 ---@field month integer
@@ -112,6 +121,7 @@
 ---@field hour integer
 ---@field minute integer
 ---@field second integer
+---@field format fun(self: TircDateTime, fmt: string): string strftime-style formatting (chrono syntax)
 
 ---@class TircUi
 ---@field buffer_title? fun(server: string, nickname: string, buffer: string): TircSpans
@@ -192,7 +202,6 @@
 ---@field multi_backend boolean whether more than one backend is connected
 ---@field terminal_focused boolean whether the terminal window has focus (true when the terminal does not report focus events)
 ---@field buffers TircBufferTab[] all open buffers
----@field is_focused_buffer fun(buffer: TircBufferTab): boolean
 ---@field focus_buffer fun(id: string) queue focusing a buffer by its opaque id (applied after the current callback)
 ---@field select_backend fun(backend_id: integer) queue selecting a backend for the tabbed bar (applied after the current callback)
 ---@field set_away fun(message: string|nil) queue setting (message) or clearing (nil) the away state on all backends (applied after the current callback)
@@ -221,12 +230,6 @@ end
 ---@param ... Args
 function M.use(plugin, ...)
   plugin:setup(...)
-end
-
----@param buffer TircBufferTab
----@return boolean
-function M.is_focused_buffer(buffer)
-  return _tirc.focused_buffer == buffer.id
 end
 
 --- Queues a UI action for the host to apply after the current callback

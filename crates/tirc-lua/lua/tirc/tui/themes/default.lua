@@ -281,12 +281,10 @@ function Theme:format_topic(event)
   local who = event.who and event.who.name or nil
 
   return {
-    who
-        and {
-          { who, self:nick_style(event.who, s.blue) },
-          { ' changed the topic to ', s.twhite },
-        }
-      or { 'Topic: ', s.twhite },
+    who and {
+      { who, self:nick_style(event.who, s.blue) },
+      { ' changed the topic to ', s.twhite },
+    } or { 'Topic: ', s.twhite },
     { event.topic, s.green },
   }
 end
@@ -445,20 +443,11 @@ function Theme:message_time(dt, _event)
 
   if is_1337 then
     time = {
-      {
-        string.format('%02d:%02d', dt.hour, dt.minute),
-        s.red,
-      },
-      {
-        string.format(':%02d', dt.second),
-        s.twhite,
-      },
+      { dt:format('%H:%M'), s.red },
+      { dt:format(':%S'), s.twhite },
     }
   else
-    time = {
-      string.format('%02d:%02d:%02d', dt.hour, dt.minute, dt.second),
-      s.twhite,
-    }
+    time = { dt:format('%H:%M:%S'), s.twhite }
   end
 
   return {
@@ -647,21 +636,6 @@ function Theme:render_unread_separator(width)
   }
 end
 
-local MONTH_ABBR = {
-  'Jan',
-  'Feb',
-  'Mar',
-  'Apr',
-  'May',
-  'Jun',
-  'Jul',
-  'Aug',
-  'Sep',
-  'Oct',
-  'Nov',
-  'Dec',
-}
-
 --- Renders the separator injected between messages from different calendar days.
 --- `date` carries year, month, day (and hour/minute/second, unused here).
 --- Return `nil` or an empty table to suppress.
@@ -670,8 +644,7 @@ local MONTH_ABBR = {
 ---@return TircSpans
 function Theme:render_date_separator(date, width)
   local s = self.styles
-  local month = MONTH_ABBR[date.month] or tostring(date.month)
-  local label = string.format('%d %s %d', date.day, month, date.year)
+  local label = date:format('%-d %b %Y')
   local left, inner, right = centered_separator(label, width, '─')
   return {
     { left, s.darkgray },
@@ -712,14 +685,12 @@ end
 ---@param first? boolean
 function Theme:render_buffer_tab(buffer, first)
   local s = self.styles
-  local meta = buffer.backend_metadata
-  local backend_label = (meta and meta.label) or buffer.backend_name
   local name = self:tab_needs_backend_prefix(buffer)
-      and (backend_label .. '/' .. buffer.name)
+      and (buffer:backend_label() .. '/' .. buffer.name)
     or buffer.name
 
   local style
-  if tirc.is_focused_buffer(buffer) then
+  if buffer:is_focused() then
     style = s.tab_focused
   elseif buffer.has_mention then
     style = s.tab_mention
@@ -755,10 +726,9 @@ function Theme:backend_groups(buffers)
   for _, b in ipairs(buffers) do
     local g = groups[b.backend_id]
     if not g then
-      local meta = b.backend_metadata
       g = {
         id = b.backend_id,
-        label = (meta and meta.label) or b.backend_name,
+        label = b:backend_label(),
         buffers = {},
         has_unread = false,
         has_mention = false,

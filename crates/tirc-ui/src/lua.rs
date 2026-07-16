@@ -191,6 +191,9 @@ pub fn to_lua_event(
         }
     }
 
+    // Shared `tirc.event` method metatable (`event:is_dm()`, ...).
+    tirc_lua::meta::attach_method_metatable(lua, &table, tirc_lua::meta::EVENT_META_KEY)?;
+
     Ok(table)
 }
 

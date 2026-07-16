@@ -1656,6 +1656,179 @@ mod tests {
         assert_eq!(quoted, r#"'it'\''s a'\''b'"#);
     }
 
+    /// Calls a metatable method on an event table built by `to_lua_event`.
+    fn call_event_method<R: mlua::FromLuaMulti>(
+        lua: &Lua,
+        event: &mlua::Table,
+        method: &str,
+        args: impl mlua::IntoLuaMulti,
+    ) -> R {
+        let f: mlua::Function = event.get(method).expect("method resolvable via metatable");
+        let mut all = args.into_lua_multi(lua).unwrap();
+        all.push_front(mlua::Value::Table(event.clone()));
+        f.call(all).expect("method call")
+    }
+
+    #[test]
+    fn event_metatable_methods() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        // is_dm: channel vs query target.
+        let channel = notify_event(&lua, "alice", "#tirc", "hello rincewind");
+        let dm = notify_event(&lua, "alice", "alice", "hi");
+        assert!(!call_event_method::<bool>(&lua, &channel, "is_dm", ()));
+        assert!(call_event_method::<bool>(&lua, &dm, "is_dm", ()));
+
+        // is_mention: word-boundary own-nick match, patterns, nil body.
+        assert!(call_event_method::<bool>(&lua, &channel, "is_mention", ()));
+        let inside_word = notify_event(&lua, "alice", "#tirc", "rincewinds unite");
+        assert!(!call_event_method::<bool>(
+            &lua,
+            &inside_word,
+            "is_mention",
+            ()
+        ));
+        let patterns = lua.create_sequence_from(["tirc"]).unwrap();
+        let pattern_hit = notify_event(&lua, "alice", "#tirc", "the TIRC build");
+        assert!(call_event_method::<bool>(
+            &lua,
+            &pattern_hit,
+            "is_mention",
+            patterns
+        ));
+        let bodyless = notify_stored_event(
+            &lua,
+            stored(ChatEvent::Membership {
+                target: TargetId::from("#tirc"),
+                who: UserRef::new("rincewind"),
+                change: MembershipChange::Join { realname: None },
+                time: None,
+            }),
+            "#tirc",
+        );
+        assert!(!call_event_method::<bool>(
+            &lua,
+            &bodyless,
+            "is_mention",
+            ()
+        ));
+
+        // is_own: case-insensitive nick comparison.
+        let own = notify_event(&lua, "rincewind", "#tirc", "note");
+        assert!(call_event_method::<bool>(&lua, &own, "is_own", ()));
+        assert!(!call_event_method::<bool>(&lua, &channel, "is_own", ()));
+
+        // buffer_id matches the "<backend>:<target>" focused-buffer format.
+        assert_eq!(
+            call_event_method::<String>(&lua, &channel, "buffer_id", ()),
+            "0:#tirc"
+        );
+    }
+
+    #[test]
+    fn buffer_metatable_methods() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        // Hand-build a tab table and attach the registry metatable, mirroring
+        // what the renderer's buffer_tab_table does.
+        let tab: mlua::Table = lua
+            .load(indoc::indoc! {"
+                return {
+                  id = '0:#tirc',
+                  name = 'tirc',
+                  backend_name = 'test',
+                  backend_metadata = { label = 'topaxi' },
+                }
+            "})
+            .eval()
+            .unwrap();
+        tirc_lua::meta::attach_method_metatable(&lua, &tab, tirc_lua::meta::BUFFER_META_KEY)
+            .unwrap();
+
+        let label: String = tab
+            .get::<mlua::Function>("backend_label")
+            .unwrap()
+            .call(&tab)
+            .unwrap();
+        assert_eq!(label, "topaxi");
+        tab.set("backend_metadata", mlua::Value::Nil).unwrap();
+        let label: String = tab
+            .get::<mlua::Function>("backend_label")
+            .unwrap()
+            .call(&tab)
+            .unwrap();
+        assert_eq!(label, "test");
+
+        // is_focused compares against _tirc.focused_buffer.
+        let is_focused = |tab: &mlua::Table| -> bool {
+            tab.get::<mlua::Function>("is_focused")
+                .unwrap()
+                .call(tab)
+                .unwrap()
+        };
+        assert!(!is_focused(&tab));
+        get_or_create_module(&lua, "_tirc")
+            .unwrap()
+            .set("focused_buffer", "0:#tirc")
+            .unwrap();
+        assert!(is_focused(&tab));
+    }
+
+    #[test]
+    fn date_time_metatable_formats() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        let (formatted, stringified): (String, String) = lua
+            .load(indoc::indoc! {"
+                local dt = require('tirc.date_time').parse_from_rfc3339(
+                  '2026-07-16T13:37:42+00:00'
+                )
+                return dt:format('%H:%M'), tostring(dt)
+            "})
+            .eval()
+            .unwrap();
+        // parse_from_rfc3339 converts into the local timezone, so only assert
+        // on the stable parts.
+        assert_eq!(formatted.len(), 5);
+        assert!(stringified.starts_with("2026-07-1"), "{stringified}");
+        assert!(stringified.ends_with(":42"), "{stringified}");
+    }
+
+    #[test]
+    fn method_metatables_survive_reload() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        // Simulate a reload: re-registering must re-point the stored
+        // metatables at the freshly loaded method modules.
+        register_builtin_modules(&lua).unwrap();
+
+        let current: bool = lua
+            .load(indoc::indoc! {"
+                local event_module = require('tirc.event')
+                local registry_index = ...
+                return registry_index == event_module
+            "})
+            .call({
+                let mt: mlua::Table = lua
+                    .named_registry_value(tirc_lua::meta::EVENT_META_KEY)
+                    .unwrap();
+                mt.get::<mlua::Table>("__index").unwrap()
+            })
+            .unwrap();
+        assert!(
+            current,
+            "metatable __index must track the freshly loaded module"
+        );
+
+        // And a table created after the reload dispatches correctly.
+        let dm = notify_event(&lua, "alice", "alice", "hi");
+        assert!(call_event_method::<bool>(&lua, &dm, "is_dm", ()));
+    }
+
     /// Registers a Lua global `find_fg(spans, text)` that walks a span tree and
     /// returns the serialized `fg` of the innermost `{ text, style }` pair.
     fn register_find_fg(lua: &Lua) {

@@ -77,8 +77,6 @@ end
 local function tab_spans(buffer, focused, show_backend)
   local bg = tab_bg(buffer, focused)
   local fg = tab_fg(buffer, focused)
-  local meta = buffer.backend_metadata
-  local backend_label = (meta and meta.label) or buffer.backend_name
 
   if not show_backend then
     return { { ' ' .. buffer.name .. ' ', theme.style { fg = fg, bg = bg } } }
@@ -86,7 +84,10 @@ local function tab_spans(buffer, focused, show_backend)
 
   local b_bg = focused and FOCUSED_BG_BACKEND or TAB_BG_BACKEND
   return {
-    { ' ' .. backend_label .. ' ', theme.style { fg = fg, bg = b_bg } },
+    {
+      ' ' .. buffer:backend_label() .. ' ',
+      theme.style { fg = fg, bg = b_bg },
+    },
     { SEP_LEFT, theme.style { fg = b_bg, bg = bg } },
     { ' ' .. buffer.name .. ' ', theme.style { fg = fg, bg = bg } },
   }
@@ -104,7 +105,7 @@ end
 ---@param buffer TircBufferTab
 ---@param first? boolean
 function Slanted:render_buffer_tab(buffer, first)
-  local focused = tirc.is_focused_buffer(buffer)
+  local focused = buffer:is_focused()
   local show_backend = self:tab_needs_backend_prefix(buffer)
   local bg = tab_bg(buffer, focused)
   local tab = {}
