@@ -837,6 +837,8 @@ pub struct ReactionHit {
 /// What a buffer-bar tab acts on when clicked. Buffer tabs focus the buffer;
 /// backend tabs (emitted by multi-row themes, e.g. the tabbed layout) either
 /// focus the backend's last-viewed buffer or only change the selected backend.
+/// Custom hits are dispatched back to the theme's `on_bar_click` handler so
+/// themes can implement their own bar UX.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BarHit {
     Buffer(BufferId),
@@ -846,6 +848,8 @@ pub enum BarHit {
         /// buffer row, do not move focus.
         select_only: bool,
     },
+    /// A `custom:` id, carried verbatim (prefix included) to `on_bar_click`.
+    Custom(String),
 }
 
 impl LayoutMap {

@@ -51,6 +51,9 @@ struct BuiltBar<'a> {
     /// Parsed per-row hit ids parallel to `row_widths`; `None` entries are
     /// non-interactive elements (separators/spacers).
     hits: Option<Vec<Vec<Option<BarHit>>>>,
+    /// Theme-declared per-row scroll anchors (0-based element index); `None`
+    /// entries fall back to the automatic focused/selected anchor.
+    anchors: Vec<Option<usize>>,
     scroll_mode: BarScrollMode,
 }
 
@@ -113,6 +116,9 @@ pub fn buffer_bar_scroll(
 pub fn parse_bar_id(s: &str) -> Option<BarHit> {
     if s.is_empty() {
         return None;
+    }
+    if s.starts_with("custom:") {
+        return Some(BarHit::Custom(s.to_string()));
     }
     if let Some(id) = s.strip_prefix("backend-select:") {
         return id.parse().ok().map(|n| BarHit::Backend {
@@ -1714,6 +1720,18 @@ impl Renderer {
         Some(rows)
     }
 
+    /// Reads the optional per-row `anchors` declaration from a `TircBufferBar`
+    /// table: 1-based element indexes; `0` (or absent) means automatic.
+    fn bar_anchors(table: &mlua::Table) -> Vec<Option<usize>> {
+        let Ok(Some(anchors)) = table.get::<Option<mlua::Table>>("anchors") else {
+            return Vec::new();
+        };
+        anchors
+            .sequence_values::<usize>()
+            .map(|anchor| anchor.ok().filter(|a| *a > 0).map(|a| a - 1))
+            .collect()
+    }
+
     /// Produces the buffer bar: rendered lines, a base background style, the
     /// per-tab column widths of every row, and the optional per-row hit ids
     /// (`None` = legacy first-row↔buffers mapping). Delegates the whole layout
@@ -1736,6 +1754,7 @@ impl Renderer {
                 let style = Self::bar_bg_style(&table);
                 let scroll_mode = Self::bar_scroll_mode(&table);
                 let hits = Self::bar_hit_ids(&table);
+                let anchors = Self::bar_anchors(&table);
                 let (lines, row_widths) = self
                     .rows_to_lines_and_widths(lua, mlua::Value::Table(table))
                     .unwrap_or_default();
@@ -1744,6 +1763,7 @@ impl Renderer {
                     style,
                     row_widths,
                     hits,
+                    anchors,
                     scroll_mode,
                 }
             }
@@ -1933,6 +1953,7 @@ impl Renderer {
             style: bar_style,
             row_widths: bar_row_widths,
             hits: bar_hits,
+            anchors: bar_anchors,
             scroll_mode: bar_scroll_mode,
         } = self.build_buffer_bar(state, lua);
         let max_bar_height = f.area().height.saturating_sub(3);
@@ -1979,7 +2000,9 @@ impl Renderer {
         view.bar_row_scroll.resize(bar_lines.len(), 0);
         let selected_backend = view.effective_selected_backend();
         for (row, widths) in bar_row_widths.iter().enumerate() {
-            let anchor = match &bar_hits {
+            // A theme-declared anchor wins; otherwise infer from the hits.
+            let theme_anchor = bar_anchors.get(row).copied().flatten();
+            let anchor = theme_anchor.or_else(|| match &bar_hits {
                 Some(hits) => hits.get(row).and_then(|row_hits| {
                     row_anchor_index(row_hits, view.focused.as_ref(), selected_backend)
                 }),
@@ -1990,7 +2013,7 @@ impl Renderer {
                     .as_ref()
                     .and_then(|id| state.buffers.keys().position(|k| k == id)),
                 None => None,
-            };
+            });
             let prev = view.bar_row_scroll.get(row).copied().unwrap_or(0);
             view.bar_row_scroll[row] =
                 buffer_bar_scroll(widths, anchor, chunks[2].width, prev, bar_scroll_mode);
@@ -3068,11 +3091,74 @@ mod tests {
                 select_only: true,
             })
         );
+        assert_eq!(
+            parse_bar_id("custom:toggle-group:3"),
+            Some(BarHit::Custom("custom:toggle-group:3".to_string())),
+            "custom ids carry the full string verbatim"
+        );
         assert_eq!(parse_bar_id(""), None, "empty = decoration");
         assert_eq!(parse_bar_id("garbage"), None);
         assert_eq!(parse_bar_id("x:#chan"), None, "non-numeric backend");
         assert_eq!(parse_bar_id("backend:x"), None);
         assert_eq!(parse_bar_id("0:"), None, "empty target");
+    }
+
+    #[test]
+    fn theme_anchors_override_automatic_row_anchor() -> anyhow::Result<(), anyhow::Error> {
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        // A theme whose bar declares an explicit anchor on the second element
+        // of row 1 and leaves row 2 automatic (0).
+        lua.load(indoc! {"
+            require('tirc.tui.themes.default'):setup({
+              render_buffer_bar = function(self, buffers)
+                return {
+                  rows = { { 'aa', 'bb' }, { 'cc' } },
+                  ids = { { '', '' }, { '' } },
+                  anchors = { 2, 0 },
+                }
+              end,
+            })
+        "})
+            .exec()?;
+
+        let state = two_backend_state();
+        let renderer = Renderer::new();
+        let bar = renderer.build_buffer_bar(&state, &lua);
+
+        assert_eq!(
+            bar.anchors,
+            vec![Some(1), None],
+            "1-based -> 0-based; 0 = auto"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn on_bar_click_actions_are_queued_by_lua_helpers() -> anyhow::Result<(), anyhow::Error> {
+        let lua = mlua::Lua::new();
+        crate::config::register_builtin_modules(&lua)?;
+        lua.load(indoc! {"
+            local tirc = require('tirc')
+            tirc.focus_buffer('0:#a')
+            tirc.select_backend(1)
+        "})
+            .exec()?;
+
+        let tirc_mod: mlua::Table = lua
+            .globals()
+            .get::<mlua::Table>("package")?
+            .get::<mlua::Table>("loaded")?
+            .get::<mlua::Table>("_tirc")?;
+        let actions: mlua::Table = tirc_mod.get("__ui_actions")?;
+        assert_eq!(actions.len()?, 2);
+        let first: mlua::Table = actions.get(1)?;
+        assert_eq!(first.get::<String>("type")?, "focus_buffer");
+        assert_eq!(first.get::<String>("id")?, "0:#a");
+        let second: mlua::Table = actions.get(2)?;
+        assert_eq!(second.get::<String>("type")?, "select_backend");
+        assert_eq!(second.get::<usize>("id")?, 1);
+        Ok(())
     }
 
     #[test]
@@ -3236,6 +3322,7 @@ mod tests {
         assert!(tabs.iter().all(|(rect, hit)| match hit {
             BarHit::Backend { .. } => rect.y == 5,
             BarHit::Buffer(_) => rect.y == 6,
+            BarHit::Custom(_) => false,
         }));
         Ok(())
     }

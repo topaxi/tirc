@@ -63,8 +63,9 @@ local Class = require('tirc.class')
 ---@field render_buffer_bar? fun(self: TircTheme, buffers: TircBufferTab[]): TircBufferBar | TircSpans
 ---@field render_unread_separator? fun(self: TircTheme): TircSpans
 ---@field render_date_separator? fun(self: TircTheme, date: TircDateTime): TircSpans
----@field buffer_bar? 'linear'|'grouped'|'per-backend'|'tabbed' buffer-bar layout (default 'linear'); the runtime `:barstyle` override wins
+---@field buffer_bar? 'linear'|'grouped'|'per-backend'|'tabbed'|string buffer-bar layout (default 'linear'); the runtime `:barstyle` override wins. Custom themes may define their own names - unknown names render as 'linear' here
 ---@field tabbed_click? 'focus'|'select' what clicking a backend tab does in the 'tabbed' layout: 'focus' jumps to that backend's last-viewed buffer, 'select' only switches the visible buffer row (default 'focus')
+---@field on_bar_click? fun(self: TircTheme, id: string) handler for clicks on `'custom:<...>'` bar elements; receives the id verbatim. Mutate instance state and/or call `tirc.focus_buffer`/`tirc.select_backend` to drive the UI
 
 ---@class TircTheme: TircUi, TircClassDef<TircTheme, TircThemeOptions>
 ---@field styles table<string, TircThemeStyle>

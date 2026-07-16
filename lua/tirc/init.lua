@@ -17,7 +17,8 @@
 --- The buffer bar layout returned by `render_buffer_bar`: one `TircSpans` per row.
 ---@class TircBufferBar
 ---@field rows TircSpans[]
----@field ids? string[][] hit-region declaration parallel to `rows`: `ids[r][e]` describes the e-th top-level element of `rows[r]`. Entries: a buffer id (`TircBufferTab.id`, click focuses it), `'backend:<id>'` (click focuses that backend's last-viewed buffer), `'backend-select:<id>'` (click only selects the backend's row), or `''` for decoration. Use `''`, never nil - sequence holes truncate. Absent: first-row elements map to buffers in order (legacy)
+---@field ids? string[][] hit-region declaration parallel to `rows`: `ids[r][e]` describes the e-th top-level element of `rows[r]`. Entries: a buffer id (`TircBufferTab.id`, click focuses it), `'backend:<id>'` (click focuses that backend's last-viewed buffer), `'backend-select:<id>'` (click only selects the backend's row), `'custom:<anything>'` (click calls the theme's `on_bar_click` with the id, for custom UX), or `''` for decoration. Use `''`, never nil - sequence holes truncate. Absent: first-row elements map to buffers in order (legacy)
+---@field anchors? integer[] per-row 1-based index of the element each row scrolls to keep visible, overriding the automatic focused-buffer/selected-backend anchor; 0 or absent entries fall back to automatic
 ---@field bg? string optional base background colour (hex or named) to fill empty bar space
 ---@field scroll? 'follow'|'center' how to scroll each bar row to keep its anchor tab visible: 'follow' (default) scrolls minimally; 'center' always centers
 
@@ -135,6 +136,8 @@
 ---@field multi_backend boolean whether more than one backend is connected
 ---@field buffers TircBufferTab[] all open buffers
 ---@field is_focused_buffer fun(buffer: TircBufferTab): boolean
+---@field focus_buffer fun(id: string) queue focusing a buffer by its opaque id (applied after the current callback)
+---@field select_backend fun(backend_id: integer) queue selecting a backend for the tabbed bar (applied after the current callback)
 ---@field on fun(event_name: EventName, callback: fun(event: TircEvent, sender: TircSender))
 ---@field log TircLog logging helpers that write to the `:debug` pane
 local M = {}
@@ -162,6 +165,33 @@ end
 ---@return boolean
 function M.is_focused_buffer(buffer)
   return _tirc.focused_buffer == buffer.id
+end
+
+--- Queues a UI action for the host to apply after the current callback
+--- returns. Used by the `tirc.focus_buffer`/`tirc.select_backend` helpers so
+--- theme handlers (e.g. `on_bar_click`) can drive the UI.
+---@param action table
+local function queue_ui_action(action)
+  local actions = _tirc.__ui_actions
+  if not actions then
+    actions = {}
+    _tirc.__ui_actions = actions
+  end
+  actions[#actions + 1] = action
+end
+
+--- Focuses a buffer by its opaque id (`TircBufferTab.id`). Applied by the host
+--- after the current callback returns; unknown ids are ignored.
+---@param id string
+function M.focus_buffer(id)
+  queue_ui_action { type = 'focus_buffer', id = id }
+end
+
+--- Selects the backend whose buffers a tabbed buffer bar shows, without moving
+--- focus. Applied by the host after the current callback returns.
+---@param backend_id integer
+function M.select_backend(backend_id)
+  queue_ui_action { type = 'select_backend', id = backend_id }
 end
 
 --- Joins varargs into one message, stringifying each part (like `print`).

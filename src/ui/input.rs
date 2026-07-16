@@ -18,7 +18,7 @@ use crate::core::{
     TargetId, TxnAllocator, VerifyAction,
 };
 use crate::tui::lua::{create_lua_sender, to_lua_event};
-use crate::tui::{DecodedImage, PreviewResult, Tui};
+use crate::tui::{parse_bar_id, DecodedImage, PreviewResult, Tui};
 use crate::ui::ConnectionStatus;
 
 use super::state::{HistoryState, StoredMessage};
@@ -82,8 +82,9 @@ pub struct InputHandler<'lua> {
     ui_prefs: UiPrefsStore,
 }
 
-/// The buffer-bar layouts the bundled themes understand, accepted by
-/// `:barstyle`. Custom themes may support these or ignore them.
+/// The buffer-bar layouts the bundled default theme understands. `:barstyle`
+/// accepts any name (the theme decides what it means); this set is only used
+/// for help text and to skip the "theme-defined" notice for known names.
 const BAR_STYLES: [&str; 4] = ["linear", "grouped", "per-backend", "tabbed"];
 
 impl<'lua> InputHandler<'lua> {
@@ -320,8 +321,10 @@ impl<'lua> InputHandler<'lua> {
     }
 
     /// Sets (or with `reset` clears) the runtime buffer-bar style override and
-    /// persists it. Unknown styles report the valid set instead of changing
-    /// anything.
+    /// persists it. Any name is accepted - the theme decides what it means, so
+    /// custom themes can define their own layouts (the bundled theme renders
+    /// unknown names as 'linear'). Names outside the bundled set are echoed
+    /// back so a typo is noticeable.
     fn set_bar_style(
         &mut self,
         state: &mut State,
@@ -335,21 +338,80 @@ impl<'lua> InputHandler<'lua> {
             if let Some(backend) = backend {
                 self.report_save_error(state, backend, "ui prefs", result);
             }
-        } else if BAR_STYLES.contains(&arg) {
-            view.buffer_bar_style = Some(arg.to_string());
-            let result = self.ui_prefs.set_buffer_bar(Some(arg));
-            if let Some(backend) = backend {
-                self.report_save_error(state, backend, "ui prefs", result);
-            }
-        } else {
+            return;
+        }
+
+        view.buffer_bar_style = Some(arg.to_string());
+        let result = self.ui_prefs.set_buffer_bar(Some(arg));
+        if !BAR_STYLES.contains(&arg) {
             self.report_info(
                 state,
                 backend,
                 format!(
-                    "Invalid bar style '{arg}'. Valid: {}, reset",
+                    "Buffer bar style set to '{arg}' (theme-defined; bundled: {}, reset)",
                     BAR_STYLES.join(", ")
                 ),
             );
+        }
+        if let Some(backend) = backend {
+            self.report_save_error(state, backend, "ui prefs", result);
+        }
+    }
+
+    /// Applies UI actions a Lua callback queued via `tirc.focus_buffer` /
+    /// `tirc.select_backend` (stored on `_tirc.__ui_actions`), then clears the
+    /// queue. Unknown buffers/backends and malformed entries are ignored so a
+    /// theme bug cannot corrupt view state.
+    fn apply_queued_ui_actions(&mut self, state: &mut State, view: &mut ViewState) {
+        let Ok(actions) = (|| -> mlua::Result<Option<mlua::Table>> {
+            let tirc: mlua::Table = self
+                .lua
+                .globals()
+                .get::<mlua::Table>("package")?
+                .get::<mlua::Table>("loaded")?
+                .get::<mlua::Table>("_tirc")?;
+            let actions = tirc.get::<Option<mlua::Table>>("__ui_actions")?;
+            tirc.set("__ui_actions", mlua::Value::Nil)?;
+            Ok(actions)
+        })() else {
+            return;
+        };
+        let Some(actions) = actions else {
+            return;
+        };
+
+        for action in actions.sequence_values::<mlua::Table>() {
+            let Ok(action) = action else { continue };
+            match action.get::<String>("type").as_deref() {
+                Ok("focus_buffer") => {
+                    let Ok(id) = action.get::<String>("id") else {
+                        continue;
+                    };
+                    let Some(BarHit::Buffer(id)) = parse_bar_id(&id) else {
+                        continue;
+                    };
+                    if !state.buffers.contains_key(&id) {
+                        continue;
+                    }
+                    if let Some(buffer) = state.focused_buffer_mut(view) {
+                        buffer.advance_read_marker();
+                    }
+                    view.focus(id);
+                    if let Some(buffer) = state.focused_buffer_mut(view) {
+                        buffer.mark_read();
+                    }
+                }
+                Ok("select_backend") => {
+                    let Ok(id) = action.get::<usize>("id") else {
+                        continue;
+                    };
+                    let backend = BackendId(id);
+                    if state.backends.contains_key(&backend) {
+                        view.selected_backend = Some(backend);
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -846,6 +908,17 @@ impl<'lua> InputHandler<'lua> {
                     .filter(|id| state.buffers.contains_key(*id))
                     .cloned()
                     .unwrap_or_else(|| BufferId::status(backend)),
+                BarHit::Custom(id) => {
+                    // Theme-defined element: hand the id back to the theme's
+                    // handler, then apply any UI actions it queued.
+                    if let Some(Err(err)) =
+                        crate::config::call_formatter(self.lua, "on_bar_click", id)
+                    {
+                        log::warn!("on_bar_click failed: {err}");
+                    }
+                    self.apply_queued_ui_actions(state, view);
+                    return true;
+                }
             };
             if let Some(buffer) = state.focused_buffer_mut(view) {
                 buffer.advance_read_marker();
@@ -1235,7 +1308,7 @@ impl<'lua> InputHandler<'lua> {
                     state,
                     backend,
                     format!(
-                        "Buffer bar style: {current}. Valid: {}",
+                        "Buffer bar style: {current}. Bundled: {} (custom themes may define more)",
                         BAR_STYLES.join(", ")
                     ),
                 );
