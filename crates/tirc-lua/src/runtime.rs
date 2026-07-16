@@ -1,6 +1,7 @@
 //! The Lua runtime surface shared by the config loader, the renderer, and the
 //! input layer: event handlers registered via `tirc.on`, the `tirc.ui` theme
-//! object and its formatters, Lua completion sources, and per-backend metadata.
+//! object and its formatters, Lua completion sources, Lua user commands, and
+//! per-backend metadata.
 //! Everything lives in the Lua registry so it survives config reloads by
 //! explicit reset ([`reset_runtime`]) rather than by recreating the `Lua`.
 
@@ -49,7 +50,10 @@ pub(crate) fn lua_log(_: &Lua, (level, message): (String, String)) -> mlua::Resu
     Ok(())
 }
 
-pub(crate) fn register_event(lua: &Lua, (name, func): (String, mlua::Function)) -> mlua::Result<()> {
+pub(crate) fn register_event(
+    lua: &Lua,
+    (name, func): (String, mlua::Function),
+) -> mlua::Result<()> {
     let event = EventName::parse(&name)
         .ok_or_else(|| mlua::Error::external(anyhow!("unknown event name: {name}")))?;
     let key = event.registry_key();
@@ -213,6 +217,107 @@ pub(crate) fn register_completion_source(lua: &Lua, spec: Table) -> mlua::Result
     Ok(())
 }
 
+/// Registry key holding the map of Lua user-command specs (`name -> spec`).
+const USER_COMMANDS_KEY: &str = "tirc-user-commands";
+
+/// Returns the `tirc-user-commands` registry table, creating it on first
+/// access. Maps command name to its spec table
+/// (`{ fn, nargs, complete, desc }`) registered via `tirc.create_command`.
+pub fn user_commands_registry(lua: &Lua) -> mlua::Result<Table> {
+    match lua.named_registry_value::<Value>(USER_COMMANDS_KEY)? {
+        Value::Table(tbl) => Ok(tbl),
+        _ => {
+            let tbl = lua.create_table()?;
+            lua.set_named_registry_value(USER_COMMANDS_KEY, &tbl)?;
+            Ok(tbl)
+        }
+    }
+}
+
+/// The names of all registered Lua user commands, for dispatch resolution and
+/// command-name completion.
+pub fn user_command_names(lua: &Lua) -> Vec<String> {
+    let Ok(registry) = user_commands_registry(lua) else {
+        return Vec::new();
+    };
+    registry
+        .pairs::<String, Value>()
+        .filter_map(|pair| pair.ok().map(|(name, _)| name))
+        .collect()
+}
+
+/// The stored spec table for a user command, or `None` when no command of
+/// that name is registered.
+pub fn user_command_spec(lua: &Lua, name: &str) -> Option<Table> {
+    match user_commands_registry(lua).ok()?.get::<Value>(name).ok()? {
+        Value::Table(spec) => Some(spec),
+        _ => None,
+    }
+}
+
+/// Drops all Lua user commands so a reload replaces them instead of keeping
+/// stale handlers around.
+pub fn clear_user_commands(lua: &Lua) -> mlua::Result<()> {
+    lua.set_named_registry_value(USER_COMMANDS_KEY, mlua::Value::Nil)
+}
+
+/// Backs `tirc.create_command(name, fn, opts)`: registers a Lua user command,
+/// nvim_create_user_command-style. `opts` accepts `nargs` (`'0'`, `'1'`,
+/// `'?'`, `'*'`, `'+'`, or the integers 0/1; default `'0'`), `complete`
+/// (a builtin kind - `'channel'`, `'nick'`, `'buffer'` - or a function
+/// returning candidates), and `desc`. Re-registering a name overwrites the
+/// previous command. Builtin commands always shadow user commands of the same
+/// name; the user command remains reachable via an unambiguous prefix.
+pub(crate) fn create_user_command(
+    lua: &Lua,
+    (name, func, opts): (String, mlua::Function, Option<Table>),
+) -> mlua::Result<()> {
+    let valid_name = !name.is_empty()
+        && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !valid_name {
+        return Err(mlua::Error::external(anyhow!(
+            "invalid command name: {name:?} (expected [A-Za-z][A-Za-z0-9_]*)"
+        )));
+    }
+
+    let spec = lua.create_table()?;
+    spec.set("fn", func)?;
+
+    let mut nargs = "0".to_string();
+    if let Some(opts) = opts {
+        nargs = match opts.get::<Value>("nargs")? {
+            Value::Nil => nargs,
+            Value::Integer(0) => "0".to_string(),
+            Value::Integer(1) => "1".to_string(),
+            Value::String(s) if matches!(&*s.to_string_lossy(), "0" | "1" | "?" | "*" | "+") => {
+                s.to_string_lossy().to_string()
+            }
+            other => {
+                return Err(mlua::Error::external(anyhow!(
+                    "invalid nargs: {other:?} (expected '0', '1', '?', '*' or '+')"
+                )))
+            }
+        };
+        match opts.get::<Value>("complete")? {
+            Value::Nil => {}
+            value @ (Value::String(_) | Value::Function(_)) => spec.set("complete", value)?,
+            other => {
+                return Err(mlua::Error::external(anyhow!(
+                    "invalid complete: {other:?} (expected a kind string or a function)"
+                )))
+            }
+        }
+        if let Value::String(desc) = opts.get::<Value>("desc")? {
+            spec.set("desc", desc)?;
+        }
+    }
+    spec.set("nargs", nargs)?;
+
+    user_commands_registry(lua)?.set(name, spec)?;
+    Ok(())
+}
+
 /// Registry key holding the per-backend metadata table (`id -> metadata`).
 const BACKEND_METADATA_KEY: &str = "tirc-backend-metadata";
 
@@ -270,9 +375,9 @@ pub fn register_backend_metadata(lua: &Lua, id: BackendId) -> mlua::Result<()> {
 }
 
 /// Resets the reload-scoped runtime state: the `tirc.ui` theme object, every
-/// event handler registered via `tirc.on(name, fn)`, and the Lua completion
-/// sources. Backend metadata is deliberately kept - servers are not re-read on
-/// reload, so their metadata stays valid.
+/// event handler registered via `tirc.on(name, fn)`, the Lua completion
+/// sources, and the Lua user commands. Backend metadata is deliberately kept -
+/// servers are not re-read on reload, so their metadata stays valid.
 pub fn reset_runtime(lua: &Lua) -> mlua::Result<()> {
     // Clear the UI formatter table so tirc.use(theme) starts from scratch
     lua.set_named_registry_value("tirc-ui", mlua::Value::Nil)?;
@@ -294,6 +399,10 @@ pub fn reset_runtime(lua: &Lua) -> mlua::Result<()> {
     // Clear Lua completion sources so :reload replaces them instead of
     // appending duplicates.
     clear_completion_sources(lua)?;
+
+    // Clear Lua user commands so :reload replaces them instead of keeping
+    // stale handlers around.
+    clear_user_commands(lua)?;
 
     Ok(())
 }

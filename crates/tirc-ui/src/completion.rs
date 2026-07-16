@@ -121,7 +121,7 @@ impl CompletionEngine {
     /// non-empty item list wins.
     pub fn query(&mut self, ctx: &CompletionQuery, lua: &Lua) -> Option<QueryResult> {
         if ctx.mode == Mode::Command {
-            if let Some(result) = self.command_name_query(ctx) {
+            if let Some(result) = self.command_name_query(ctx, lua) {
                 return Some(result);
             }
             if let Some(result) = self.command_arg_query(ctx, lua) {
@@ -144,30 +144,35 @@ impl CompletionEngine {
         self.query_lua_sources(ctx, lua)
     }
 
-    /// Completes command names at the start of the Command-mode input, from
-    /// the command registry: every canonical name and alias, with a trailing
-    /// space when the command takes arguments.
-    fn command_name_query(&mut self, ctx: &CompletionQuery) -> Option<QueryResult> {
+    /// Completes command names at the start of the Command-mode input: every
+    /// registry canonical name and alias plus the Lua user commands, with a
+    /// trailing space when the command takes arguments.
+    fn command_name_query(&mut self, ctx: &CompletionQuery, lua: &Lua) -> Option<QueryResult> {
         let min_chars = if ctx.force { 0 } else { 1 };
         let (start, end, query) = line_start_span(ctx.value, ctx.cursor, min_chars)?;
-        let items = command_name_items(&query, &mut self.matcher);
+        let lua_commands = lua_command_candidates(lua);
+        let items = command_name_items(&query, &mut self.matcher, &lua_commands);
         (!items.is_empty()).then_some(((start, end), items))
     }
 
-    /// Completes the argument word under the cursor from the registry spec of
-    /// the (prefix-resolved) command in the first word: channels, nicks,
-    /// buffer labels, fixed choices, or theme bar styles depending on the
-    /// argument position's [`ArgKind`]. On ordinary edits at least one query
-    /// char is required so the popup does not open on every space; Tab
-    /// force-opens the full list.
+    /// Completes the argument word under the cursor from the spec of the
+    /// (prefix-resolved) command in the first word: channels, nicks, buffer
+    /// labels, fixed choices, or theme bar styles depending on the argument
+    /// position's [`ArgKind`] for builtins, or the `complete` field of a Lua
+    /// user command. On ordinary edits at least one query char is required so
+    /// the popup does not open on every space; Tab force-opens the full list.
     fn command_arg_query(&mut self, ctx: &CompletionQuery, lua: &Lua) -> Option<QueryResult> {
         let (arg_index, start, end, query) = commands::arg_word_span(ctx.value, ctx.cursor)?;
         if !ctx.force && query.is_empty() {
             return None;
         }
         let (name, _) = commands::split_line(ctx.value);
-        let spec = match commands::resolve(name, &[]) {
+        let lua_names = tirc_lua::runtime::user_command_names(lua);
+        let spec = match commands::resolve(name, &lua_names) {
             Resolution::Builtin(spec) => spec,
+            Resolution::Lua(name) => {
+                return self.lua_command_arg_query(ctx, lua, &name, arg_index, (start, end), &query)
+            }
             _ => return None,
         };
         let kind = *spec.args.get(arg_index)?;
@@ -191,6 +196,68 @@ impl CompletionEngine {
         });
         let items = fuzzy_rank(&mut self.matcher, &query, candidates);
         (!items.is_empty()).then_some(((start, end), items))
+    }
+
+    /// Completes an argument of a Lua user command from its spec's `complete`
+    /// field: a builtin kind string (`'channel'`, `'nick'`, `'buffer'`) reuses
+    /// the state-backed candidates; a function is called with a ctx table
+    /// (`input`, `cursor`, `query`, `arg_index` 1-based like `fargs`, `args`)
+    /// and its items are decoded like a Lua completion source's. A failing
+    /// function is logged and skipped.
+    fn lua_command_arg_query(
+        &mut self,
+        ctx: &CompletionQuery,
+        lua: &Lua,
+        name: &str,
+        arg_index: usize,
+        span: (usize, usize),
+        query: &str,
+    ) -> Option<QueryResult> {
+        let spec = tirc_lua::runtime::user_command_spec(lua, name)?;
+        let items = match spec.get::<mlua::Value>("complete").ok()? {
+            mlua::Value::String(kind) => {
+                let kind = match &*kind.to_string_lossy() {
+                    "channel" => ArgKind::Channel,
+                    "nick" => ArgKind::Nick,
+                    "buffer" => ArgKind::Buffer,
+                    _ => return None,
+                };
+                let names = arg_kind_names(kind, ctx, lua);
+                let candidates = names.iter().map(|name| {
+                    (
+                        name.as_str(),
+                        CompletionItem {
+                            label: name.clone(),
+                            insert: name.clone(),
+                        },
+                    )
+                });
+                fuzzy_rank(&mut self.matcher, query, candidates)
+            }
+            mlua::Value::Function(complete) => {
+                let result = (|| -> mlua::Result<Vec<CompletionItem>> {
+                    let call_ctx = lua.create_table()?;
+                    call_ctx.set("input", ctx.value)?;
+                    call_ctx.set("cursor", ctx.cursor)?;
+                    call_ctx.set("query", query)?;
+                    call_ctx.set("arg_index", arg_index + 1)?;
+                    call_ctx.set("args", commands::split_line(ctx.value).1)?;
+                    match complete.call::<mlua::Value>(call_ctx)? {
+                        mlua::Value::Table(list) => decode_lua_items(&list),
+                        _ => Ok(Vec::new()),
+                    }
+                })();
+                match result {
+                    Ok(items) => items,
+                    Err(err) => {
+                        log::error!(target: "tirc::lua", "command :{name} complete failed: {err}");
+                        return None;
+                    }
+                }
+            }
+            _ => return None,
+        };
+        (!items.is_empty()).then_some((span, items))
     }
 
     /// Consults sources registered from Lua via
@@ -313,28 +380,56 @@ fn decode_lua_items(list: &mlua::Table) -> mlua::Result<Vec<CompletionItem>> {
     Ok(items)
 }
 
-/// Fuzzy-ranks every registry command name and alias against `query`. The
-/// insert text carries a trailing space when the command takes arguments.
-fn command_name_items(query: &str, matcher: &mut Matcher) -> Vec<CompletionItem> {
-    let candidates = commands::BUILTIN_COMMANDS.iter().flat_map(|spec| {
-        std::iter::once(spec.name)
-            .chain(spec.aliases.iter().copied())
-            .map(move |name| {
-                let insert = if spec.nargs.takes_args() {
-                    format!("{name} ")
-                } else {
-                    name.to_string()
-                };
-                (
-                    name,
-                    CompletionItem {
-                        label: name.to_string(),
-                        insert,
-                    },
-                )
-            })
-    });
+/// Fuzzy-ranks every registry command name and alias, plus the Lua user
+/// commands, against `query`. The insert text carries a trailing space when
+/// the command takes arguments.
+fn command_name_items(
+    query: &str,
+    matcher: &mut Matcher,
+    lua_commands: &[(String, bool)],
+) -> Vec<CompletionItem> {
+    let candidates = commands::BUILTIN_COMMANDS
+        .iter()
+        .flat_map(|spec| {
+            std::iter::once(spec.name)
+                .chain(spec.aliases.iter().copied())
+                .map(move |name| (name, spec.nargs.takes_args()))
+        })
+        .chain(
+            lua_commands
+                .iter()
+                .map(|(name, takes_args)| (name.as_str(), *takes_args)),
+        )
+        .map(|(name, takes_args)| {
+            let insert = if takes_args {
+                format!("{name} ")
+            } else {
+                name.to_string()
+            };
+            (
+                name,
+                CompletionItem {
+                    label: name.to_string(),
+                    insert,
+                },
+            )
+        });
     fuzzy_rank(matcher, query, candidates)
+}
+
+/// The Lua user commands as `(name, takes_args)` name-completion candidates.
+fn lua_command_candidates(lua: &Lua) -> Vec<(String, bool)> {
+    let Ok(registry) = tirc_lua::runtime::user_commands_registry(lua) else {
+        return Vec::new();
+    };
+    registry
+        .pairs::<String, mlua::Table>()
+        .filter_map(|pair| {
+            let (name, spec) = pair.ok()?;
+            let nargs: String = spec.get("nargs").unwrap_or_else(|_| "0".to_string());
+            Some((name, nargs != "0"))
+        })
+        .collect()
 }
 
 /// Collects the raw candidate names for one argument kind. State-backed kinds
@@ -829,7 +924,7 @@ mod tests {
     #[test]
     fn test_command_name_items_trailing_space() {
         let mut matcher = Matcher::default();
-        let items = command_name_items("jo", &mut matcher);
+        let items = command_name_items("jo", &mut matcher, &[]);
         let join = items.iter().find(|i| i.label == "join").unwrap();
         assert_eq!(join.insert, "join ");
     }
@@ -837,7 +932,7 @@ mod tests {
     #[test]
     fn test_command_name_items_short_aliases() {
         let mut matcher = Matcher::default();
-        let items = command_name_items("q", &mut matcher);
+        let items = command_name_items("q", &mut matcher, &[]);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"q"));
         assert!(labels.contains(&"quit"));
@@ -849,13 +944,14 @@ mod tests {
     #[test]
     fn test_command_name_query_only_inside_first_word() {
         let mut engine = CompletionEngine::new();
+        let lua = Lua::new();
         let ctx = command_query("jo", 2, false);
-        let ((start, end), items) = engine.command_name_query(&ctx).unwrap();
+        let ((start, end), items) = engine.command_name_query(&ctx, &lua).unwrap();
         assert_eq!((start, end), (0, 2));
         assert!(items.iter().any(|i| i.label == "join"));
 
         let ctx = command_query("join #rust", 7, false);
-        assert_eq!(engine.command_name_query(&ctx), None);
+        assert_eq!(engine.command_name_query(&ctx, &lua), None);
     }
 
     #[test]

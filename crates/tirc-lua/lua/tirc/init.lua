@@ -159,6 +159,28 @@
 ---@field trigger TircCompletionTrigger
 ---@field complete fun(ctx: TircCompletionContext): (TircCompletionItem | string)[]
 
+--- The context passed to a user command's handler.
+---@class TircCommandContext
+---@field name string the resolved command name
+---@field args string everything after the command name, unsplit
+---@field fargs string[] `args` split on whitespace
+---@field buffer? string target of the focused buffer, or nil
+---@field backend? integer id of the focused buffer's backend, or nil
+
+--- The context passed to a user command's `complete` function.
+---@class TircCommandCompleteContext
+---@field input string the full input line
+---@field cursor integer cursor position as a 0-based character index
+---@field query string the argument word text before the cursor
+---@field arg_index integer 1-based argument position, matching `fargs`
+---@field args string everything after the command name
+
+--- Options for `tirc.create_command`, nvim_create_user_command-style.
+---@class TircCommandOpts
+---@field nargs? '0' | '1' | '?' | '*' | '+' | 0 | 1 argument arity (default '0')
+---@field complete? 'channel' | 'nick' | 'buffer' | fun(ctx: TircCommandCompleteContext): (TircCompletionItem | string)[]
+---@field desc? string
+
 ---@class TircModule
 ---@field version string
 ---@field ui TircUi
@@ -173,6 +195,7 @@
 ---@field select_backend fun(backend_id: integer) queue selecting a backend for the tabbed bar (applied after the current callback)
 ---@field on fun(event_name: EventName, callback: fun(event: TircEvent, sender: TircSender))
 ---@field register_completion_source fun(source: TircCompletionSource)
+---@field create_command fun(name: string, handler: fun(ctx: TircCommandContext, sender: TircSender|nil), opts?: TircCommandOpts) register a `:` user command; builtin names shadow it on exact match; cleared and re-registered on `:reload`
 ---@field log TircLog logging helpers that write to the `:debug` pane
 local M = {}
 

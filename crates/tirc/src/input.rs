@@ -1191,9 +1191,13 @@ impl<'lua> InputHandler<'lua> {
         }
 
         let (name, rest) = commands::split_line(&line);
-        let spec = match commands::resolve(name, &[]) {
+        let lua_names = tirc_lua::runtime::user_command_names(self.lua);
+        let spec = match commands::resolve(name, &lua_names) {
             Resolution::Builtin(spec) => spec,
-            Resolution::Lua(_) => return Ok(true),
+            Resolution::Lua(name) => {
+                self.run_lua_command(state, view, backend, &name, rest);
+                return Ok(true);
+            }
             Resolution::Ambiguous(candidates) => {
                 self.report_info(
                     state,
@@ -1417,6 +1421,67 @@ impl<'lua> InputHandler<'lua> {
         }
 
         Ok(true)
+    }
+
+    /// Executes a Lua user command registered via `tirc.create_command`. The
+    /// handler receives a ctx table (`name`, `args`, `fargs`, `buffer`,
+    /// `backend`) and, when a backend is focused, the same sender table
+    /// `tirc.on('event', ...)` handlers get. Queued UI actions (e.g.
+    /// `tirc.focus_buffer`) are applied afterwards; errors are reported to the
+    /// status buffer and the log.
+    fn run_lua_command(
+        &mut self,
+        state: &mut State,
+        view: &mut ViewState,
+        backend: Option<BackendId>,
+        name: &str,
+        rest: &str,
+    ) {
+        let Some(spec) = tirc_lua::runtime::user_command_spec(self.lua, name) else {
+            return;
+        };
+        let nargs: String = spec.get("nargs").unwrap_or_else(|_| "0".to_string());
+        let arity_error = match nargs.as_str() {
+            "0" if !rest.is_empty() => {
+                Some(format!("Trailing characters: :{name} takes no arguments"))
+            }
+            "1" | "+" if rest.is_empty() => Some(format!("Argument required for :{name}")),
+            _ => None,
+        };
+        if let Some(message) = arity_error {
+            self.report_info(state, backend, message);
+            return;
+        }
+        let Ok(func) = spec.get::<mlua::Function>("fn") else {
+            return;
+        };
+
+        let result = (|| -> mlua::Result<()> {
+            let ctx = self.lua.create_table()?;
+            ctx.set("name", name)?;
+            ctx.set("args", rest)?;
+            ctx.set("fargs", rest.split_whitespace().collect::<Vec<_>>())?;
+            if let Some(focused) = view.focused.as_ref() {
+                ctx.set("buffer", focused.target.as_str())?;
+                ctx.set("backend", focused.backend.0)?;
+            }
+            let sender = match backend {
+                Some(backend) => mlua::Value::Table(self.sender_table(backend)?),
+                None => mlua::Value::Nil,
+            };
+            func.call::<()>((ctx, sender))
+        })();
+        if let Err(err) = result {
+            log::error!(target: "tirc::lua", "command :{name} failed: {err}");
+            let first_line = err.to_string().replace(['\r', '\n'], " ");
+            self.report_info(
+                state,
+                backend,
+                format!("Error executing :{name}: {first_line}"),
+            );
+        }
+
+        self.apply_queued_ui_actions(state, view);
     }
 
     /// Enqueues a command to a specific backend, if one is focused.

@@ -7,7 +7,9 @@
 use mlua::{Lua, Table};
 
 use super::date_time::create_date_time_module;
-use super::runtime::{get_ui, lua_log, register_completion_source, register_event, set_ui};
+use super::runtime::{
+    create_user_command, get_ui, lua_log, register_completion_source, register_event, set_ui,
+};
 use super::theme::create_tirc_theme_lua_module;
 use super::{get_or_create_module, set_loaded_modules};
 
@@ -140,6 +142,7 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
         "register_completion_source",
         lua.create_function(register_completion_source)?,
     )?;
+    tirc_mod.set("create_command", lua.create_function(create_user_command)?)?;
     tirc_mod.set("__log", lua.create_function(lua_log)?)?;
     tirc_mod.set("__get_ui", lua.create_function(get_ui)?)?;
     tirc_mod.set("__set_ui", lua.create_function(set_ui)?)?;

@@ -462,6 +462,127 @@ mod tests {
     }
 
     #[test]
+    fn lua_user_command_registers_completes_and_clears() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        lua.load(indoc::indoc! {r#"
+            local tirc = require('tirc')
+            tirc.create_command('deploy', function(ctx) end, {
+              nargs = 1,
+              complete = function(ctx)
+                return { 'staging', 'production' }
+              end,
+              desc = 'Deploy an environment',
+            })
+            tirc.create_command('shrug', function(ctx) end, { nargs = '*' })
+        "#})
+            .exec()
+            .unwrap();
+
+        let mut names = tirc_lua::runtime::user_command_names(&lua);
+        names.sort();
+        assert_eq!(names, ["deploy", "shrug"]);
+
+        // Name completion offers the Lua command with a trailing space.
+        let mut engine = tirc_ui::completion::CompletionEngine::new();
+        let query = tirc_ui::completion::CompletionQuery {
+            mode: tirc_ui::Mode::Command,
+            value: "depl",
+            cursor: 4,
+            force: false,
+            state: None,
+            focused: None,
+        };
+        let (span, items) = engine.query(&query, &lua).expect("name should complete");
+        assert_eq!(span, (0, 4));
+        let deploy = items.iter().find(|i| i.label == "deploy").unwrap();
+        assert_eq!(deploy.insert, "deploy ");
+
+        // Argument completion calls the command's complete function, even
+        // when the command name is prefix-abbreviated.
+        let query = tirc_ui::completion::CompletionQuery {
+            mode: tirc_ui::Mode::Command,
+            value: "dep sta",
+            cursor: 7,
+            force: false,
+            state: None,
+            focused: None,
+        };
+        let (span, items) = engine.query(&query, &lua).expect("arg should complete");
+        assert_eq!(span, (4, 7));
+        assert_eq!(items[0].insert, "staging");
+        assert_eq!(items[1].insert, "production");
+
+        // reset_runtime clears user commands like the other reload state.
+        tirc_lua::runtime::reset_runtime(&lua).unwrap();
+        assert!(tirc_lua::runtime::user_command_names(&lua).is_empty());
+    }
+
+    #[test]
+    fn lua_user_command_builtin_complete_kind() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        lua.load(indoc::indoc! {r#"
+            require('tirc').create_command('close', function(ctx) end, {
+              nargs = 1,
+              complete = 'channel',
+            })
+        "#})
+            .exec()
+            .unwrap();
+
+        let mut state = tirc_ui::State::new();
+        state.register_backend(backend());
+        state.apply(
+            BackendId(0),
+            ChatEvent::Message {
+                target: TargetId::from("#rust"),
+                id: None,
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain("hi"),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+        let focused = tirc_core::BufferId::new(BackendId(0), "#rust");
+
+        let mut engine = tirc_ui::completion::CompletionEngine::new();
+        let query = tirc_ui::completion::CompletionQuery {
+            mode: tirc_ui::Mode::Command,
+            value: "close #r",
+            cursor: 8,
+            force: false,
+            state: Some(&state),
+            focused: Some(&focused),
+        };
+        let (_, items) = engine.query(&query, &lua).expect("kind should complete");
+        assert_eq!(items[0].insert, "#rust");
+    }
+
+    #[test]
+    fn lua_user_command_rejects_bad_specs() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+        let tirc = "require('tirc')";
+
+        for bad in [
+            // Name must be [A-Za-z][A-Za-z0-9_]*.
+            format!("{tirc}.create_command('9bad', function() end)"),
+            format!("{tirc}.create_command('', function() end)"),
+            // The handler function is required.
+            format!("{tirc}.create_command('x')"),
+            // Unknown arity / complete shapes are rejected eagerly.
+            format!("{tirc}.create_command('x', function() end, {{ nargs = 'lots' }})"),
+            format!("{tirc}.create_command('x', function() end, {{ complete = 42 }})"),
+        ] {
+            assert!(lua.load(&bad).exec().is_err(), "must be rejected: {bad}");
+        }
+    }
+
+    #[test]
     fn selection_mode_deserializes_lowercase() {
         let lua = Lua::new();
         let app: SelectionMode = lua.from_value(lua.load("'app'").eval().unwrap()).unwrap();
