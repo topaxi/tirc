@@ -58,6 +58,7 @@ const TIRC_CONFIG_LUA: &str = include_str!("../lua/tirc/config.lua");
 const TIRC_UTILS_LUA: &str = include_str!("../lua/tirc/utils.lua");
 const TIRC_CLASS_LUA: &str = include_str!("../lua/tirc/class.lua");
 const TIRC_THEME_LUA: &str = include_str!("../lua/tirc/tui/theme.lua");
+const TIRC_BAR_ROW_LUA: &str = include_str!("../lua/tirc/tui/bar_row.lua");
 const TIRC_DEFAULT_THEME_LUA: &str = include_str!("../lua/tirc/tui/themes/default.lua");
 const TIRC_SLANTED_THEME_LUA: &str = include_str!("../lua/tirc/tui/themes/slanted.lua");
 const TIRC_NOTIFY_PLUGIN_LUA: &str = include_str!("../lua/tirc/plugins/notify.lua");
@@ -72,6 +73,7 @@ pub const TYPE_DEFINITIONS: &[(&str, &str)] = &[
     ("tirc/utils.lua", TIRC_UTILS_LUA),
     ("tirc/class.lua", TIRC_CLASS_LUA),
     ("tirc/tui/theme.lua", TIRC_THEME_LUA),
+    ("tirc/tui/bar_row.lua", TIRC_BAR_ROW_LUA),
     ("tirc/tui/themes/default.lua", TIRC_DEFAULT_THEME_LUA),
     ("tirc/tui/themes/slanted.lua", TIRC_SLANTED_THEME_LUA),
     ("tirc/plugins/notify.lua", TIRC_NOTIFY_PLUGIN_LUA),
@@ -111,6 +113,7 @@ const BUILTIN_LUA_FILES: &[&str] = &[
     "lua/tirc/utils.lua",
     "lua/tirc/class.lua",
     "lua/tirc/tui/theme.lua",
+    "lua/tirc/tui/bar_row.lua",
     "lua/tirc/tui/themes/default.lua",
     "lua/tirc/tui/themes/slanted.lua",
     "lua/tirc/plugins/notify.lua",
@@ -170,6 +173,10 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
     let (name, src) = load_builtin("lua/tirc/class.lua", TIRC_CLASS_LUA);
     let class_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
     set_loaded_modules(lua, "tirc.class", class_module)?;
+
+    let (name, src) = load_builtin("lua/tirc/tui/bar_row.lua", TIRC_BAR_ROW_LUA);
+    let bar_row_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
+    set_loaded_modules(lua, "tirc.tui.bar_row", bar_row_module)?;
 
     let (name, src) = load_builtin("lua/tirc/tui/themes/default.lua", TIRC_DEFAULT_THEME_LUA);
     let default_theme_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;

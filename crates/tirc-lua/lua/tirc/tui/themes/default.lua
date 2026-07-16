@@ -2,6 +2,7 @@ local tirc = require('tirc')
 local utils = require('tirc.utils')
 local theme = require('tirc.tui.theme')
 local Class = require('tirc.class')
+local BarRow = require('tirc.tui.bar_row')
 
 --- The bundled default theme, structured as a class so downstream themes can
 --- reuse and extend it. It is a superset of `TircUi`: `new()` returns an instance
@@ -25,24 +26,24 @@ local Class = require('tirc.class')
 --- }
 --- ```
 ---
---- `render_buffer_bar` owns the whole bar layout and returns `{ rows = { ... } }`
---- (one row per line). Override it to group tabs onto separate rows per backend:
+--- `render_buffer_bar` owns the whole bar layout and returns a `TircBufferBar`
+--- (one row per line, plus the parallel `ids` click declaration). Build rows
+--- with `tirc.tui.bar_row`, which keeps each row's spans and ids in lockstep.
+--- Override it to group tabs onto separate rows per backend:
 --- ```lua
+--- local BarRow = require('tirc.tui.bar_row')
 --- function My:render_buffer_bar(buffers)
----   local groups, order = {}, {}
+---   local rows, order = {}, {}
 ---   for _, b in ipairs(buffers) do
----     if not groups[b.backend_id] then
----       groups[b.backend_id] = {}
----       order[#order + 1] = b.backend_id
+---     local row = rows[b.backend_id]
+---     if not row then
+---       row = BarRow.new()
+---       rows[b.backend_id] = row
+---       order[#order + 1] = row
 ---     end
----     local g = groups[b.backend_id]
----     g[#g + 1] = self:render_buffer_tab(b)
+---     row:add(self:render_buffer_tab(b, row:first()), b.id)
 ---   end
----   local rows = {}
----   for _, id in ipairs(order) do
----     rows[#rows + 1] = groups[id]
----   end
----   return { rows = rows }
+---   return BarRow.bar(unpack(order))
 --- end
 --- ```
 --- Options accepted by `TircTheme.new`/`setup`.
@@ -818,12 +819,11 @@ end
 ---@param buffers TircBufferTab[]
 ---@return TircBufferBar
 function Theme:render_linear_bar(buffers)
-  local row, ids = {}, {}
+  local row = BarRow.new()
   for _, buffer in ipairs(buffers) do
-    row[#row + 1] = self:render_buffer_tab(buffer, #row == 0)
-    ids[#ids + 1] = buffer.id
+    row:add(self:render_buffer_tab(buffer, row:first()), buffer.id)
   end
-  return { rows = { row }, ids = { ids } }
+  return BarRow.bar(row)
 end
 
 --- One row, buffers grouped behind a clickable backend label:
@@ -833,20 +833,17 @@ end
 ---@return TircBufferBar
 function Theme:render_grouped_bar(buffers)
   local s = self.styles
-  local row, ids = {}, {}
+  local row = BarRow.new()
   for i, group in ipairs(self:backend_groups(buffers)) do
     if i > 1 then
-      row[#row + 1] = { '│ ', s.darkgray }
-      ids[#ids + 1] = ''
+      row:add { '│ ', s.darkgray }
     end
-    row[#row + 1] = { group.label .. ': ', s.bar_group_label }
-    ids[#ids + 1] = 'backend:' .. group.id
+    row:add({ group.label .. ': ', s.bar_group_label }, 'backend:' .. group.id)
     for _, buffer in ipairs(group.buffers) do
-      row[#row + 1] = self:render_buffer_tab(buffer)
-      ids[#ids + 1] = buffer.id
+      row:add(self:render_buffer_tab(buffer), buffer.id)
     end
   end
-  return { rows = { row }, ids = { ids } }
+  return BarRow.bar(row)
 end
 
 --- One row per backend, each led by a clickable backend label.
@@ -854,19 +851,16 @@ end
 ---@return TircBufferBar
 function Theme:render_per_backend_bar(buffers)
   local s = self.styles
-  local rows, ids = {}, {}
+  local rows = {}
   for _, group in ipairs(self:backend_groups(buffers)) do
-    local row, row_ids = {}, {}
-    row[#row + 1] = { group.label .. ': ', s.bar_group_label }
-    row_ids[#row_ids + 1] = 'backend:' .. group.id
+    local row = BarRow.new()
+    row:add({ group.label .. ': ', s.bar_group_label }, 'backend:' .. group.id)
     for _, buffer in ipairs(group.buffers) do
-      row[#row + 1] = self:render_buffer_tab(buffer)
-      row_ids[#row_ids + 1] = buffer.id
+      row:add(self:render_buffer_tab(buffer), buffer.id)
     end
     rows[#rows + 1] = row
-    ids[#ids + 1] = row_ids
   end
-  return { rows = rows, ids = ids }
+  return BarRow.bar(unpack(rows))
 end
 
 --- Two rows: backend tabs on top, the selected backend's buffers below. The
@@ -880,25 +874,24 @@ function Theme:render_tabbed_bar(buffers)
   local marker = self.tabbed_click == 'select' and 'backend-select:'
     or 'backend:'
 
-  local backend_row, backend_ids = {}, {}
-  local buffer_row, buffer_ids = {}, {}
+  local backend_row = BarRow.new()
+  local buffer_row = BarRow.new()
   for _, group in ipairs(groups) do
-    backend_row[#backend_row + 1] =
-      self:render_backend_tab(group, #backend_row == 0)
-    backend_ids[#backend_ids + 1] = marker .. group.id
+    backend_row:add(
+      self:render_backend_tab(group, backend_row:first()),
+      marker .. group.id
+    )
     if group.id == selected then
       for _, buffer in ipairs(group.buffers) do
-        buffer_row[#buffer_row + 1] =
-          self:render_buffer_tab(buffer, #buffer_row == 0)
-        buffer_ids[#buffer_ids + 1] = buffer.id
+        buffer_row:add(
+          self:render_buffer_tab(buffer, buffer_row:first()),
+          buffer.id
+        )
       end
     end
   end
 
-  return {
-    rows = { backend_row, buffer_row },
-    ids = { backend_ids, buffer_ids },
-  }
+  return BarRow.bar(backend_row, buffer_row)
 end
 
 return Theme
