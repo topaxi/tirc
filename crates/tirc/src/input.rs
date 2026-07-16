@@ -1935,7 +1935,9 @@ impl<'lua> InputHandler<'lua> {
         let target = event.target().cloned().unwrap_or_else(TargetId::status);
         let stored = StoredMessage::from_event(event.clone());
 
-        let Ok(table) = to_lua_event(self.lua, &stored, &info, &target, target.as_str()) else {
+        let nickname = state.nickname(backend);
+        let Ok(table) = to_lua_event(self.lua, &stored, &info, &target, target.as_str(), nickname)
+        else {
             return;
         };
 

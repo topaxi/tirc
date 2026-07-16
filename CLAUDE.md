@@ -114,6 +114,9 @@ builds a style on the Lua side (`tirc_lua::theme::create_tirc_theme_lua_module`)
 - `tui/theme.lua` - theme helper API.
 - `tui/themes/default.lua` - the bundled default theme; the canonical example of how
   formatter callbacks are written.
+- `plugins/notify.lua` - bundled desktop-notification plugin (`notify-send` on
+  highlights/DMs); the canonical example of an `tirc.on('event', ...)` plugin with
+  pure, Rust-test-covered decision logic.
 
 ## Conventions
 

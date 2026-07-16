@@ -190,6 +190,9 @@ fn get_default_config() -> &'static str {
 
         tirc.use(theme)
 
+        -- Desktop notifications on highlights/DMs (requires notify-send):
+        -- tirc.use(require('tirc.plugins.notify'))
+
         return config
     "}
 }
@@ -691,8 +694,15 @@ mod tests {
     }
 
     fn render_stored_message_text(lua: &Lua, message: StoredMessage) -> mlua::Value {
-        let table = to_lua_event(lua, &message, &backend(), &TargetId::from("#tirc"), "#tirc")
-            .expect("event table");
+        let table = to_lua_event(
+            lua,
+            &message,
+            &backend(),
+            &TargetId::from("#tirc"),
+            "#tirc",
+            "me",
+        )
+        .expect("event table");
 
         call_formatter(lua, "message_text", (table, "me".to_string()))
             .expect("message_text formatter registered")
@@ -1038,6 +1048,7 @@ mod tests {
             &backend(),
             &TargetId::from("#tirc"),
             "#tirc",
+            "me",
         )
         .expect("event table");
         let value = call_formatter(&lua, "render_reactions", (table, mlua::Value::Nil))
@@ -1083,6 +1094,7 @@ mod tests {
             &backend(),
             &TargetId::from("#tirc"),
             "#tirc",
+            "me",
         )
         .expect("event table");
         let emojis = lua
@@ -1149,6 +1161,7 @@ mod tests {
             &backend(),
             &TargetId::from("#tirc"),
             "#tirc",
+            "me",
         )
         .expect("event table");
         let emojis = lua
@@ -1180,5 +1193,256 @@ mod tests {
             vec!["🎉".to_string()],
             "already-reacted 👍 is skipped by the quick pills"
         );
+    }
+
+    /// Builds a plain channel/DM message event table with own nick "Rincewind".
+    fn notify_event(lua: &Lua, sender: &str, target: &str, body: &str) -> mlua::Table {
+        notify_stored_event(
+            lua,
+            stored(ChatEvent::Message {
+                target: TargetId::from(target),
+                id: None,
+                sender: UserRef::new(sender),
+                body: MessageBody::plain(body),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            }),
+            target,
+        )
+    }
+
+    fn notify_stored_event(lua: &Lua, message: StoredMessage, target: &str) -> mlua::Table {
+        to_lua_event(
+            lua,
+            &message,
+            &backend(),
+            &TargetId::from(target),
+            target,
+            "Rincewind",
+        )
+        .expect("event table")
+    }
+
+    /// Calls the notify plugin's pure `should_notify` with an injected context.
+    /// `opts` is a Lua table literal; pass fully-formed options (no normalize).
+    fn should_notify(
+        lua: &Lua,
+        event: &mlua::Table,
+        terminal_focused: bool,
+        focused_buffer: Option<&str>,
+        opts: &str,
+    ) -> bool {
+        let f: mlua::Function = lua
+            .load(format!(
+                indoc::indoc! {"
+                    local notify = require('tirc.plugins.notify')
+                    return function(event, terminal_focused, focused_buffer)
+                      return notify.should_notify(event, {{
+                        terminal_focused = terminal_focused,
+                        focused_buffer = focused_buffer,
+                        opts = {},
+                      }})
+                    end
+                "},
+                opts
+            ))
+            .eval()
+            .expect("should_notify wrapper");
+        f.call((event, terminal_focused, focused_buffer))
+            .expect("should_notify call")
+    }
+
+    const NOTIFY_DEFAULT_OPTS: &str = "{ dms = true, kinds = { text = true, action = true } }";
+
+    #[test]
+    fn notify_decision_matrix() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        // Word-boundary mention, case-insensitive.
+        let mention = notify_event(&lua, "alice", "#tirc", "hey rincewind, ping");
+        assert!(should_notify(
+            &lua,
+            &mention,
+            false,
+            None,
+            NOTIFY_DEFAULT_OPTS
+        ));
+
+        // Substring inside a longer word is not a mention.
+        let inside_word = notify_event(&lua, "alice", "#tirc", "rincewinds unite");
+        assert!(!should_notify(
+            &lua,
+            &inside_word,
+            false,
+            None,
+            NOTIFY_DEFAULT_OPTS
+        ));
+
+        // Channel chatter without a mention stays silent.
+        let chatter = notify_event(&lua, "alice", "#tirc", "hello world");
+        assert!(!should_notify(
+            &lua,
+            &chatter,
+            false,
+            None,
+            NOTIFY_DEFAULT_OPTS
+        ));
+
+        // Own messages (echoes) never notify, nick compared case-insensitively.
+        let own = notify_event(&lua, "rincewind", "#tirc", "rincewind: note to self");
+        assert!(!should_notify(&lua, &own, false, None, NOTIFY_DEFAULT_OPTS));
+
+        // Pending optimistic echoes and redacted messages stay silent.
+        for flag in ["pending", "redacted"] {
+            let event = notify_event(&lua, "alice", "#tirc", "hi rincewind");
+            event.set(flag, true).unwrap();
+            assert!(
+                !should_notify(&lua, &event, false, None, NOTIFY_DEFAULT_OPTS),
+                "{flag} message must not notify"
+            );
+        }
+
+        // Non-message events stay silent even in a DM-shaped buffer.
+        let membership = notify_stored_event(
+            &lua,
+            stored(ChatEvent::Membership {
+                target: TargetId::from("#tirc"),
+                who: UserRef::new("alice"),
+                change: MembershipChange::Join { realname: None },
+                time: None,
+            }),
+            "#tirc",
+        );
+        assert!(!should_notify(
+            &lua,
+            &membership,
+            false,
+            None,
+            NOTIFY_DEFAULT_OPTS
+        ));
+
+        // Notices are excluded by the default kinds, included when opted in.
+        let notice = notify_stored_event(
+            &lua,
+            stored(ChatEvent::Message {
+                target: TargetId::from("#tirc"),
+                id: None,
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain("rincewind: notice"),
+                kind: MsgKind::Notice,
+                echo_of: None,
+                time: None,
+            }),
+            "#tirc",
+        );
+        assert!(!should_notify(
+            &lua,
+            &notice,
+            false,
+            None,
+            NOTIFY_DEFAULT_OPTS
+        ));
+        assert!(should_notify(
+            &lua,
+            &notice,
+            false,
+            None,
+            "{ dms = true, kinds = { text = true, action = true, notice = true } }"
+        ));
+
+        // Direct messages (non-channel target) notify without a mention...
+        let dm = notify_event(&lua, "alice", "alice", "hi there");
+        assert!(should_notify(&lua, &dm, false, None, NOTIFY_DEFAULT_OPTS));
+        // ...unless DM notifications are disabled.
+        assert!(!should_notify(
+            &lua,
+            &dm,
+            false,
+            None,
+            "{ dms = false, kinds = { text = true, action = true } }"
+        ));
+
+        // Extra highlight patterns match case-insensitively.
+        let pattern_hit = notify_event(&lua, "alice", "#tirc", "the TIRC build failed");
+        assert!(should_notify(
+            &lua,
+            &pattern_hit,
+            false,
+            None,
+            "{ dms = true, kinds = { text = true }, patterns = { 'tirc' } }"
+        ));
+    }
+
+    #[test]
+    fn notify_suppressed_only_when_terminal_and_buffer_focused() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        // backend id 0 + target => "0:#tirc" (renderer's focused_buffer format).
+        let event = notify_event(&lua, "alice", "#tirc", "rincewind: hi");
+
+        assert!(!should_notify(
+            &lua,
+            &event,
+            true,
+            Some("0:#tirc"),
+            NOTIFY_DEFAULT_OPTS
+        ));
+        assert!(should_notify(
+            &lua,
+            &event,
+            true,
+            Some("0:#other"),
+            NOTIFY_DEFAULT_OPTS
+        ));
+        assert!(should_notify(
+            &lua,
+            &event,
+            false,
+            Some("0:#tirc"),
+            NOTIFY_DEFAULT_OPTS
+        ));
+    }
+
+    #[test]
+    fn notify_setup_wires_event_handler_with_injected_executor() {
+        use tirc_lua::runtime::{emit_event, EventName};
+
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        lua.load(indoc::indoc! {"
+            local tirc = require('tirc')
+            tirc.use(require('tirc.plugins.notify'), {
+              notify = function(summary, body, event)
+                captured = { summary = summary, body = body }
+              end,
+            })
+            require('_tirc').terminal_focused = false
+        "})
+            .exec()
+            .unwrap();
+
+        let event = notify_event(&lua, "alice", "#tirc", "hello Rincewind");
+        let sender_stub = lua.create_table().unwrap();
+        emit_event(&lua, EventName::Event, (event, sender_stub)).unwrap();
+
+        let captured: mlua::Table = lua.globals().get("captured").expect("executor called");
+        assert_eq!(captured.get::<String>("summary").unwrap(), "alice (#tirc)");
+        assert_eq!(captured.get::<String>("body").unwrap(), "hello Rincewind");
+    }
+
+    #[test]
+    fn notify_shell_quote_escapes_single_quotes() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        let quoted: String = lua
+            .load(r#"return require('tirc.plugins.notify').shell_quote([[it's a'b]])"#)
+            .eval()
+            .unwrap();
+        assert_eq!(quoted, r#"'it'\''s a'\''b'"#);
     }
 }

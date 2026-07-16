@@ -57,11 +57,12 @@
 --- `event` callback. `type` selects which fields are present.
 ---@class TircEvent
 ---@field type 'message' | 'edit' | 'redaction' | 'reaction' | 'membership' | 'topic' | 'rename' | 'quit' | 'server_info'
----@field backend { id: integer, protocol: 'irc' | 'matrix', name: string, metadata?: table<string, any> }
+---@field backend { id: integer, protocol: 'irc' | 'matrix', name: string, nickname: string, metadata?: table<string, any> } `nickname` is your own nick/user id on this backend, rename-aware
 ---@field target string buffer target (channel/room/nick)
 ---@field target_name string friendly buffer name (Matrix room name); equals `target` for IRC
 ---@field pending boolean optimistic local echo not yet confirmed
 ---@field redacted boolean
+---@field edited boolean
 ---@field sender? TircUserRef set for 'message'/'reaction'
 ---@field body? TircBody set for 'message'/'edit'
 ---@field kind? 'text' | 'action' | 'notice' message presentation
@@ -189,6 +190,7 @@
 ---@field buffer_bar_style? string runtime `:barstyle` override for the buffer-bar layout, or nil when the theme option applies
 ---@field mode 'normal' | 'command' | 'insert' | 'select' current editor mode
 ---@field multi_backend boolean whether more than one backend is connected
+---@field terminal_focused boolean whether the terminal window has focus (true when the terminal does not report focus events)
 ---@field buffers TircBufferTab[] all open buffers
 ---@field is_focused_buffer fun(buffer: TircBufferTab): boolean
 ---@field focus_buffer fun(id: string) queue focusing a buffer by its opaque id (applied after the current callback)

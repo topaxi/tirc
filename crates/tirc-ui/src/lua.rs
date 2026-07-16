@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use super::{Member, StoredMessage};
 use tirc_core::backend::BackendInfo;
 use tirc_core::{
     Attachment, ChatEvent, Command, MemberRole, MembershipChange, MessageBody, MsgKind, Protocol,
     TargetId, TxnAllocator, UserRef,
 };
-use super::{Member, StoredMessage};
 
 fn protocol_str(protocol: Protocol) -> &'static str {
     match protocol {
@@ -81,6 +81,7 @@ pub fn to_lua_event(
     backend: &BackendInfo,
     target: &TargetId,
     target_name: &str,
+    nickname: &str,
 ) -> mlua::Result<mlua::Table> {
     let table = lua.create_table()?;
 
@@ -88,6 +89,8 @@ pub fn to_lua_event(
     backend_table.set("id", backend.id.0)?;
     backend_table.set("protocol", protocol_str(backend.protocol))?;
     backend_table.set("name", backend.name.as_str())?;
+    // The local user's own nick/user id on this backend, rename-aware.
+    backend_table.set("nickname", nickname)?;
     if let Some(metadata) = tirc_lua::runtime::get_backend_metadata(lua, backend.id) {
         backend_table.set("metadata", metadata)?;
     }
@@ -327,6 +330,7 @@ mod tests {
             &backend(),
             &TargetId::from("#tirc"),
             "#tirc",
+            "Rincewind",
         )
         .unwrap();
         assert_eq!(table.get::<String>("type").unwrap(), "message");
@@ -367,6 +371,7 @@ mod tests {
             &backend(),
             &TargetId::from("#tirc"),
             "#tirc",
+            "Rincewind",
         )
         .unwrap();
         let backend_table: mlua::Table = table.get("backend").unwrap();
@@ -386,8 +391,15 @@ mod tests {
             time: None,
         });
 
-        let table =
-            to_lua_event(&lua, &message, &backend(), &TargetId::status(), "(status)").unwrap();
+        let table = to_lua_event(
+            &lua,
+            &message,
+            &backend(),
+            &TargetId::status(),
+            "(status)",
+            "Rincewind",
+        )
+        .unwrap();
         assert_eq!(table.get::<String>("type").unwrap(), "server_info");
         assert_eq!(table.get::<String>("code").unwrap(), "RPL_WELCOME");
     }
@@ -407,11 +419,11 @@ mod tests {
             &backend(),
             &TargetId::from("!room:m"),
             "room",
+            "Rincewind",
         )
         .unwrap();
         assert_eq!(table.get::<String>("type").unwrap(), "edit");
         let body: mlua::Table = table.get("body").unwrap();
         assert_eq!(body.get::<String>("text").unwrap(), "edited");
     }
-
 }

@@ -60,6 +60,7 @@ const TIRC_CLASS_LUA: &str = include_str!("../lua/tirc/class.lua");
 const TIRC_THEME_LUA: &str = include_str!("../lua/tirc/tui/theme.lua");
 const TIRC_DEFAULT_THEME_LUA: &str = include_str!("../lua/tirc/tui/themes/default.lua");
 const TIRC_SLANTED_THEME_LUA: &str = include_str!("../lua/tirc/tui/themes/slanted.lua");
+const TIRC_NOTIFY_PLUGIN_LUA: &str = include_str!("../lua/tirc/plugins/notify.lua");
 
 /// Bundled Lua sources written to the config `types/` directory so an editor's
 /// Lua language server can resolve `require('tirc.*')` and the `---@class` types
@@ -73,6 +74,7 @@ pub const TYPE_DEFINITIONS: &[(&str, &str)] = &[
     ("tirc/tui/theme.lua", TIRC_THEME_LUA),
     ("tirc/tui/themes/default.lua", TIRC_DEFAULT_THEME_LUA),
     ("tirc/tui/themes/slanted.lua", TIRC_SLANTED_THEME_LUA),
+    ("tirc/plugins/notify.lua", TIRC_NOTIFY_PLUGIN_LUA),
 ];
 
 /// In debug (non-test) builds, reads a builtin Lua file from the source tree so
@@ -111,6 +113,7 @@ const BUILTIN_LUA_FILES: &[&str] = &[
     "lua/tirc/tui/theme.lua",
     "lua/tirc/tui/themes/default.lua",
     "lua/tirc/tui/themes/slanted.lua",
+    "lua/tirc/plugins/notify.lua",
 ];
 
 /// Returns the absolute paths to all builtin Lua source files in the repo.
@@ -137,6 +140,8 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
     let tirc_mod = get_or_create_module(lua, "_tirc")?;
 
     tirc_mod.set("version", get_version_lua_value(lua))?;
+    // Refreshed from the renderer each frame; true until the first focus event.
+    tirc_mod.set("terminal_focused", true)?;
     tirc_mod.set("on", lua.create_function(register_event)?)?;
     tirc_mod.set(
         "register_completion_source",
@@ -173,6 +178,10 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
     let (name, src) = load_builtin("lua/tirc/tui/themes/slanted.lua", TIRC_SLANTED_THEME_LUA);
     let slanted_theme_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
     set_loaded_modules(lua, "tirc.tui.themes.slanted", slanted_theme_module)?;
+
+    let (name, src) = load_builtin("lua/tirc/plugins/notify.lua", TIRC_NOTIFY_PLUGIN_LUA);
+    let notify_plugin_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
+    set_loaded_modules(lua, "tirc.plugins.notify", notify_plugin_module)?;
 
     Ok(())
 }

@@ -16,8 +16,8 @@ use tui_input::Input;
 use tracing::Level;
 
 use tirc_core::backend::BackendInfo;
-use tirc_core::{AttachmentKind, BackendId, BufferId, ChatEvent, EventId, TargetId};
 use tirc_core::logging::LogLine;
+use tirc_core::{AttachmentKind, BackendId, BufferId, ChatEvent, EventId, TargetId};
 use tirc_lua::date_time::date_time_to_table;
 use tirc_ui::{
     BarHit, ChatBuffer, ConnectionStatus, LayoutMap, Member, Mode, ReactionHit, State,
@@ -26,10 +26,10 @@ use tirc_ui::{
 
 use tirc_lua::theme::is_style_table;
 
-use tirc_ui::lua::{to_lua_event, to_lua_user};
 use super::preview::{extract_urls, LinkPreview, PreviewRequest, PreviewResult};
 use super::tmux::{wrap_passthrough, wrap_passthrough_positioned, PaneOrigin};
 use super::wrap::wrap_line;
+use tirc_ui::lua::{to_lua_event, to_lua_user};
 
 /// How the buffer bar scrolls to keep the focused tab visible.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -873,6 +873,7 @@ impl Renderer {
                     backend,
                     &buffer_id.target,
                     target_name,
+                    nickname,
                     message,
                     hovered_key,
                     selected,
@@ -1334,11 +1335,12 @@ impl Renderer {
         backend: &BackendInfo,
         target: &TargetId,
         target_name: &str,
+        nickname: &str,
         message: &StoredMessage,
         hovered_key: Option<&str>,
         selected: bool,
     ) -> Option<RenderedMessage<'_>> {
-        let event = to_lua_event(lua, message, backend, target, target_name).ok()?;
+        let event = to_lua_event(lua, message, backend, target, target_name, nickname).ok()?;
 
         let mut time_spans = date_time_to_table(lua, &message.time)
             .ok()
@@ -1353,7 +1355,7 @@ impl Renderer {
         }
 
         let message_spans = self
-            .format_spans(lua, "message_text", (&event, backend.name.clone()))
+            .format_spans(lua, "message_text", (&event, nickname))
             .unwrap_or_default();
 
         if message_spans.is_empty() {
@@ -1395,11 +1397,14 @@ impl Renderer {
         event: &mlua::Table,
         hovered_key: Option<&str>,
     ) -> Vec<ReactionPill<'_>> {
-        let value =
-            match tirc_lua::runtime::call_formatter(lua, "render_reactions", (event, hovered_key)) {
-                Some(Ok(value)) => value,
-                _ => return vec![],
-            };
+        let value = match tirc_lua::runtime::call_formatter(
+            lua,
+            "render_reactions",
+            (event, hovered_key),
+        ) {
+            Some(Ok(value)) => value,
+            _ => return vec![],
+        };
 
         self.pills_from_lua_value(lua, value)
     }
@@ -1618,6 +1623,7 @@ impl Renderer {
             },
         )?;
         tirc_mod.set("multi_backend", state.backends.len() > 1)?;
+        tirc_mod.set("terminal_focused", self.focused)?;
         tirc_mod.set("buffers", self.buffer_tabs(state, lua)?)?;
 
         match &view.focused {
@@ -2470,9 +2476,7 @@ mod tests {
     #[test]
     fn build_bar_tabs_produces_contiguous_hit_boxes() -> anyhow::Result<(), anyhow::Error> {
         use tirc_core::backend::BackendInfo;
-        use tirc_core::{
-            BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef,
-        };
+        use tirc_core::{BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef};
         use tirc_ui::{State, ViewState};
 
         let lua = mlua::Lua::new();
@@ -2543,9 +2547,7 @@ mod tests {
     #[test]
     fn buffer_tab_table_uses_alias_and_keeps_raw_target() -> anyhow::Result<(), anyhow::Error> {
         use tirc_core::backend::BackendInfo;
-        use tirc_core::{
-            BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef,
-        };
+        use tirc_core::{BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef};
         use tirc_ui::State;
 
         let lua = mlua::Lua::new();
@@ -2786,12 +2788,12 @@ mod tests {
     /// rows above the newer one (each message here is body + reaction = 2 rows).
     #[test]
     fn reaction_hit_boxes_track_bottom_to_top_layout() -> anyhow::Result<(), anyhow::Error> {
+        use ratatui::{backend::TestBackend, Terminal};
         use tirc_core::backend::BackendInfo;
         use tirc_core::{
             BackendId, ChatEvent, EventId, MessageBody, MsgKind, Protocol, TargetId, UserRef,
         };
         use tirc_ui::{State, ViewState};
-        use ratatui::{backend::TestBackend, Terminal};
 
         let lua = mlua::Lua::new();
         tirc_lua::builtins::register_builtin_modules(&lua)?;
@@ -2880,12 +2882,12 @@ mod tests {
     /// on the message's own line.
     #[test]
     fn link_preview_renders_below_message() -> anyhow::Result<(), anyhow::Error> {
+        use ratatui::{backend::TestBackend, Terminal};
         use tirc_core::backend::BackendInfo;
         use tirc_core::{
             BackendId, ChatEvent, EventId, MessageBody, MsgKind, Protocol, TargetId, UserRef,
         };
         use tirc_ui::{State, ViewState};
-        use ratatui::{backend::TestBackend, Terminal};
 
         let lua = mlua::Lua::new();
         tirc_lua::builtins::register_builtin_modules(&lua)?;
@@ -2982,12 +2984,12 @@ mod tests {
     /// one close per row, so the wrapped link stays clickable end to end.
     #[test]
     fn wrapped_url_gets_osc8_hyperlinks_on_every_row() -> anyhow::Result<(), anyhow::Error> {
+        use ratatui::{backend::TestBackend, Terminal};
         use tirc_core::backend::BackendInfo;
         use tirc_core::{
             BackendId, ChatEvent, EventId, MessageBody, MsgKind, Protocol, TargetId, UserRef,
         };
         use tirc_ui::{State, ViewState};
-        use ratatui::{backend::TestBackend, Terminal};
 
         let lua = mlua::Lua::new();
         tirc_lua::builtins::register_builtin_modules(&lua)?;
@@ -3073,12 +3075,12 @@ mod tests {
     /// than `List` dropping the whole over-tall item and hiding the message).
     #[test]
     fn link_preview_dropped_when_it_would_not_fit() -> anyhow::Result<(), anyhow::Error> {
+        use ratatui::{backend::TestBackend, Terminal};
         use tirc_core::backend::BackendInfo;
         use tirc_core::{
             BackendId, ChatEvent, EventId, MessageBody, MsgKind, Protocol, TargetId, UserRef,
         };
         use tirc_ui::{State, ViewState};
-        use ratatui::{backend::TestBackend, Terminal};
 
         let lua = mlua::Lua::new();
         tirc_lua::builtins::register_builtin_modules(&lua)?;
@@ -3239,9 +3241,7 @@ mod tests {
         // Tab 1 [10..20): rel_start=0, rel_end=min(10,15)=10 → box (x=0, w=10).
         // Tab 2 [20..30): rel_start=10, rel_end=min(20,15)=15 → box (x=10, w=5).
         use tirc_core::backend::BackendInfo;
-        use tirc_core::{
-            BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef,
-        };
+        use tirc_core::{BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef};
         use tirc_ui::{State, ViewState};
 
         let lua = mlua::Lua::new();
@@ -3476,9 +3476,7 @@ mod tests {
     /// fixture for the bar-layout tests.
     fn two_backend_state() -> tirc_ui::State {
         use tirc_core::backend::BackendInfo;
-        use tirc_core::{
-            BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef,
-        };
+        use tirc_core::{BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef};
         use tirc_ui::State;
 
         let mut state = State::new();
@@ -3669,13 +3667,11 @@ mod tests {
     /// dated. Two messages on consecutive days must yield separators for both.
     #[test]
     fn oldest_message_has_date_separator_at_top() -> anyhow::Result<(), anyhow::Error> {
-        use tirc_core::backend::BackendInfo;
-        use tirc_core::{
-            BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef,
-        };
-        use tirc_ui::{State, ViewState};
         use chrono::TimeZone;
         use ratatui::{backend::TestBackend, Terminal};
+        use tirc_core::backend::BackendInfo;
+        use tirc_core::{BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef};
+        use tirc_ui::{State, ViewState};
 
         let lua = mlua::Lua::new();
         tirc_lua::builtins::register_builtin_modules(&lua)?;
@@ -3749,13 +3745,11 @@ mod tests {
     /// several rows) instead of overflowing off the right edge on a single row.
     #[test]
     fn link_preview_text_wraps() -> anyhow::Result<(), anyhow::Error> {
-        use tirc_core::backend::BackendInfo;
-        use tirc_core::{
-            BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef,
-        };
         use crate::preview::{LinkPreview, PreviewResult};
-        use tirc_ui::{State, ViewState};
         use ratatui::{backend::TestBackend, Terminal};
+        use tirc_core::backend::BackendInfo;
+        use tirc_core::{BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef};
+        use tirc_ui::{State, ViewState};
 
         let lua = mlua::Lua::new();
         tirc_lua::builtins::register_builtin_modules(&lua)?;
@@ -3855,13 +3849,13 @@ mod tests {
     #[test]
     fn image_attachment_without_graphics_renders_fallback_line() -> anyhow::Result<(), anyhow::Error>
     {
+        use ratatui::{backend::TestBackend, Terminal};
         use tirc_core::backend::BackendInfo;
         use tirc_core::{
             Attachment, AttachmentKind, BackendId, ChatEvent, EventId, MessageBody, MsgKind,
             Protocol, TargetId, UserRef,
         };
         use tirc_ui::{State, ViewState};
-        use ratatui::{backend::TestBackend, Terminal};
 
         let lua = mlua::Lua::new();
         tirc_lua::builtins::register_builtin_modules(&lua)?;
@@ -3925,10 +3919,10 @@ mod tests {
     /// send would silently fail.
     #[test]
     fn read_only_room_hints_in_insert_mode() -> anyhow::Result<(), anyhow::Error> {
+        use ratatui::{backend::TestBackend, Terminal};
         use tirc_core::backend::BackendInfo;
         use tirc_core::{BackendId, ChatEvent, Protocol, TargetId};
         use tirc_ui::{Mode, State, ViewState};
-        use ratatui::{backend::TestBackend, Terminal};
 
         let lua = mlua::Lua::new();
         tirc_lua::builtins::register_builtin_modules(&lua)?;
@@ -4002,14 +3996,14 @@ mod tests {
     /// `insert_decoded`, a second render draws it inline and the fallback is gone.
     #[test]
     fn image_decode_is_requested_then_rendered_inline() -> anyhow::Result<(), anyhow::Error> {
+        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui_image::{picker::Picker, Resize};
         use tirc_core::backend::BackendInfo;
         use tirc_core::{
             Attachment, AttachmentKind, BackendId, ChatEvent, EventId, MessageBody, MsgKind,
             Protocol, TargetId, UserRef,
         };
         use tirc_ui::{State, ViewState};
-        use ratatui::{backend::TestBackend, Terminal};
-        use ratatui_image::{picker::Picker, Resize};
 
         let lua = mlua::Lua::new();
         tirc_lua::builtins::register_builtin_modules(&lua)?;
@@ -4115,13 +4109,13 @@ mod tests {
     /// at the last text row.
     #[test]
     fn link_preview_gutter_continues_beside_thumbnail() -> anyhow::Result<(), anyhow::Error> {
+        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui_image::{picker::Picker, Resize};
         use tirc_core::backend::BackendInfo;
         use tirc_core::{
             BackendId, ChatEvent, EventId, MessageBody, MsgKind, Protocol, TargetId, UserRef,
         };
         use tirc_ui::{State, ViewState};
-        use ratatui::{backend::TestBackend, Terminal};
-        use ratatui_image::{picker::Picker, Resize};
 
         let lua = mlua::Lua::new();
         tirc_lua::builtins::register_builtin_modules(&lua)?;
