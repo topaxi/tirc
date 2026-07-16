@@ -5463,6 +5463,7 @@ dependencies = [
  "serde_json",
  "textwrap",
  "tirc-core",
+ "tirc-lua",
  "tokio",
  "tokio-tungstenite",
  "tracing",
@@ -5488,6 +5489,19 @@ dependencies = [
  "tracing",
  "tracing-log",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "tirc-lua"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "log",
+ "mlua",
+ "ratatui",
+ "semver",
+ "tirc-core",
 ]
 
 [[package]]

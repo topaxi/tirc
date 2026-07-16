@@ -7,7 +7,7 @@
 use anyhow::anyhow;
 use mlua::{IntoLuaMulti, Lua, Table, Value};
 
-use crate::core::BackendId;
+use tirc_core::BackendId;
 
 /// The closed set of side-effect events themes/plugins can subscribe to via
 /// `tirc.on(name, fn)`. Keeping this an enum (rather than formatting a registry
@@ -15,7 +15,7 @@ use crate::core::BackendId;
 /// valid event names and avoids a per-emit allocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventName {
-    /// A normalized [`ChatEvent`](crate::core::ChatEvent) arrived from a backend.
+    /// A normalized [`ChatEvent`](tirc_core::ChatEvent) arrived from a backend.
     Event,
 }
 

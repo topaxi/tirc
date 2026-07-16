@@ -1,0 +1,13 @@
+[package]
+name = "tirc-lua"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tirc-core = { path = "../tirc-core" }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+log = { workspace = true }
+mlua = { workspace = true }
+ratatui = { workspace = true }
+semver = { workspace = true }

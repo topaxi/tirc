@@ -51,13 +51,13 @@ fn get_version_lua_value(lua: &Lua) -> mlua::Table {
     table
 }
 
-const TIRC_INIT_LUA: &str = include_str!("../../lua/tirc/init.lua");
-const TIRC_CONFIG_LUA: &str = include_str!("../../lua/tirc/config.lua");
-const TIRC_UTILS_LUA: &str = include_str!("../../lua/tirc/utils.lua");
-const TIRC_CLASS_LUA: &str = include_str!("../../lua/tirc/class.lua");
-const TIRC_THEME_LUA: &str = include_str!("../../lua/tirc/tui/theme.lua");
-const TIRC_DEFAULT_THEME_LUA: &str = include_str!("../../lua/tirc/tui/themes/default.lua");
-const TIRC_SLANTED_THEME_LUA: &str = include_str!("../../lua/tirc/tui/themes/slanted.lua");
+const TIRC_INIT_LUA: &str = include_str!("../lua/tirc/init.lua");
+const TIRC_CONFIG_LUA: &str = include_str!("../lua/tirc/config.lua");
+const TIRC_UTILS_LUA: &str = include_str!("../lua/tirc/utils.lua");
+const TIRC_CLASS_LUA: &str = include_str!("../lua/tirc/class.lua");
+const TIRC_THEME_LUA: &str = include_str!("../lua/tirc/tui/theme.lua");
+const TIRC_DEFAULT_THEME_LUA: &str = include_str!("../lua/tirc/tui/themes/default.lua");
+const TIRC_SLANTED_THEME_LUA: &str = include_str!("../lua/tirc/tui/themes/slanted.lua");
 
 /// Bundled Lua sources written to the config `types/` directory so an editor's
 /// Lua language server can resolve `require('tirc.*')` and the `---@class` types
@@ -98,6 +98,19 @@ fn load_builtin(
     )
 }
 
+/// The builtin Lua source files, relative to this crate's manifest directory.
+/// Must list exactly the files embedded above; the `builtin_lua_files_exist`
+/// test keeps the on-disk copies (used for debug hot-reload) in sync.
+const BUILTIN_LUA_FILES: &[&str] = &[
+    "lua/tirc/init.lua",
+    "lua/tirc/config.lua",
+    "lua/tirc/utils.lua",
+    "lua/tirc/class.lua",
+    "lua/tirc/tui/theme.lua",
+    "lua/tirc/tui/themes/default.lua",
+    "lua/tirc/tui/themes/slanted.lua",
+];
+
 /// Returns the absolute paths to all builtin Lua source files in the repo.
 ///
 /// Only available in debug (non-test) builds where `CARGO_MANIFEST_DIR` points
@@ -106,19 +119,11 @@ fn load_builtin(
 #[cfg(all(debug_assertions, not(test)))]
 pub fn builtin_lua_paths() -> Vec<std::path::PathBuf> {
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    [
-        "lua/tirc/init.lua",
-        "lua/tirc/config.lua",
-        "lua/tirc/utils.lua",
-        "lua/tirc/class.lua",
-        "lua/tirc/tui/theme.lua",
-        "lua/tirc/tui/themes/default.lua",
-        "lua/tirc/tui/themes/slanted.lua",
-    ]
-    .iter()
-    .map(|p| base.join(p))
-    .filter(|p| p.exists())
-    .collect()
+    BUILTIN_LUA_FILES
+        .iter()
+        .map(|p| base.join(p))
+        .filter(|p| p.exists())
+        .collect()
 }
 
 /// Registers the `_tirc` runtime module and all builtin `tirc.*` Lua modules.
@@ -167,4 +172,24 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
     set_loaded_modules(lua, "tirc.tui.themes.slanted", slanted_theme_module)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BUILTIN_LUA_FILES;
+
+    /// The debug hot-reload path (`load_builtin`/`builtin_lua_paths`) resolves
+    /// these files against `CARGO_MANIFEST_DIR` at runtime, which the compiler
+    /// does not check. Fail here if a file moves so hot-reload cannot silently
+    /// fall back to the embedded copies.
+    #[test]
+    fn builtin_lua_files_exist() {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for relative in BUILTIN_LUA_FILES {
+            assert!(
+                base.join(relative).is_file(),
+                "builtin Lua file missing on disk: {relative}"
+            );
+        }
+    }
 }
