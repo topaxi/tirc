@@ -8,60 +8,26 @@ use crossterm::event::{
 };
 use mlua::Lua;
 
-use crate::core::backend::BackendHandle;
-use crate::config::{
+use tirc::core::backend::BackendHandle;
+use tirc::config::{
     aliases::AliasStore, buffer_order::BufferOrderStore, collect_user_watched_paths,
     reload_lua_theme, ui_prefs::UiPrefsStore, QuickReactions, SelectionMode,
 };
-use crate::lua::runtime::{emit_event, EventName};
-use crate::core::{
+use tirc::lua::runtime::{emit_event, EventName};
+use tirc::core::{
     BackendEvent, BackendId, BackendMessage, BufferId, ChatEvent, Command, EventId, MsgKind,
     TargetId, TxnAllocator, VerifyAction,
 };
-use crate::ui::lua::{create_lua_sender, to_lua_event};
-use crate::tui::{parse_bar_id, DecodedImage, PreviewResult, Tui};
-use crate::ui::ConnectionStatus;
+use tirc::ui::lua::{create_lua_sender, to_lua_event};
+use tirc::tui::{parse_bar_id, DecodedImage, PreviewResult, Tui};
+use tirc::ui::ConnectionStatus;
 
-use super::completion::{self, CompletionEngine, CompletionQuery};
-use super::state::{HistoryState, StoredMessage};
-use super::{BarHit, MenuAction, MenuItem, MenuTarget, Mode, Selection, State, ViewState};
+use tirc::ui::completion::{self, CompletionEngine, CompletionQuery};
+use tirc::ui::{HistoryState, StoredMessage};
+use tirc::ui::{BarHit, MenuAction, MenuItem, MenuTarget, Mode, Selection, State, ViewState};
 
 /// Page size of a scroll-triggered history fetch.
 const HISTORY_FETCH_LIMIT: u16 = 50;
-
-/// Every command name `handle_command` accepts, paired with whether it takes
-/// arguments (drives the trailing space on completion accept). Keep in sync
-/// with the match arms in `InputHandler::handle_command`.
-pub(crate) const COMMAND_NAMES: &[(&str, bool)] = &[
-    ("q", false),
-    ("quit", false),
-    ("m", true),
-    ("msg", true),
-    ("me", true),
-    ("desc", true),
-    ("describe", true),
-    ("notice", true),
-    ("j", true),
-    ("join", true),
-    ("p", true),
-    ("part", true),
-    ("n", true),
-    ("nick", true),
-    ("whois", true),
-    ("topic", true),
-    ("away", true),
-    ("kick", true),
-    ("invite", true),
-    ("alias", true),
-    ("unalias", false),
-    ("bufmove", true),
-    ("barstyle", true),
-    ("list", false),
-    ("verify", true),
-    ("redraw", false),
-    ("debug", false),
-    ("reload", false),
-];
 
 /// Events the main loop feeds to the input handler.
 #[derive(Debug)]
@@ -228,7 +194,7 @@ impl<'lua> InputHandler<'lua> {
         let mut paths = collect_user_watched_paths(lua, config_dir, config_path, extra_watch_files);
 
         #[cfg(all(debug_assertions, not(test)))]
-        paths.extend(crate::lua::builtins::builtin_lua_paths());
+        paths.extend(tirc::lua::builtins::builtin_lua_paths());
 
         paths
             .into_iter()
@@ -358,7 +324,7 @@ impl<'lua> InputHandler<'lua> {
     /// The bar styles the active theme declares via its `buffer_bar_styles`
     /// field, or `None` when the theme declares none.
     fn theme_bar_styles(&self) -> Option<Vec<String>> {
-        crate::lua::runtime::ui_string_list(self.lua, "buffer_bar_styles")
+        tirc::lua::runtime::ui_string_list(self.lua, "buffer_bar_styles")
             .filter(|styles| !styles.is_empty())
     }
 
@@ -844,7 +810,7 @@ impl<'lua> InputHandler<'lua> {
 
     /// Copies the current selection's text to the system clipboard and clears the
     /// selection. Reads the text from the last rendered frame (see
-    /// [`Tui::selection_text`](crate::tui::Tui::selection_text)). Clipboard
+    /// [`Tui::selection_text`](tirc::tui::Tui::selection_text)). Clipboard
     /// failures (e.g. a headless box with no display) are logged and surfaced as
     /// a one-line status notice rather than crashing.
     fn yank_selection(&mut self, state: &mut State, view: &mut ViewState) {
@@ -955,7 +921,7 @@ impl<'lua> InputHandler<'lua> {
                     // Theme-defined element: hand the id back to the theme's
                     // handler, then apply any UI actions it queued.
                     if let Some(Err(err)) =
-                        crate::lua::runtime::call_formatter(self.lua, "on_bar_click", id)
+                        tirc::lua::runtime::call_formatter(self.lua, "on_bar_click", id)
                     {
                         log::warn!("on_bar_click failed: {err}");
                     }
@@ -1206,7 +1172,7 @@ impl<'lua> InputHandler<'lua> {
 
     /// Returns `false` when the command requests application exit (`:q`).
     ///
-    /// Keep the command set in sync with [`COMMAND_NAMES`] above, which feeds
+    /// Keep the command set in sync with [`tirc::ui::completion::COMMAND_NAMES`], which feeds
     /// command-mode completion.
     fn handle_command(
         &mut self,
@@ -1440,7 +1406,7 @@ impl<'lua> InputHandler<'lua> {
         target: &str,
     ) -> TargetId {
         let target = TargetId::from(target);
-        let buffer = crate::core::BufferId::new(backend, target.clone());
+        let buffer = tirc::core::BufferId::new(backend, target.clone());
         if let Some(b) = state.focused_buffer_mut(view) {
             b.advance_read_marker();
         }
@@ -1967,7 +1933,7 @@ fn parse_verify(arg: &str) -> VerifyAction {
 /// neighbour is chosen from the removed buffer's former index clamped into the
 /// new (shorter) list, which lands on the next buffer to the right, or the new
 /// last buffer when the closed one was rightmost.
-fn close_buffer(state: &mut State, view: &mut ViewState, id: &crate::core::BufferId) {
+fn close_buffer(state: &mut State, view: &mut ViewState, id: &tirc::core::BufferId) {
     if id.target.is_status() {
         return;
     }
@@ -2025,8 +1991,8 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::backend::BackendInfo;
-    use crate::core::{BufferId, MessageBody, MsgKind, Protocol, TargetId, UserRef};
+    use tirc::core::backend::BackendInfo;
+    use tirc::core::{BufferId, MessageBody, MsgKind, Protocol, TargetId, UserRef};
 
     fn state_with_buffers(channels: &[&str]) -> (State, BackendId) {
         let backend = BackendId(0);

@@ -18,6 +18,41 @@ use ratatui::layout::Rect;
 use super::state::Mode;
 use crate::lua::runtime::completion_sources_registry;
 
+/// Every command name the input handler's `handle_command` accepts, paired
+/// with whether it takes arguments (drives the trailing space on completion
+/// accept). Keep in sync with the match arms in `InputHandler::handle_command`
+/// (`src/input.rs` in the binary).
+pub const COMMAND_NAMES: &[(&str, bool)] = &[
+    ("q", false),
+    ("quit", false),
+    ("m", true),
+    ("msg", true),
+    ("me", true),
+    ("desc", true),
+    ("describe", true),
+    ("notice", true),
+    ("j", true),
+    ("join", true),
+    ("p", true),
+    ("part", true),
+    ("n", true),
+    ("nick", true),
+    ("whois", true),
+    ("topic", true),
+    ("away", true),
+    ("kick", true),
+    ("invite", true),
+    ("alias", true),
+    ("unalias", false),
+    ("bufmove", true),
+    ("barstyle", true),
+    ("list", false),
+    ("verify", true),
+    ("redraw", false),
+    ("debug", false),
+    ("reload", false),
+];
+
 /// Upper bound on the items a single query returns; the popup scrolls within
 /// its ~8 visible rows, so anything beyond this is noise.
 pub const MAX_ITEMS: usize = 50;
@@ -247,7 +282,7 @@ fn decode_lua_items(list: &mlua::Table) -> mlua::Result<Vec<CompletionItem>> {
 }
 
 /// Completes command names at the start of the Command-mode input, from
-/// [`COMMAND_NAMES`](super::input::COMMAND_NAMES).
+/// [`COMMAND_NAMES`].
 struct CommandNameSource;
 
 impl CompletionSource for CommandNameSource {
@@ -260,7 +295,7 @@ impl CompletionSource for CommandNameSource {
     }
 
     fn complete(&self, query: &str, matcher: &mut Matcher) -> Vec<CompletionItem> {
-        let candidates = super::input::COMMAND_NAMES.iter().map(|&(name, args)| {
+        let candidates = COMMAND_NAMES.iter().map(|&(name, args)| {
             let insert = if args {
                 format!("{name} ")
             } else {
@@ -676,7 +711,7 @@ mod tests {
 
     #[test]
     fn test_command_names_unique_and_nonempty() {
-        let names: Vec<&str> = super::super::input::COMMAND_NAMES
+        let names: Vec<&str> = super::COMMAND_NAMES
             .iter()
             .map(|&(name, _)| name)
             .collect();

@@ -17,7 +17,11 @@ use tirc::config::{load_config, ServerConfig, TircConfig};
 use tirc::core::{BackendId, BackendMessage, BufferId, Protocol, TxnAllocator};
 use tirc::tui::preview::{build_client, link_preview_worker};
 use tirc::tui::{DecodeRequest, DecodedImage, EncodedImage, PreviewRequest, PreviewResult, Tui};
-use tirc::ui::{Event, InputHandler, State, ViewState};
+use tirc::ui::{State, ViewState};
+
+use crate::input::{Event, InputHandler};
+
+mod input;
 
 use ratatui::layout::Size;
 use ratatui_image::{
