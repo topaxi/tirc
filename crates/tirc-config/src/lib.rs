@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
+#[cfg(test)]
 use indoc::indoc;
 use mlua::{Lua, LuaSerdeExt, Table, Value};
 use serde::Deserialize;
@@ -168,39 +169,7 @@ pub struct TircConfig {
 }
 
 fn get_default_config() -> &'static str {
-    indoc! {"
-        local tirc = require('tirc')
-        local theme = require('tirc.tui.themes.default')
-
-        local config = tirc.create_config()
-
-        config.servers = {
-          {
-            protocol = 'irc',
-            host = 'irc.topaxi.ch',
-            nickname = { 'Rincewind', 'Twoflower' },
-            port = 6697,
-            use_tls = true,
-            autojoin = { '#tirc' },
-            -- Free-form metadata passed back to Lua for rendering. The default
-            -- theme uses `label` to shorten the buffer bar in multi-server mode.
-            metadata = { label = 'topaxi' },
-          },
-        }
-
-        tirc.use(theme)
-
-        -- Desktop notifications on highlights/DMs (requires notify-send):
-        -- tirc.use(require('tirc.plugins.notify'))
-
-        -- Auto-reply to DMs while :away (adds a :back command):
-        -- tirc.use(require('tirc.plugins.away'))
-
-        -- Deterministic per-nick colors for easier scanning:
-        -- tirc.use(require('tirc.plugins.nick_colors'))
-
-        return config
-    "}
+    include_str!("../default_init.lua")
 }
 
 /// `.luarc.json` pointing the Lua language server at the exported definitions.
@@ -216,13 +185,12 @@ const LUARC_JSON: &str = r#"{
 }
 "#;
 
-/// Exports the bundled Lua type definitions into `<config>/types/` and writes a
-/// `.luarc.json` so an editor's Lua language server can type-check `init.lua`.
+/// Exports the bundled Lua type definitions into `<config>/types/` so an editor's
+/// Lua language server can type-check `init.lua`.
 ///
 /// Each file is rewritten only when its content differs from the bundled copy, so
 /// the definitions track the running binary without needless writes (which would
-/// make the language server re-analyze). The `.luarc.json` is written once and
-/// never clobbered, so a user's own language-server settings are preserved.
+/// make the language server re-analyze).
 fn write_type_definitions(config_dir: &Path) -> anyhow::Result<()> {
     let types_dir = config_dir.join("types");
 
@@ -237,6 +205,13 @@ fn write_type_definitions(config_dir: &Path) -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Writes a `.luarc.json` pointing the Lua language server at the exported type
+/// definitions, but only when one does not already exist, so a user's own
+/// language-server settings are never clobbered.
+fn write_luarc_json(config_dir: &Path) -> anyhow::Result<()> {
     let luarc = config_dir.join(".luarc.json");
     if !luarc.exists() {
         std::fs::write(&luarc, LUARC_JSON)?;
@@ -363,9 +338,11 @@ pub fn load_config(lua: &Lua) -> Result<(TircConfig, PathBuf), anyhow::Error> {
         std::fs::write(&config_filename, get_default_config())?;
     }
 
-    // Best-effort: keep editor type definitions in sync. Never fatal - a
-    // read-only config dir should not stop the client from starting.
+    // Best-effort: keep editor type definitions in sync and drop a .luarc.json
+    // if the user has none. Never fatal - a read-only config dir should not stop
+    // the client from starting.
     let _ = write_type_definitions(config_dirname);
+    let _ = write_luarc_json(config_dirname);
 
     // Prepend the config directory to package.path exactly once. reload_lua_theme
     // does not touch package.path so the entry is never duplicated.
@@ -880,12 +857,36 @@ mod tests {
         assert!(dir.join("types/tirc/init.lua").exists());
         assert!(dir.join("types/tirc/tui/theme.lua").exists());
         assert!(dir.join("types/tirc/tui/themes/default.lua").exists());
-        assert!(dir.join(".luarc.json").exists());
 
         let init = std::fs::read_to_string(dir.join("types/tirc/init.lua")).unwrap();
         assert!(init.contains("---@class TircEvent"));
         let theme = std::fs::read_to_string(dir.join("types/tirc/tui/themes/default.lua")).unwrap();
         assert!(theme.contains("---@class TircTheme"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn luarc_json_is_written_once_and_never_clobbered() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("tirc-luarc-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let luarc = dir.join(".luarc.json");
+
+        write_luarc_json(&dir).expect("write .luarc.json");
+        assert!(luarc.exists());
+        assert_eq!(std::fs::read_to_string(&luarc).unwrap(), LUARC_JSON);
+
+        // A user's own settings must survive a second run.
+        std::fs::write(&luarc, "{ \"custom\": true }").unwrap();
+        write_luarc_json(&dir).expect("keep existing .luarc.json");
+        assert_eq!(
+            std::fs::read_to_string(&luarc).unwrap(),
+            "{ \"custom\": true }"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
