@@ -22,7 +22,7 @@ use tirc_ui::{State, ViewState};
 
 use super::renderer::Renderer;
 use super::tmux;
-use super::{DecodeRequest, DecodedImage, PreviewRequest, PreviewResult};
+use super::{DecodeRequest, DecodedImage, PreviewCacheStore, PreviewRequest, PreviewResult};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Maps the configured [`ImageProtocol`] to a forced [`ProtocolType`], or `None`
@@ -225,6 +225,17 @@ impl Tui {
     /// Wires the channel the renderer uses to request background link previews.
     pub fn set_preview_sender(&mut self, tx: UnboundedSender<PreviewRequest>) {
         self.renderer.set_preview_sender(tx);
+    }
+
+    /// Installs the disk-backed preview cache, seeding the renderer's in-memory
+    /// preview caches from it.
+    pub fn set_preview_store(&mut self, store: PreviewCacheStore) {
+        self.renderer.set_preview_store(store);
+    }
+
+    /// Persists any pending preview-cache changes to disk (debounced by the store).
+    pub fn flush_preview_cache(&self) {
+        self.renderer.flush_preview_cache();
     }
 
     /// Feeds a finished link-preview fetch into the renderer's preview cache.

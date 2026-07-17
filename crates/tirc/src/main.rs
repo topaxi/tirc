@@ -16,7 +16,9 @@ use tirc_config::{load_config, ServerConfig, TircConfig};
 use tirc_core::backend::{spawn as spawn_backend, ChatBackend};
 use tirc_core::{BackendId, BackendMessage, BufferId, Protocol, TxnAllocator};
 use tirc_tui::preview::{build_client, link_preview_worker};
-use tirc_tui::{DecodeRequest, DecodedImage, EncodedImage, PreviewRequest, PreviewResult, Tui};
+use tirc_tui::{
+    DecodeRequest, DecodedImage, EncodedImage, PreviewCacheStore, PreviewRequest, PreviewResult, Tui,
+};
 use tirc_ui::{State, ViewState};
 
 use crate::input::{Event, InputHandler};
@@ -235,6 +237,7 @@ async fn root_task(
         let cache_dir = xdg::BaseDirectories::with_prefix("tirc")
             .create_cache_directory("previews")
             .unwrap_or_else(|_| std::env::temp_dir().join("tirc-previews"));
+        tui.set_preview_store(PreviewCacheStore::load(cache_dir.clone()));
         tui.set_preview_sender(preview_tx);
         tokio::spawn(link_preview_worker(
             build_client(),
@@ -342,6 +345,9 @@ async fn root_task(
                 if tmux_abs_position && input_handler.has_cached_images() {
                     input_handler.refresh_pane_origin();
                 }
+                // Debounced persistence of link previews fetched since the last
+                // tick, so a burst of results is written once rather than per URL.
+                input_handler.flush_preview_cache();
                 Event::Tick
             }
             _ = &mut terminate => break,

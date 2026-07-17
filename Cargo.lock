@@ -5575,6 +5575,7 @@ dependencies = [
  "reqwest",
  "scraper",
  "serde",
+ "serde_json",
  "textwrap",
  "tirc-config",
  "tirc-core",

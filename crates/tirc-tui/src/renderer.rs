@@ -27,6 +27,7 @@ use tirc_ui::{
 use tirc_lua::theme::is_style_table;
 
 use super::preview::{extract_urls, LinkPreview, PreviewRequest, PreviewResult};
+use super::preview_cache::PreviewCacheStore;
 use super::tmux::{wrap_passthrough, wrap_passthrough_positioned, PaneOrigin};
 use super::wrap::wrap_line;
 use tirc_ui::lua::{to_lua_event, to_lua_user};
@@ -294,6 +295,11 @@ pub struct Renderer {
     /// re-rendered cheaply each frame. Its thumbnail (`image_path`) flows through
     /// the same `image_cache` pipeline as any other inline image.
     preview_cache: RefCell<HashMap<String, LinkPreview>>,
+    /// Disk-backed persistence for `preview_cache`/`preview_failed`, seeding them
+    /// at startup and written through on each result so previews survive a
+    /// restart. `None` in tests and when link previews are disabled, so those
+    /// paths do no disk I/O.
+    preview_store: RefCell<Option<PreviewCacheStore>>,
     /// URLs hyperlinked this frame; a link marker's `Color::Indexed` value is an
     /// index into this table (see `super::hyperlink`). Cleared at the top of
     /// every `render` so indices never go stale across frames.
@@ -544,6 +550,7 @@ impl Renderer {
             preview_pending: RefCell::new(HashSet::new()),
             preview_failed: RefCell::new(HashSet::new()),
             preview_cache: RefCell::new(HashMap::new()),
+            preview_store: RefCell::new(None),
             link_urls: RefCell::new(Vec::new()),
             focused: true,
             pane_origin: None,
@@ -593,16 +600,52 @@ impl Renderer {
         self.preview_tx = Some(tx);
     }
 
+    /// Installs the disk-backed preview cache and seeds the in-memory caches from
+    /// it, so previews fetched in a previous session render immediately without a
+    /// network refetch. Called once at startup (only when link previews are
+    /// enabled).
+    pub fn set_preview_store(&mut self, store: PreviewCacheStore) {
+        {
+            let mut cache = self.preview_cache.borrow_mut();
+            for (url, preview) in store.seed_success() {
+                cache.insert(url, preview);
+            }
+        }
+        {
+            let mut failed = self.preview_failed.borrow_mut();
+            for url in store.seed_failed() {
+                failed.insert(url);
+            }
+        }
+        *self.preview_store.borrow_mut() = Some(store);
+    }
+
+    /// Persists any preview-cache changes to disk if a store is installed.
+    /// Debounced by the store; call cheaply (e.g. once per tick).
+    pub fn flush_preview_cache(&self) {
+        if let Some(store) = self.preview_store.borrow_mut().as_mut() {
+            store.flush();
+        }
+    }
+
     /// Consumes a finished preview fetch: caches a usable preview so the next
     /// frame renders it, or records the failure so it is not requested again.
-    /// Either way the URL is no longer in flight.
+    /// Either way the URL is no longer in flight, and the result is written
+    /// through to the disk cache when one is installed.
     pub fn insert_link_preview(&mut self, result: PreviewResult) {
         self.preview_pending.borrow_mut().remove(&result.url);
+        let mut store = self.preview_store.borrow_mut();
         match result.preview {
             Some(preview) => {
+                if let Some(store) = store.as_mut() {
+                    store.insert_success(result.url.clone(), &preview);
+                }
                 self.preview_cache.borrow_mut().insert(result.url, preview);
             }
             None => {
+                if let Some(store) = store.as_mut() {
+                    store.insert_failed(result.url.clone());
+                }
                 self.preview_failed.borrow_mut().insert(result.url);
             }
         }

@@ -203,6 +203,12 @@ impl<'lua> InputHandler<'lua> {
         self.ui.insert_link_preview(result);
     }
 
+    /// Persists pending preview-cache changes to disk (debounced by the store);
+    /// called on the periodic tick so bursts of results are not written per URL.
+    pub fn flush_preview_cache(&self) {
+        self.ui.flush_preview_cache();
+    }
+
     /// Returns whether a repaint is needed and clears the flag.
     pub fn take_dirty(&mut self) -> bool {
         std::mem::replace(&mut self.dirty, false)
