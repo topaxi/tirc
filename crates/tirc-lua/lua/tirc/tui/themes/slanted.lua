@@ -74,12 +74,14 @@ end
 ---@param buffer TircBufferTab
 ---@param focused boolean
 ---@param show_backend boolean
-local function tab_spans(buffer, focused, show_backend)
+---@param suffix string status/latency suffix appended to the room name segment
+local function tab_spans(buffer, focused, show_backend, suffix)
   local bg = tab_bg(buffer, focused)
   local fg = tab_fg(buffer, focused)
+  local label = buffer.name .. suffix
 
   if not show_backend then
-    return { { ' ' .. buffer.name .. ' ', theme.style { fg = fg, bg = bg } } }
+    return { { ' ' .. label .. ' ', theme.style { fg = fg, bg = bg } } }
   end
 
   local b_bg = focused and FOCUSED_BG_BACKEND or TAB_BG_BACKEND
@@ -89,7 +91,7 @@ local function tab_spans(buffer, focused, show_backend)
       theme.style { fg = fg, bg = b_bg },
     },
     { SEP_LEFT, theme.style { fg = b_bg, bg = bg } },
-    { ' ' .. buffer.name .. ' ', theme.style { fg = fg, bg = bg } },
+    { ' ' .. label .. ' ', theme.style { fg = fg, bg = bg } },
   }
 end
 
@@ -115,7 +117,8 @@ function Slanted:render_buffer_tab(buffer, first)
     tab[#tab + 1] = { SEP_LEFT, theme.style { fg = BAR_BG, bg = entry_bg } }
   end
 
-  for _, span in ipairs(tab_spans(buffer, focused, show_backend)) do
+  local suffix = self:tab_status_suffix(buffer)
+  for _, span in ipairs(tab_spans(buffer, focused, show_backend, suffix)) do
     tab[#tab + 1] = span
   end
 

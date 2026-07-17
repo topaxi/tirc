@@ -86,6 +86,17 @@ impl IrcBackend {
         commands: &mut CommandReceiver,
     ) -> anyhow::Result<bool> {
         let id = self.id;
+        let _ = events.send(BackendMessage {
+            backend: id,
+            event: BackendEvent::Event(ChatEvent::ServerInfo {
+                target: None,
+                from: None,
+                code: None,
+                text: format!("Connecting to {}:{}...", self.config.host, self.config.port),
+                raw: None,
+                time: None,
+            }),
+        });
         let mut client = Client::from_config(self.irc_config()?).await?;
         let mut stream = client.stream()?;
 

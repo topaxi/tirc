@@ -150,6 +150,11 @@ impl ChatBackend for MatrixBackend {
         let media_dir = store_path.join("media");
         let _ = std::fs::create_dir_all(&media_dir);
 
+        emit(
+            &events,
+            id,
+            status_line(format!("Connecting to {}...", self.config.homeserver)),
+        );
         let client = authenticate(&self.config, &store_path, &session_path).await?;
 
         let user_id = client
@@ -262,7 +267,11 @@ impl ChatBackend for MatrixBackend {
                     failures = 0;
                     if degraded {
                         degraded = false;
-                        emit(&ping_events, id, status_line("Connection restored".to_string()));
+                        emit(
+                            &ping_events,
+                            id,
+                            status_line("Connection restored".to_string()),
+                        );
                     }
                     let ms = start.elapsed().as_millis() as u64;
                     let _ = ping_events.send(BackendMessage {

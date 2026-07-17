@@ -2749,6 +2749,77 @@ mod tests {
         Ok(())
     }
 
+    /// The status tab surfaces its backend's connection state and latency, and
+    /// both bundled themes render the same suffix (via `Theme:tab_status_suffix`).
+    /// Latency only shows above the 100ms threshold.
+    fn status_tab_text(
+        theme_module: &str,
+        latency: Option<u64>,
+        status: tirc_ui::ConnectionStatus,
+    ) -> anyhow::Result<String, anyhow::Error> {
+        use tirc_core::backend::BackendInfo;
+        use tirc_core::{BackendId, Protocol};
+        use tirc_ui::{State, ViewState};
+
+        let lua = mlua::Lua::new();
+        tirc_lua::builtins::register_builtin_modules(&lua)?;
+        lua.load(format!("require('{theme_module}'):setup({{}})"))
+            .exec()?;
+
+        let backend = BackendId(0);
+        let mut state = State::new();
+        state.register_backend(BackendInfo {
+            id: backend,
+            protocol: Protocol::Irc,
+            name: "irc.example.com".to_string(),
+        });
+        state.set_connection_status(backend, status);
+        state.set_latency(backend, latency);
+
+        let id = BufferId::status(backend);
+        let mut view = ViewState::new();
+        view.focus(id.clone());
+
+        let renderer = Renderer::new();
+        // Populates the `tirc.buffers`/`focused_buffer` globals the tab formatter
+        // reads (backend-prefix and focus checks).
+        renderer.update_render_context(&lua, &view, &state)?;
+
+        let buffer = state.buffers.get(&id).expect("status buffer exists");
+        let tab = renderer.buffer_tab_table(&state, &lua, &id, buffer)?;
+        let spans = renderer.format_spans(&lua, "render_buffer_tab", tab)?;
+        Ok(spans.iter().map(|s| s.content.as_ref()).collect())
+    }
+
+    #[test]
+    fn status_tab_shows_latency_and_connection_state() -> anyhow::Result<(), anyhow::Error> {
+        use tirc_ui::ConnectionStatus;
+
+        for theme in ["tirc.tui.themes.default", "tirc.tui.themes.slanted"] {
+            // High latency is shown; latency at/below 100ms is hidden.
+            assert!(
+                status_tab_text(theme, Some(250), ConnectionStatus::Connected)?.contains("[250ms]"),
+                "{theme} should show high latency"
+            );
+            assert!(
+                !status_tab_text(theme, Some(80), ConnectionStatus::Connected)?.contains("ms]"),
+                "{theme} should hide sub-threshold latency"
+            );
+            // Connection state takes precedence over latency.
+            assert!(
+                status_tab_text(theme, Some(250), ConnectionStatus::Disconnected)?
+                    .contains("[offline]"),
+                "{theme} should show offline state"
+            );
+            assert!(
+                status_tab_text(theme, None, ConnectionStatus::Connecting)?
+                    .contains("[connecting]"),
+                "{theme} should show connecting state"
+            );
+        }
+        Ok(())
+    }
+
     /// The slanted theme inserts separator spans around each tab. Its hit boxes
     /// must still total the full rendered bar width: measuring the actual row
     /// elements (not a separate per-tab re-measure) is what makes this hold.

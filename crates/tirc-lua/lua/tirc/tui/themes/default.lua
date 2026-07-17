@@ -700,20 +700,32 @@ function Theme:render_buffer_tab(buffer, first)
     style = s.tab
   end
 
+  name = name .. self:tab_status_suffix(buffer)
+
+  return { { ' ' .. name .. ' ', style }, ' ' }
+end
+
+--- Bracketed status/latency suffix for a buffer tab, or '' when there is nothing
+--- to show. The status buffer surfaces its backend's connection state
+--- ([offline]/[connecting]) and, once connected, round-trip latency over 100ms
+--- ([123ms]); a system buffer is marked [server]. Themes append this to the tab
+--- name so every layout (and the slanted theme) stays consistent.
+---@param buffer TircBufferTab
+---@return string
+function Theme:tab_status_suffix(buffer)
   if buffer.is_status then
     local conn = buffer.connection_status
     if conn == 'disconnected' then
-      name = name .. ' [offline]'
+      return ' [offline]'
     elseif conn == 'connecting' then
-      name = name .. ' [connecting]'
+      return ' [connecting]'
     elseif buffer.latency_ms and buffer.latency_ms > 100 then
-      name = name .. ' [' .. buffer.latency_ms .. 'ms]'
+      return ' [' .. buffer.latency_ms .. 'ms]'
     end
   elseif buffer.is_system then
-    name = name .. ' [server]'
+    return ' [server]'
   end
-
-  return { { ' ' .. name .. ' ', style }, ' ' }
+  return ''
 end
 
 --- Groups buffers by backend, preserving buffer order within each group and
