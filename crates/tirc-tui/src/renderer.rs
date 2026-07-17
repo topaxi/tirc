@@ -192,6 +192,10 @@ struct ImageAttachment {
     path: Option<PathBuf>,
     name: String,
     url: Option<String>,
+    /// Pixel dimensions when known ahead of decode (preview thumbnails, from the
+    /// cache), so the renderer can reserve the exact cell height before the image
+    /// is decoded. `None` for message attachments, which keep the text fallback.
+    dims: Option<(u32, u32)>,
 }
 
 /// A request to decode and encode one image off the main loop. Sent by the
@@ -320,6 +324,11 @@ pub struct Renderer {
     /// Ordered emoji offered as quick reactions, bound to the number keys in
     /// select mode and drawn as the pill bar. Set from config.
     quick_reaction_emojis: Vec<String>,
+    /// Terminal cell size in pixels (width, height), from the graphics picker.
+    /// Lets the renderer predict a not-yet-decoded thumbnail's cell height from
+    /// its cached pixel dimensions so preview rows do not shift when the image
+    /// lands. `None` when graphics are unavailable.
+    font_size: Option<(u16, u16)>,
 }
 
 /// What [`Renderer::render_messages`] hands back to `render`: the reaction-pill
@@ -387,6 +396,7 @@ fn image_attachments(message: &StoredMessage) -> Vec<ImageAttachment> {
             path: attachment.local_path.clone(),
             name: attachment.name.clone(),
             url: attachment.url.clone(),
+            dims: None,
         })
         .collect()
 }
@@ -400,6 +410,46 @@ fn message_urls(message: &StoredMessage) -> Vec<String> {
     let mut urls = extract_urls(&body.text);
     urls.truncate(MAX_PREVIEWS_PER_MESSAGE);
     urls
+}
+
+/// The cell size an image of pixel dimensions `(px_w, px_h)` occupies when fitted
+/// into `avail` at a terminal cell size of `font` pixels. This mirrors exactly
+/// what the decode worker computes via `ratatui_image::Resize::Fit` (which
+/// depends only on the pixel dimensions, not the image content), so a height
+/// predicted here matches the height the decoded thumbnail will occupy - letting
+/// the renderer reserve rows before the decode lands without any later shift.
+fn fit_cell_size(px_w: u32, px_h: u32, font: (u16, u16), avail: Size) -> Size {
+    let fw = (font.0.max(1)) as u32;
+    let fh = (font.1.max(1)) as u32;
+    let avail_px_w = (avail.width as u32) * fw;
+    let avail_px_h = (avail.height as u32) * fh;
+    let (w, h) = fit_area_proportionally(px_w, px_h, avail_px_w.min(px_w), avail_px_h.min(px_h));
+    Size::new(
+        (w as f32 / fw as f32).ceil() as u16,
+        (h as f32 / fh as f32).ceil() as u16,
+    )
+}
+
+/// Aspect-preserving fit of `(width, height)` into `(nwidth, nheight)`. Ported
+/// verbatim from `ratatui_image`'s internal helper so [`fit_cell_size`] agrees
+/// with the decoder to the pixel.
+fn fit_area_proportionally(width: u32, height: u32, nwidth: u32, nheight: u32) -> (u32, u32) {
+    let wratio = nwidth as f64 / width as f64;
+    let hratio = nheight as f64 / height as f64;
+    let ratio = f64::min(wratio, hratio);
+
+    let nw = ((width as f64 * ratio).round() as u64).max(1);
+    let nh = ((height as f64 * ratio).round() as u64).max(1);
+
+    if nw > u64::from(u16::MAX) {
+        let ratio = u16::MAX as f64 / width as f64;
+        (u32::MAX, ((height as f64 * ratio).round() as u32).max(1))
+    } else if nh > u64::from(u16::MAX) {
+        let ratio = u16::MAX as f64 / height as f64;
+        (((width as f64 * ratio).round() as u32).max(1), u32::MAX)
+    } else {
+        (nw as u32, nh as u32)
+    }
 }
 
 /// Formats one captured log record as a styled line for the debug pane:
@@ -556,7 +606,15 @@ impl Renderer {
             pane_origin: None,
             quick_reactions_enabled: true,
             quick_reaction_emojis: Vec::new(),
+            font_size: None,
         }
+    }
+
+    /// Records the terminal cell size in pixels (from the graphics picker), used
+    /// to predict thumbnail heights before decode. Called once at startup when
+    /// graphics are available.
+    pub fn set_font_size(&mut self, font_size: (u16, u16)) {
+        self.font_size = Some(font_size);
     }
 
     /// Enables inline image rendering. Called once after the terminal is
@@ -805,6 +863,7 @@ impl Renderer {
                     path: Some(path.clone()),
                     name: preview.title.clone().unwrap_or_default(),
                     url: Some(url.clone()),
+                    dims: preview.image_dims,
                 });
             }
             if let Ok(table) = self.preview_table(lua, &url, &preview) {
@@ -896,6 +955,20 @@ impl Renderer {
         }
         self.request_decode(path, avail);
         None
+    }
+
+    /// The cell height a thumbnail of `dims` will occupy once decoded into
+    /// `avail`, or `None` when its dimensions or the font size are unknown. Used
+    /// to reserve rows for a preview image that has not been decoded yet, so its
+    /// arrival does not push the surrounding messages around.
+    fn predicted_thumb_height(&self, dims: Option<(u32, u32)>, avail: Size) -> Option<u16> {
+        let (w, h) = dims?;
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let font = self.font_size?;
+        let size = fit_cell_size(w, h, font, avail);
+        (size.width > 0 && size.height > 0).then_some(size.height)
     }
 
     /// Queues a background decode+encode for `path` at `avail`, unless one is
@@ -1166,23 +1239,37 @@ impl Renderer {
                 width: preview_avail_width,
                 height: MAX_PREVIEW_ROWS,
             };
+            // Decoded thumbnails to draw this frame, paired with reserved height.
             let mut preview_thumbs: Vec<(PathBuf, Size)> = Vec::new();
+            // Total rows reserved for the thumbnail strip, including images not yet
+            // decoded whose height we can predict from cached pixel dimensions.
+            let mut preview_thumbs_h: u16 = 0;
             if self.images_enabled && preview_avail_width > 0 {
                 for image in &rm.preview_images {
-                    if let Some((path, size)) = image
-                        .path
-                        .as_ref()
-                        .and_then(|path| {
-                            self.image_size(path, preview_avail)
-                                .map(|size| (path, size))
-                        })
-                        .filter(|(_, size)| size.width > 0 && size.height > 0)
-                    {
-                        preview_thumbs.push((path.clone(), size));
+                    let Some(path) = image.path.as_ref() else {
+                        continue;
+                    };
+                    match self.image_size(path, preview_avail) {
+                        // Decoded and fits: reserve its actual height and draw it.
+                        Some(size) if size.width > 0 && size.height > 0 => {
+                            preview_thumbs_h = preview_thumbs_h.saturating_add(size.height);
+                            preview_thumbs.push((path.clone(), size));
+                        }
+                        // Not yet decoded (a decode was just queued): reserve the
+                        // predicted height so nothing shifts when it lands. A
+                        // permanently failed image is skipped (no dims reserved).
+                        _ => {
+                            if !self.failed.borrow().contains(path) {
+                                if let Some(h) =
+                                    self.predicted_thumb_height(image.dims, preview_avail)
+                                {
+                                    preview_thumbs_h = preview_thumbs_h.saturating_add(h);
+                                }
+                            }
+                        }
                     }
                 }
             }
-            let preview_thumbs_h: u16 = preview_thumbs.iter().map(|(_, size)| size.height).sum();
 
             // Wrap the preview title/description rows the same way the message
             // body is wrapped, so long previews break within the message area
@@ -2457,6 +2544,33 @@ mod tests {
         lua.load(code).eval()
     }
 
+    /// The predicted thumbnail height must equal what the real decoder produces,
+    /// or a cached preview would still shift rows when its image lands. Compares
+    /// `fit_cell_size` against `ratatui_image::Resize::Fit::size_for` (the exact
+    /// call the decode worker makes) across assorted aspect ratios.
+    #[test]
+    fn fit_cell_size_matches_ratatui_decoder() {
+        use image::{DynamicImage, RgbImage};
+        use ratatui_image::{FontSize, Resize};
+
+        let font = (8u16, 16u16);
+        let avail = Size::new(40, 8);
+        for (w, h) in [
+            (1200u32, 630u32),
+            (640, 480),
+            (16, 900),
+            (900, 16),
+            (100, 100),
+            (3, 5),
+        ] {
+            let img = DynamicImage::ImageRgb8(RgbImage::new(w, h));
+            let expected = Resize::Fit(None).size_for(&img, FontSize::from(font), avail);
+            let got = fit_cell_size(w, h, font, avail);
+            assert_eq!(got, expected, "mismatch for {w}x{h}");
+            assert!(got.height <= avail.height, "{w}x{h} overflowed avail height");
+        }
+    }
+
     fn render_lua_table_to_spans<'lua>(
         lua: &'lua mlua::Lua,
         renderer: &'lua Renderer,
@@ -3207,6 +3321,7 @@ mod tests {
                 description: Some("Example description".to_string()),
                 site_name: Some("Example".to_string()),
                 image_path: None,
+                image_dims: None,
             },
         );
 
@@ -3399,6 +3514,7 @@ mod tests {
                 description: Some("Example description".to_string()),
                 site_name: Some("Example".to_string()),
                 image_path: None,
+                image_dims: None,
             },
         );
 
@@ -4073,6 +4189,7 @@ mod tests {
                 ),
                 site_name: None,
                 image_path: None,
+                image_dims: None,
             }),
         });
 
@@ -4440,6 +4557,7 @@ mod tests {
                 description: None,
                 site_name: None,
                 image_path: Some(thumb.clone()),
+                image_dims: None,
             },
         );
 

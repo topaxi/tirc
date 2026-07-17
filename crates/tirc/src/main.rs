@@ -213,6 +213,8 @@ async fn root_task(
             )
         });
     if let Some(picker) = picker {
+        let font_size = picker.font_size();
+        tui.set_font_size((font_size.width, font_size.height));
         tui.set_decode_sender(decode_tx);
         tokio::spawn(image_decode_worker(
             picker,

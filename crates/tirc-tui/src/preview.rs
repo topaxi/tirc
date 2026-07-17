@@ -49,6 +49,11 @@ pub struct LinkPreview {
     /// Local cache path of the downloaded `og:image`, when one was fetched. Feeds
     /// the existing inline-image pipeline (decoded/drawn like any other image).
     pub image_path: Option<PathBuf>,
+    /// Pixel dimensions of the `og:image`, read from its header when downloaded.
+    /// Lets the renderer reserve the thumbnail's exact cell height before the
+    /// image is decoded, so a cached preview does not shift rows when its image
+    /// lands (see `Renderer::predicted_thumb_height`).
+    pub image_dims: Option<(u32, u32)>,
 }
 
 impl LinkPreview {
@@ -162,11 +167,18 @@ async fn fetch_preview(
         None => None,
     };
 
+    // Read the image's pixel dimensions from its header (cheap, no full decode);
+    // works whether it was just downloaded or already on disk from a prior run.
+    let image_dims = image_path
+        .as_ref()
+        .and_then(|path| image::image_dimensions(path).ok());
+
     let preview = LinkPreview {
         title: og.title,
         description: og.description,
         site_name: og.site_name,
         image_path,
+        image_dims,
     };
 
     (!preview.is_empty()).then_some(preview)

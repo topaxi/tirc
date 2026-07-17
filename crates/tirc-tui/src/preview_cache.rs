@@ -66,6 +66,12 @@ struct CachedPreview {
     site_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     image_file: Option<String>,
+    /// Pixel dimensions of the thumbnail, so the renderer can reserve its cell
+    /// height on the first frame after a restart without waiting for a decode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_w: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_h: Option<u32>,
 }
 
 fn now_secs() -> u64 {
@@ -207,6 +213,8 @@ impl CachedPreview {
             description: preview.description.clone(),
             site_name: preview.site_name.clone(),
             image_file,
+            image_w: preview.image_dims.map(|(w, _)| w),
+            image_h: preview.image_dims.map(|(_, h)| h),
         }
     }
 
@@ -215,11 +223,17 @@ impl CachedPreview {
             let path = cache_dir.join(file);
             path.exists().then_some(path)
         });
+        // Only report dimensions when the image is still on disk, so the renderer
+        // never reserves rows for a thumbnail it cannot draw.
+        let image_dims = image_path
+            .as_ref()
+            .and(self.image_w.zip(self.image_h));
         LinkPreview {
             title: self.title.clone(),
             description: self.description.clone(),
             site_name: self.site_name.clone(),
             image_path,
+            image_dims,
         }
     }
 }
@@ -241,6 +255,8 @@ mod tests {
             description: Some("The official video".to_string()),
             site_name: Some("YouTube".to_string()),
             image_file: None,
+            image_w: None,
+            image_h: None,
         }
     }
 
@@ -317,13 +333,18 @@ mod tests {
             description: None,
             site_name: None,
             image_path: Some(cache_dir.join("deadbeef")),
+            image_dims: Some((640, 480)),
         };
         let cached = CachedPreview::from_link_preview(&preview, &cache_dir);
         assert_eq!(cached.image_file.as_deref(), Some("deadbeef"));
+        assert_eq!(cached.image_w, Some(640));
+        assert_eq!(cached.image_h, Some(480));
 
-        // The file does not exist on disk, so it downgrades to text-only.
+        // The file does not exist on disk, so it downgrades to text-only and
+        // drops the dimensions (nothing to reserve rows for).
         let back = cached.to_link_preview(&cache_dir);
         assert!(back.image_path.is_none());
+        assert!(back.image_dims.is_none());
         assert_eq!(back.title.as_deref(), Some("t"));
     }
 }

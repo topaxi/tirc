@@ -217,6 +217,12 @@ impl Tui {
         self.renderer.set_decode_sender(tx);
     }
 
+    /// Records the terminal cell size in pixels, used to predict thumbnail
+    /// heights before decode.
+    pub fn set_font_size(&mut self, font_size: (u16, u16)) {
+        self.renderer.set_font_size(font_size);
+    }
+
     /// Feeds a finished background decode into the renderer's image cache.
     pub fn insert_decoded_image(&mut self, decoded: DecodedImage) {
         self.renderer.insert_decoded(decoded);
