@@ -242,18 +242,28 @@ impl ChatBackend for MatrixBackend {
         // Periodic round-trip probe: call whoami() every 30s and emit the RTT
         // as a Latency event. After 3 consecutive failures, emit Disconnected so
         // the buffer bar shows an offline indicator (the SDK retries sync internally
-        // so we won't get an explicit Disconnected otherwise).
+        // so we won't get an explicit Disconnected otherwise). The transitions are
+        // edge-triggered via `degraded`: Disconnected is emitted once when the probe
+        // starts failing, and a visible "Connection restored" line once it recovers
+        // (the Latency event alone silently flips the bar back to Connected, so
+        // without this the reconnection - which the SDK performs transparently -
+        // would never appear in the status buffer, unlike IRC's reconnect logging).
         let ping_client = client.clone();
         let ping_events = events.clone();
         let ping_task = tokio::spawn(async move {
             let mut interval = std::time::Duration::from_secs(30);
             let mut failures: u32 = 0;
+            let mut degraded = false;
             loop {
                 tokio::time::sleep(interval).await;
                 interval = std::time::Duration::from_secs(30);
                 let start = std::time::Instant::now();
                 if ping_client.whoami().await.is_ok() {
                     failures = 0;
+                    if degraded {
+                        degraded = false;
+                        emit(&ping_events, id, status_line("Connection restored".to_string()));
+                    }
                     let ms = start.elapsed().as_millis() as u64;
                     let _ = ping_events.send(BackendMessage {
                         backend: id,
@@ -261,7 +271,8 @@ impl ChatBackend for MatrixBackend {
                     });
                 } else {
                     failures += 1;
-                    if failures >= 3 {
+                    if failures >= 3 && !degraded {
+                        degraded = true;
                         let _ = ping_events.send(BackendMessage {
                             backend: id,
                             event: BackendEvent::Disconnected { reason: None },
