@@ -13,10 +13,7 @@ use ratatui_image::{protocol::Protocol, Image};
 use tokio::sync::mpsc::UnboundedSender;
 use tui_input::Input;
 
-use tracing::Level;
-
 use tirc_core::backend::BackendInfo;
-use tirc_core::logging::LogLine;
 use tirc_core::{AttachmentKind, BackendId, BufferId, ChatEvent, EventId, TargetId};
 use tirc_lua::date_time::date_time_to_table;
 use tirc_ui::{
@@ -450,29 +447,6 @@ fn fit_area_proportionally(width: u32, height: u32, nwidth: u32, nheight: u32) -
     } else {
         (nw as u32, nh as u32)
     }
-}
-
-/// Formats one captured log record as a styled line for the debug pane:
-/// `HH:MM:SS LEVEL target: message`, colored by severity.
-fn debug_log_line(line: &LogLine) -> Line<'static> {
-    let level_style = match line.level {
-        Level::ERROR => Style::default().fg(Color::Red),
-        Level::WARN => Style::default().fg(Color::Yellow),
-        Level::INFO => Style::default(),
-        _ => Style::default().fg(Color::DarkGray),
-    };
-    Line::from(vec![
-        Span::styled(
-            line.time.format("%H:%M:%S ").to_string(),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(format!("{:<5} ", line.level), level_style),
-        Span::styled(
-            format!("{}: ", line.target),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(line.message.clone(), level_style),
-    ])
 }
 
 /// A `[image: name] url` fallback line, shown for an image that could not be
@@ -2049,16 +2023,13 @@ impl Renderer {
             .block(Block::default().borders(Borders::TOP));
         f.render_widget(p, rect);
 
-        // Surface active mode indicators (copy mode releases mouse capture for
-        // native selection; the debug pane is open) as a right-aligned hint on the
-        // input row. Drawn over the same rect after the input so it sits on the
-        // text row (the block's top border is row `rect.y`).
+        // Surface active mode indicators (e.g. copy mode releases mouse capture
+        // for native selection) as a right-aligned hint on the input row. Drawn
+        // over the same rect after the input so it sits on the text row (the
+        // block's top border is row `rect.y`).
         let mut hints: Vec<&str> = Vec::new();
         if view.mode == Mode::Select {
             hints.push("-- SELECT --");
-        }
-        if view.debug_open {
-            hints.push("-- DEBUG --");
         }
         if view.copy_mode {
             hints.push("-- COPY --");
@@ -2306,12 +2277,6 @@ impl Renderer {
         // theme-agnostic. The quick-reaction bar drawn below it reinforces it.
         self.render_selected_message_highlight(f, view);
 
-        // The debug log pane floats over the frame (under the context menu, which
-        // is drawn last so it stays on top).
-        if view.debug_open {
-            self.render_debug_pane(f);
-        }
-
         // The completion popup grows upward from the input line, anchored at
         // the trigger span. Under the context menu so the menu stays topmost,
         // and before the hyperlink post-pass so no OSC 8 escape leaks under it.
@@ -2332,49 +2297,6 @@ impl Renderer {
         // of the frame, after every overlay: overlays `Clear` their cells (which
         // wipes the marker), so no hyperlink escape can leak under a popup.
         super::hyperlink::apply_hyperlinks(f.buffer_mut(), msg_rect, &self.link_urls.borrow());
-    }
-
-    /// Draws the `:debug` log overlay: a centered bordered pane showing the most
-    /// recent captured log lines (oldest at top, newest at bottom), colored by
-    /// level. Reads the shared in-memory buffer directly, so no view state beyond
-    /// the open flag is needed.
-    fn render_debug_pane(&self, f: &mut ratatui::Frame) {
-        let area = f.area();
-        // Centered, leaving a 2-cell margin on each side.
-        let width = area.width.saturating_sub(4);
-        let height = area.height.saturating_sub(4);
-        if width == 0 || height == 0 {
-            return;
-        }
-        let rect = Rect {
-            x: area.x + (area.width - width) / 2,
-            y: area.y + (area.height - height) / 2,
-            width,
-            height,
-        };
-
-        let block = Block::default()
-            .title("Debug log (:debug to close)")
-            .borders(Borders::ALL);
-        let inner = block.inner(rect);
-
-        // Request exactly as many lines as fit, so the visible window always shows
-        // the most recent output.
-        let lines = tirc_core::logging::recent(inner.height as usize);
-        let items: Vec<ListItem> = if lines.is_empty() {
-            vec![ListItem::new(Line::from(Span::styled(
-                "(no log output yet)",
-                Style::default().fg(Color::DarkGray),
-            )))]
-        } else {
-            lines
-                .iter()
-                .map(|line| ListItem::new(debug_log_line(line)))
-                .collect()
-        };
-
-        f.render_widget(Clear, rect);
-        f.render_widget(List::new(items).block(block), rect);
     }
 
     /// Reverses the cells of every row the selection covers, clamped to the

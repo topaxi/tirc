@@ -25,12 +25,20 @@ pub enum Protocol {
     Irc,
     Matrix,
     Mattermost,
+    /// The synthetic in-process backend that owns the debug log buffer. Not a
+    /// real network; has no wire protocol and is never connected to.
+    Internal,
 }
 
 /// Identifies one connected network. Several backends (multiple IRC servers and
 /// Matrix homeservers) can run concurrently, each with a distinct id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BackendId(pub usize);
+
+/// The synthetic backend that owns the debug log buffer. Uses a reserved id that
+/// cannot collide with config-server indices ([`BackendId`]`(index)`), so its
+/// buffer groups into its own tab without a real network behind it.
+pub const DEBUG_BACKEND: BackendId = BackendId(usize::MAX);
 
 /// A conversation target within a backend: an IRC channel/nick or a Matrix room
 /// id. Opaque to the core; only the owning backend interprets it.
@@ -630,6 +638,16 @@ pub enum VerifyAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_protocol_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&Protocol::Internal).unwrap(),
+            "\"internal\""
+        );
+        let back: Protocol = serde_json::from_str("\"internal\"").unwrap();
+        assert_eq!(back, Protocol::Internal);
+    }
 
     #[test]
     fn status_buffer_helpers() {

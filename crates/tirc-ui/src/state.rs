@@ -7,10 +7,15 @@ use ratatui::layout::Rect;
 
 use super::completion::CompletionPopup;
 use tirc_core::backend::BackendInfo;
+use tirc_core::logging::LogLine;
 use tirc_core::{
     BackendId, BufferId, BufferKind, ChatEvent, EventId, MemberRole, MembershipChange, MessageBody,
-    TargetId, TxnId, UserRef,
+    TargetId, TxnId, UserRef, DEBUG_BACKEND,
 };
+
+/// Upper bound on lines retained in the debug log buffer; older lines are dropped
+/// on insert. Bounds memory for a long-running session with a chatty log filter.
+const DEBUG_BUFFER_CAP: usize = 2000;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
@@ -270,6 +275,16 @@ impl ChatBuffer {
         self.messages.insert(pos, message);
     }
 
+    /// Like [`insert_message`](Self::insert_message) but caps the buffer at `max`
+    /// lines, dropping the oldest (front) once the limit is exceeded. Used for the
+    /// debug log buffer so it cannot grow without bound.
+    fn insert_message_bounded(&mut self, message: StoredMessage, max: usize) {
+        self.insert_message(message);
+        while self.messages.len() > max {
+            self.messages.remove(0);
+        }
+    }
+
     /// Inserts or updates a member, returning `true` only when the member was not
     /// already in the roster. Callers use this to suppress a redundant "has
     /// joined" line for a member that is already present (e.g. a re-delivered or
@@ -483,12 +498,29 @@ impl State {
         let user = &self.user_order;
         let config = &self.config_order;
         let rank = |id: &BufferId| {
+            // The synthetic debug backend is always pinned last so its tab group
+            // never interleaves with real backends (which sort by user/config
+            // rank, then stable arrival order).
+            if id.backend == DEBUG_BACKEND {
+                return (3usize, 0);
+            }
             user.get(id)
                 .map(|r| (0usize, *r))
                 .or_else(|| config.get(id).map(|r| (1, *r)))
                 .unwrap_or((2, 0))
         };
         self.buffers.sort_by(|a, _, b, _| rank(a).cmp(&rank(b)));
+    }
+
+    /// Appends a captured log line to the synthetic debug backend's buffer,
+    /// capped at [`DEBUG_BUFFER_CAP`]. The line renders through the theme like any
+    /// other `ServerInfo`; routing to the status buffer means it never sets
+    /// unread/mention flags.
+    pub fn apply_log_line(&mut self, line: LogLine) {
+        let time = Some(line.time.with_timezone(&chrono::Utc));
+        let message = StoredMessage::new_at(line.into_event(), time);
+        self.ensure_buffer(BufferId::status(DEBUG_BACKEND))
+            .insert_message_bounded(message, DEBUG_BUFFER_CAP);
     }
 
     /// Applies a normalized event from `backend`, mutating buffers, rosters, and
@@ -1170,9 +1202,6 @@ pub struct ViewState {
     /// when nothing is selected. Cleared on buffer switch. The renderer highlights
     /// this message and draws its quick-reaction pill bar.
     pub selected_message: Option<usize>,
-    /// True while the `:debug` log pane is open. Toggled by the `:debug` command;
-    /// read by the renderer to draw the log overlay and the `-- DEBUG --` hint.
-    pub debug_open: bool,
     /// The completion popup above the input line. Managed by the input
     /// handler's refresh-on-edit hook; drawn by the renderer when open.
     pub completion: CompletionPopup,
@@ -2756,5 +2785,76 @@ mod tests {
             !buf.messages[0].reactions["👍"].mine,
             "reactions from others are not marked mine"
         );
+    }
+
+    fn log_line(level: tirc_core::logging::Level, target: &str, message: &str) -> LogLine {
+        LogLine {
+            time: chrono::Local::now(),
+            level,
+            target: target.to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn log_line_routes_to_the_debug_status_buffer() {
+        let mut state = test_state();
+        state.apply_log_line(log_line(tirc_core::logging::Level::WARN, "tirc::net", "boom"));
+
+        let buf = state
+            .buffers
+            .get(&BufferId::status(DEBUG_BACKEND))
+            .expect("debug buffer created");
+        assert_eq!(buf.messages.len(), 1);
+        match &buf.messages[0].event {
+            ChatEvent::ServerInfo {
+                from, code, text, ..
+            } => {
+                assert_eq!(from.as_deref(), Some("tirc::net"));
+                assert_eq!(code.as_deref(), Some("WARN"));
+                assert_eq!(text, "boom");
+            }
+            other => panic!("expected ServerInfo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn debug_buffer_never_marks_unread() {
+        let mut state = test_state();
+        state.apply_log_line(log_line(tirc_core::logging::Level::ERROR, "tirc", "oops"));
+
+        let buf = state.buffers.get(&BufferId::status(DEBUG_BACKEND)).unwrap();
+        assert!(!buf.has_unread);
+        assert!(!buf.has_mention);
+    }
+
+    #[test]
+    fn debug_buffer_caps_at_the_limit() {
+        let mut state = test_state();
+        for i in 0..(DEBUG_BUFFER_CAP + 50) {
+            state.apply_log_line(log_line(tirc_core::logging::Level::INFO, "tirc", &format!("line {i}")));
+        }
+
+        let buf = state.buffers.get(&BufferId::status(DEBUG_BACKEND)).unwrap();
+        assert_eq!(buf.messages.len(), DEBUG_BUFFER_CAP);
+        // The oldest lines were dropped; the newest remains at the tail.
+        match &buf.messages[buf.messages.len() - 1].event {
+            ChatEvent::ServerInfo { text, .. } => {
+                assert_eq!(text, &format!("line {}", DEBUG_BUFFER_CAP + 49));
+            }
+            other => panic!("expected ServerInfo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn debug_buffer_always_sorts_last() {
+        let mut state = test_state();
+        // A log line creates the debug buffer first...
+        state.apply_log_line(log_line(tirc_core::logging::Level::INFO, "tirc", "early"));
+        // ...then a real channel arrives on the config backend.
+        state.apply(backend(), message("#late", "alice", None));
+
+        let last = state.buffers.keys().last().expect("has buffers");
+        assert_eq!(last.backend, DEBUG_BACKEND);
     }
 }

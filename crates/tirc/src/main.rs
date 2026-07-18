@@ -13,13 +13,13 @@ use tirc_backend_irc::{IrcBackend, IrcBackendConfig};
 use tirc_backend_matrix::{MatrixBackend, MatrixBackendConfig};
 use tirc_backend_mattermost::{MattermostBackend, MattermostBackendConfig};
 use tirc_config::{load_config, ServerConfig, TircConfig};
-use tirc_core::backend::{spawn as spawn_backend, ChatBackend};
-use tirc_core::{BackendId, BackendMessage, BufferId, Protocol, TxnAllocator};
+use tirc_core::backend::{spawn as spawn_backend, BackendInfo, ChatBackend};
+use tirc_core::{BackendId, BackendMessage, BufferId, Protocol, TxnAllocator, DEBUG_BACKEND};
 use tirc_tui::preview::{build_client, link_preview_worker};
 use tirc_tui::{
     DecodeRequest, DecodedImage, EncodedImage, PreviewCacheStore, PreviewRequest, PreviewResult, Tui,
 };
-use tirc_ui::{State, ViewState};
+use tirc_ui::{ConnectionStatus, State, ViewState};
 
 use crate::input::{Event, InputHandler};
 
@@ -121,6 +121,11 @@ fn build_backend(id: BackendId, server: &ServerConfig) -> anyhow::Result<Box<dyn
                 },
             )))
         }
+        // The internal protocol is the synthetic debug backend; it has no wire
+        // connection and is registered directly, never built from config.
+        Protocol::Internal => {
+            anyhow::bail!("the internal protocol has no backend to build")
+        }
     }
 }
 
@@ -180,6 +185,18 @@ async fn root_task(
         handles.push(spawn_backend(backend, event_tx.clone()));
     }
     drop(event_tx);
+
+    // The synthetic "internal" backend owns the debug log buffer. It has no wire
+    // connection, so register it directly (marked Connected so its tab never shows
+    // a perpetual "Connecting"). Its stable name lets a persisted `:bufmove` of it
+    // resolve, though `sort_buffers` always pins it last regardless.
+    backend_names.insert("internal".to_string(), DEBUG_BACKEND);
+    state.register_backend(BackendInfo {
+        id: DEBUG_BACKEND,
+        protocol: Protocol::Internal,
+        name: "internal".to_string(),
+    });
+    state.set_connection_status(DEBUG_BACKEND, ConnectionStatus::Connected);
 
     // The persisted `:bufmove` order is a flat cross-server list, so it can
     // only be resolved once every backend's name is known.
@@ -254,6 +271,11 @@ async fn root_task(
     let (host_task_tx, mut host_task_rx) =
         tokio::sync::mpsc::unbounded_channel::<tirc_lua::host_tasks::HostTaskMessage>();
     lua.set_app_data(tirc_lua::host_tasks::HostTaskSender(host_task_tx));
+
+    // Captured log lines (queued since `logging::init` in `main`) feed the debug
+    // buffer from here on. Claimed once; the loop drains any startup backlog.
+    let mut log_rx =
+        tirc_core::logging::take_receiver().expect("log receiver claimed exactly once");
 
     let mut input_handler = InputHandler::new(
         lua,
@@ -334,6 +356,11 @@ async fn root_task(
             }
             Some(message) = host_task_rx.recv() => {
                 input_handler.on_host_task(&mut state, &mut view, message);
+                continue;
+            }
+            Some(line) = log_rx.recv() => {
+                state.apply_log_line(line);
+                input_handler.mark_dirty();
                 continue;
             }
             _ = tick.tick() => {

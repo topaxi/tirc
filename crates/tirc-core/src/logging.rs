@@ -1,26 +1,29 @@
-//! In-memory log capture for the `:debug` pane.
+//! In-memory log capture for the debug log buffer.
 //!
 //! No logger was previously installed, so `log::*` calls (and third-party
 //! `tracing` events) went nowhere. Here we install a [`tracing`] subscriber with
 //! two parts: the [`tracing_log`] bridge routes the `log` facade (our own
-//! macros) into `tracing`, and a custom [`MemoryLayer`] appends every event into
-//! a bounded ring buffer the renderer reads to draw the debug pane. A file or
-//! `fmt` sink can be layered on later without touching the capture path.
+//! macros) into `tracing`, and a custom [`MemoryLayer`] forwards every event onto
+//! an unbounded channel. The main loop drains the channel and appends each line
+//! to the synthetic debug backend's buffer, so logs render like any other buffer.
+//! A file or `fmt` sink can be layered on later without touching the capture path.
 
-use std::collections::VecDeque;
 use std::sync::{LazyLock, Mutex};
 
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Utc};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tracing::field::{Field, Visit};
-use tracing::{Event, Level, Subscriber};
+use tracing::{Event, Subscriber};
+
+/// Re-exported so downstream crates can name a [`LogLine`]'s level type without
+/// depending on `tracing` directly.
+pub use tracing::Level;
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::{registry::LookupSpan, util::SubscriberInitExt, EnvFilter};
 
-/// Upper bound on retained log lines; older lines are dropped. Bounds memory so a
-/// long-running session with a chatty filter cannot grow without limit.
-const MAX_LINES: usize = 2000;
+use crate::ChatEvent;
 
-/// One captured log record, as shown in the debug pane.
+/// One captured log record, delivered to the debug buffer.
 #[derive(Clone, Debug)]
 pub struct LogLine {
     pub time: DateTime<Local>,
@@ -29,8 +32,37 @@ pub struct LogLine {
     pub message: String,
 }
 
-static LOG_BUFFER: LazyLock<Mutex<VecDeque<LogLine>>> =
-    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(MAX_LINES)));
+impl LogLine {
+    /// Renders this record as a status-buffer line for the debug buffer. The log
+    /// level rides in `code` (so themes can color by severity) and the log target
+    /// in `from`; the message time is preserved so lines sort in order.
+    pub fn into_event(self) -> ChatEvent {
+        ChatEvent::ServerInfo {
+            target: None,
+            from: Some(self.target),
+            code: Some(self.level.as_str().to_string()),
+            text: self.message,
+            raw: None,
+            time: Some(self.time.with_timezone(&Utc)),
+        }
+    }
+}
+
+/// The eagerly-created log channel: a sender fed by every logging thread and a
+/// receiver taken once by the main loop.
+type LogChannel = (
+    UnboundedSender<LogLine>,
+    Mutex<Option<UnboundedReceiver<LogLine>>>,
+);
+
+/// Sender half feeds captured lines from arbitrary logging threads; the receiver
+/// half is claimed once by the main loop via [`take_receiver`]. Created eagerly so
+/// lines logged before the runtime exists (e.g. config loading) queue here and are
+/// drained once the loop starts.
+static LOG_CHANNEL: LazyLock<LogChannel> = LazyLock::new(|| {
+    let (tx, rx) = unbounded_channel();
+    (tx, Mutex::new(Some(rx)))
+});
 
 /// Installs the global logging subscriber. Idempotent-ish: a second call (or a
 /// pre-existing subscriber) is reported and ignored rather than panicking, so
@@ -55,23 +87,13 @@ pub fn init() {
     }
 }
 
-/// A clone of the most recent `max` captured lines, oldest first. Read on the UI
-/// thread; writers are backend threads, hence the `Mutex`.
-pub fn recent(max: usize) -> Vec<LogLine> {
-    let buffer = LOG_BUFFER.lock().unwrap();
-    let start = buffer.len().saturating_sub(max);
-    buffer.iter().skip(start).cloned().collect()
+/// Claims the receiver end of the log channel. Returns `Some` on the first call
+/// and `None` afterwards; the main loop takes it exactly once.
+pub fn take_receiver() -> Option<UnboundedReceiver<LogLine>> {
+    LOG_CHANNEL.1.lock().unwrap().take()
 }
 
-fn push(line: LogLine) {
-    let mut buffer = LOG_BUFFER.lock().unwrap();
-    if buffer.len() == MAX_LINES {
-        buffer.pop_front();
-    }
-    buffer.push_back(line);
-}
-
-/// A `tracing` layer that appends every event to the ring buffer.
+/// A `tracing` layer that forwards every event onto the log channel.
 struct MemoryLayer;
 
 impl<S> Layer<S> for MemoryLayer
@@ -83,7 +105,8 @@ where
         event.record(&mut visitor);
 
         let metadata = event.metadata();
-        push(LogLine {
+        // A closed receiver (main loop gone) just drops the line.
+        let _ = LOG_CHANNEL.0.send(LogLine {
             time: Local::now(),
             level: *metadata.level(),
             target: metadata.target().to_string(),
@@ -137,15 +160,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn captures_log_events_into_the_ring_buffer() {
+    fn forwards_log_events_onto_the_channel() {
         init();
-        let marker = "tirc-debug-pane-test-marker";
+        let mut rx = take_receiver().expect("receiver available on first take");
+        let marker = "tirc-debug-buffer-test-marker";
         log::warn!("{marker}");
 
-        let found = recent(MAX_LINES)
-            .into_iter()
-            .find(|line| line.message.contains(marker));
-        let line = found.expect("logged message should be captured");
-        assert_eq!(line.level, Level::WARN);
+        // Drain until our marker shows up (other events may precede it).
+        loop {
+            let line = rx.try_recv().expect("logged message should be captured");
+            if line.message.contains(marker) {
+                assert_eq!(line.level, Level::WARN);
+                break;
+            }
+        }
     }
 }

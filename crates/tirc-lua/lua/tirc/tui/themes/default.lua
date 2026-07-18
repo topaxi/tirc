@@ -106,6 +106,7 @@ function Theme:make_styles(overrides)
     blue = theme.style { fg = 'blue' },
     green = theme.style { fg = 'green' },
     red = theme.style { fg = 'red' },
+    yellow = theme.style { fg = 'yellow' },
     gray = theme.style { fg = 'gray' },
     darkgray = theme.style { fg = 'darkgray' },
     tab = theme.style { fg = 'gray', bg = 'darkgray' },
@@ -370,6 +371,25 @@ end
 ---@param event TircEvent
 function Theme:format_server_info(event)
   local s = self.styles
+
+  -- The synthetic `internal` backend carries captured log lines: `event.code`
+  -- holds the log level and `event.from` the log target. Color the message by
+  -- severity and dim the target prefix.
+  if event.backend.protocol == 'internal' then
+    local level_style = ({
+      ERROR = s.red,
+      WARN = s.yellow,
+      DEBUG = s.darkgray,
+      TRACE = s.darkgray,
+    })[event.code]
+    local spans = {}
+    if event.from and event.from ~= '' then
+      spans[#spans + 1] = { event.from .. ' ', s.darkgray }
+    end
+    spans[#spans + 1] = level_style and { event.text, level_style }
+      or event.text
+    return spans
+  end
 
   if event.code == 'MODE' then
     return self:format_mode(event)

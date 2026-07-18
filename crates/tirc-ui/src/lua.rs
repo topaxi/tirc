@@ -14,6 +14,7 @@ fn protocol_str(protocol: Protocol) -> &'static str {
         Protocol::Irc => "irc",
         Protocol::Matrix => "matrix",
         Protocol::Mattermost => "mattermost",
+        Protocol::Internal => "internal",
     }
 }
 
@@ -312,6 +313,11 @@ mod tests {
             edited: false,
             reactions: Default::default(),
         }
+    }
+
+    #[test]
+    fn protocol_str_maps_internal() {
+        assert_eq!(protocol_str(Protocol::Internal), "internal");
     }
 
     #[test]

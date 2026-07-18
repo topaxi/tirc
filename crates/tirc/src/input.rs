@@ -15,7 +15,7 @@ use tirc_config::{
 use tirc_core::backend::BackendHandle;
 use tirc_core::{
     BackendEvent, BackendId, BackendMessage, BufferId, ChatEvent, Command, EventId, MsgKind,
-    TargetId, TxnAllocator, VerifyAction,
+    TargetId, TxnAllocator, VerifyAction, DEBUG_BACKEND,
 };
 use tirc_lua::runtime::{emit_event, EventName};
 use tirc_tui::{parse_bar_id, DecodedImage, PreviewResult, Tui};
@@ -1469,7 +1469,7 @@ impl<'lua> InputHandler<'lua> {
                 self.ui.redraw()?;
             }
             BuiltinCmd::Debug => {
-                view.debug_open = !view.debug_open;
+                self.focus_buffer(state, view, DEBUG_BACKEND, TargetId::STATUS);
             }
             BuiltinCmd::Reload => {
                 self.do_reload(state, backend);

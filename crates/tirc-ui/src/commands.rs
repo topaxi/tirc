@@ -258,7 +258,7 @@ pub const BUILTIN_COMMANDS: &[CommandSpec] = &[
         aliases: &[],
         nargs: Nargs::Zero,
         args: &[],
-        description: "Toggle the debug panel",
+        description: "Focus the debug log buffer",
     },
     CommandSpec {
         cmd: BuiltinCmd::Reload,
