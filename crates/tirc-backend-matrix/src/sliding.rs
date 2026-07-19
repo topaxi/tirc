@@ -9,10 +9,12 @@
 //! Matrix content into [`ChatEvent`]s and the SAS verification flow are shared
 //! with the classic driver (`convert`, `verify`).
 
-use std::collections::HashSet;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use futures::{pin_mut, StreamExt};
+use tokio::task::JoinHandle;
 
 use matrix_sdk::ruma::api::client::presence::set_presence;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
@@ -24,15 +26,21 @@ use matrix_sdk_ui::eyeball_im::VectorDiff;
 use matrix_sdk_ui::room_list_service::filters::new_filter_non_left;
 use matrix_sdk_ui::room_list_service::RoomListItem;
 use matrix_sdk_ui::sync_service::SyncService;
+use matrix_sdk_ui::timeline::{
+    MembershipChange as TimelineMembershipChange, MsgLikeKind, RoomExt, TimelineItem,
+    TimelineItemContent,
+};
 
 use tirc_core::backend::{CommandReceiver, EventSender};
 use tirc_core::{
-    BackendEvent, BackendId, BackendMessage, ChatEvent, Command, MessageBody, MsgKind, UserRef,
+    BackendEvent, BackendId, BackendMessage, ChatEvent, Command, EventId, MembershipChange,
+    MessageBody, MsgKind, TxnId, UserRef,
 };
 
 use crate::convert::{
     already_joined, emit, emit_room_metadata, join, list_public_rooms, load_known_topics,
-    room_by_target, save_known_topics, spawn_latency_probe,
+    msgtype_to_body, room_by_target, room_target, save_known_topics, sender_ref, server_ts,
+    spawn_latency_probe,
 };
 use crate::verify::{apply_verify, register_verification_handler, Verifications};
 use crate::MatrixBackendConfig;
@@ -43,8 +51,9 @@ use crate::MatrixBackendConfig;
 const PAGE_SIZE: usize = 200;
 
 /// Runs the Simplified Sliding Sync driver to completion: starts the sync
-/// service, surfaces rooms from the sorted room list as they arrive, and applies
-/// outgoing commands until the command channel closes.
+/// service, surfaces rooms from the sorted room list (spawning a timeline
+/// consumer per room), and applies outgoing commands until the command channel
+/// closes.
 pub(crate) async fn run_sliding(
     client: Client,
     id: BackendId,
@@ -52,7 +61,7 @@ pub(crate) async fn run_sliding(
     events: EventSender,
     mut commands: CommandReceiver,
     store_path: &Path,
-    _media_dir: std::path::PathBuf,
+    media_dir: PathBuf,
 ) -> anyhow::Result<()> {
     // The sync service bundles the room-list sync and the encryption/to-device
     // sync under one supervised task that reconnects on its own.
@@ -76,7 +85,15 @@ pub(crate) async fn run_sliding(
     }
 
     let known_topics_path = store_path.join("known_topics.json");
-    let mut known_topics = load_known_topics(&known_topics_path);
+    let mut announcer = RoomAnnouncer {
+        id,
+        events: events.clone(),
+        media_dir,
+        known_topics: load_known_topics(&known_topics_path),
+        known_topics_path,
+        seen: HashSet::new(),
+        timelines: Vec::new(),
+    };
 
     let room_list = sync_service.room_list_service().all_rooms().await?;
     // A filter must be set before the dynamic entries stream yields anything;
@@ -85,7 +102,6 @@ pub(crate) async fn run_sliding(
     controller.set_filter(Box::new(new_filter_non_left()));
     pin_mut!(entries);
 
-    let mut seen: HashSet<OwnedRoomId> = HashSet::new();
     let mut announced_synced = false;
 
     loop {
@@ -93,9 +109,8 @@ pub(crate) async fn run_sliding(
             diffs = entries.next() => {
                 let Some(diffs) = diffs else { break };
                 for diff in diffs {
-                    announce_diff(diff, id, &events, &mut seen, &mut known_topics).await;
+                    announcer.announce_diff(diff).await;
                 }
-                save_known_topics(&known_topics_path, &known_topics);
                 if !announced_synced {
                     announced_synced = true;
                     let _ = events.send(BackendMessage {
@@ -111,56 +126,295 @@ pub(crate) async fn run_sliding(
         }
     }
 
+    for timeline in &announcer.timelines {
+        timeline.abort();
+    }
     ping_task.abort();
     sync_service.stop().await;
     Ok(())
 }
 
-/// Surfaces any not-yet-seen rooms carried by a room-list diff as buffers. Only
-/// the room-carrying variants matter here: removals leave the buffer in place
-/// (mirroring the classic driver, which never tears a buffer down on its own).
-async fn announce_diff(
-    diff: VectorDiff<RoomListItem>,
+/// Tracks which rooms have already been surfaced as buffers and owns the spawned
+/// per-room timeline consumers, so a room is announced (and its timeline driven)
+/// exactly once even as the room list re-orders it.
+struct RoomAnnouncer {
     id: BackendId,
-    events: &EventSender,
-    seen: &mut HashSet<OwnedRoomId>,
-    known_topics: &mut std::collections::HashMap<String, String>,
-) {
-    match diff {
-        VectorDiff::Append { values } | VectorDiff::Reset { values } => {
-            for item in values {
-                announce_room(&item, id, events, seen, known_topics).await;
+    events: EventSender,
+    media_dir: PathBuf,
+    known_topics: HashMap<String, String>,
+    known_topics_path: PathBuf,
+    seen: HashSet<OwnedRoomId>,
+    timelines: Vec<JoinHandle<()>>,
+}
+
+impl RoomAnnouncer {
+    /// Surfaces any not-yet-seen rooms carried by a room-list diff. Only the
+    /// room-carrying variants matter: removals leave the buffer in place,
+    /// mirroring the classic driver which never tears a buffer down on its own.
+    async fn announce_diff(&mut self, diff: VectorDiff<RoomListItem>) {
+        match diff {
+            VectorDiff::Append { values } | VectorDiff::Reset { values } => {
+                for item in values {
+                    self.announce_room(&item).await;
+                }
             }
+            VectorDiff::PushFront { value }
+            | VectorDiff::PushBack { value }
+            | VectorDiff::Insert { value, .. }
+            | VectorDiff::Set { value, .. } => {
+                self.announce_room(&value).await;
+            }
+            VectorDiff::Clear
+            | VectorDiff::PopFront
+            | VectorDiff::PopBack
+            | VectorDiff::Remove { .. }
+            | VectorDiff::Truncate { .. } => {}
         }
-        VectorDiff::PushFront { value }
-        | VectorDiff::PushBack { value }
-        | VectorDiff::Insert { value, .. }
-        | VectorDiff::Set { value, .. } => {
-            announce_room(&value, id, events, seen, known_topics).await;
+    }
+
+    /// Emits a room's buffer metadata the first time it is seen and spawns its
+    /// timeline consumer. `RoomListItem` derefs to the underlying [`Room`], so
+    /// the shared metadata emitter is reused unchanged.
+    async fn announce_room(&mut self, item: &RoomListItem) {
+        let room: &Room = item;
+        if !self.seen.insert(room.room_id().to_owned()) {
+            return;
         }
-        VectorDiff::Clear
-        | VectorDiff::PopFront
-        | VectorDiff::PopBack
-        | VectorDiff::Remove { .. }
-        | VectorDiff::Truncate { .. } => {}
+        emit_room_metadata(room, self.id, &self.events, &mut self.known_topics).await;
+        save_known_topics(&self.known_topics_path, &self.known_topics);
+
+        self.timelines.push(tokio::spawn(run_room_timeline(
+            room.clone(),
+            self.id,
+            self.events.clone(),
+            self.media_dir.clone(),
+        )));
     }
 }
 
-/// Emits a room's buffer metadata the first time it is seen. `RoomListItem`
-/// derefs to the underlying [`Room`], so the shared metadata emitter is reused
-/// unchanged.
-async fn announce_room(
-    item: &RoomListItem,
+/// Per-room timeline consumer: builds the room's [`Timeline`] (which owns
+/// decryption, edit collapsing, and local echo), then translates its item diffs
+/// into [`ChatEvent`]s. The initial item set replaces the classic driver's
+/// history backfill; live diffs replace its per-event sync handlers.
+async fn run_room_timeline(room: Room, id: BackendId, events: EventSender, media_dir: PathBuf) {
+    let timeline = match room.timeline().await {
+        Ok(timeline) => timeline,
+        Err(err) => {
+            log::warn!(
+                "could not open timeline for {}: {err}",
+                room.room_id()
+            );
+            return;
+        }
+    };
+
+    let (initial, stream) = timeline.subscribe().await;
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for item in &initial {
+        translate_item(item, &room, id, &events, &media_dir, &mut seen, false).await;
+    }
+
+    pin_mut!(stream);
+    while let Some(diffs) = stream.next().await {
+        for diff in diffs {
+            match diff {
+                VectorDiff::Append { values } => {
+                    for item in &values {
+                        translate_item(item, &room, id, &events, &media_dir, &mut seen, false)
+                            .await;
+                    }
+                }
+                // A reset replaces the whole timeline (e.g. a gappy sync). Clear
+                // the seen set and re-emit; `State`'s event-id de-dup absorbs the
+                // overlap so nothing doubles.
+                VectorDiff::Reset { values } => {
+                    seen.clear();
+                    for item in &values {
+                        translate_item(item, &room, id, &events, &media_dir, &mut seen, false)
+                            .await;
+                    }
+                }
+                VectorDiff::PushFront { value }
+                | VectorDiff::PushBack { value }
+                | VectorDiff::Insert { value, .. } => {
+                    translate_item(&value, &room, id, &events, &media_dir, &mut seen, false).await;
+                }
+                VectorDiff::Set { value, .. } => {
+                    translate_item(&value, &room, id, &events, &media_dir, &mut seen, true).await;
+                }
+                VectorDiff::Clear
+                | VectorDiff::PopFront
+                | VectorDiff::PopBack
+                | VectorDiff::Remove { .. }
+                | VectorDiff::Truncate { .. } => {}
+            }
+        }
+    }
+}
+
+/// Translates a single timeline item into a [`ChatEvent`]. `is_update` marks a
+/// `VectorDiff::Set` (an item changing in place): a message already emitted then
+/// re-appearing is an edit, while a first sighting is a new message. Virtual
+/// items (date dividers, read markers) and still-unsent local echoes (no event
+/// id) are skipped - the optimistic echo emitted on send already covers the
+/// latter until it confirms with a real id.
+async fn translate_item(
+    item: &Arc<TimelineItem>,
+    room: &Room,
     id: BackendId,
     events: &EventSender,
-    seen: &mut HashSet<OwnedRoomId>,
-    known_topics: &mut std::collections::HashMap<String, String>,
+    media_dir: &Path,
+    seen: &mut HashSet<String>,
+    is_update: bool,
 ) {
-    let room: &Room = item;
-    if !seen.insert(room.room_id().to_owned()) {
+    let Some(event) = item.as_event() else { return };
+    let Some(event_id) = event.event_id() else {
         return;
+    };
+    let id_str = event_id.to_string();
+    let target = room_target(room);
+
+    match event.content() {
+        TimelineItemContent::MsgLike(msglike) => match &msglike.kind {
+            MsgLikeKind::Message(message) => {
+                let (kind, body) = msgtype_to_body(room, message.msgtype().clone(), media_dir).await;
+                if is_update && seen.contains(&id_str) {
+                    emit(
+                        events,
+                        id,
+                        ChatEvent::Edit {
+                            target,
+                            id: EventId(id_str),
+                            body,
+                        },
+                    );
+                } else {
+                    let echo_of = event
+                        .transaction_id()
+                        .and_then(|txn| txn.as_str().parse::<u64>().ok())
+                        .map(TxnId);
+                    emit(
+                        events,
+                        id,
+                        ChatEvent::Message {
+                            target,
+                            id: Some(EventId(id_str.clone())),
+                            sender: sender_ref(room, event.sender()).await,
+                            body,
+                            kind,
+                            echo_of,
+                            time: server_ts(event.timestamp()),
+                        },
+                    );
+                    seen.insert(id_str);
+                }
+            }
+            MsgLikeKind::Sticker(sticker) => {
+                if is_update && seen.contains(&id_str) {
+                    return;
+                }
+                emit(
+                    events,
+                    id,
+                    ChatEvent::Message {
+                        target,
+                        id: Some(EventId(id_str.clone())),
+                        sender: sender_ref(room, event.sender()).await,
+                        body: MessageBody::plain(sticker.content().body.clone()),
+                        kind: MsgKind::Text,
+                        echo_of: None,
+                        time: server_ts(event.timestamp()),
+                    },
+                );
+                seen.insert(id_str);
+            }
+            MsgLikeKind::UnableToDecrypt(_) => {
+                if is_update && seen.contains(&id_str) {
+                    return;
+                }
+                emit(
+                    events,
+                    id,
+                    ChatEvent::Message {
+                        target,
+                        id: Some(EventId(id_str.clone())),
+                        sender: sender_ref(room, event.sender()).await,
+                        body: MessageBody::plain(
+                            "[unable to decrypt message - encryption keys unavailable]",
+                        ),
+                        kind: MsgKind::Text,
+                        echo_of: None,
+                        time: server_ts(event.timestamp()),
+                    },
+                );
+                seen.insert(id_str);
+            }
+            MsgLikeKind::Redacted => {
+                emit(
+                    events,
+                    id,
+                    ChatEvent::Redaction {
+                        target,
+                        id: EventId(id_str),
+                        by: None,
+                    },
+                );
+            }
+            // Polls, live location, and other message-likes have no line
+            // equivalent yet; skip rather than emit noise.
+            MsgLikeKind::Poll(_) | MsgLikeKind::LiveLocation(_) | MsgLikeKind::Other(_) => {}
+        },
+        TimelineItemContent::MembershipChange(change) => {
+            let Some(mapped) = map_membership(change.change(), event.sender()) else {
+                return;
+            };
+            emit(
+                events,
+                id,
+                ChatEvent::Membership {
+                    target,
+                    who: UserRef {
+                        id: change.user_id().to_string(),
+                        display: change.display_name(),
+                    },
+                    change: mapped,
+                    time: server_ts(event.timestamp()),
+                },
+            );
+        }
+        // Profile changes and room state changes (name/topic/power/...) are not
+        // surfaced on the sliding path yet; buffer name and topic still come
+        // from the room-list metadata. Tracked as a follow-up.
+        _ => {}
     }
-    emit_room_metadata(room, id, events, known_topics).await;
+}
+
+/// Maps the timeline's rich membership-change enum onto the normalized
+/// [`MembershipChange`], attributing invites to the acting sender. Returns
+/// `None` for changes we do not surface as a join/leave/invite line.
+fn map_membership(
+    change: Option<TimelineMembershipChange>,
+    sender: &matrix_sdk::ruma::UserId,
+) -> Option<MembershipChange> {
+    match change? {
+        TimelineMembershipChange::Joined | TimelineMembershipChange::InvitationAccepted => {
+            Some(MembershipChange::Join { realname: None })
+        }
+        TimelineMembershipChange::Left
+        | TimelineMembershipChange::Kicked
+        | TimelineMembershipChange::Banned
+        | TimelineMembershipChange::Unbanned
+        | TimelineMembershipChange::KickedAndBanned
+        | TimelineMembershipChange::InvitationRejected
+        | TimelineMembershipChange::InvitationRevoked => {
+            Some(MembershipChange::Part { reason: None })
+        }
+        TimelineMembershipChange::Invited => Some(MembershipChange::Invite {
+            by: UserRef::new(sender.as_str()),
+        }),
+        _ => None,
+    }
 }
 
 /// Applies an outgoing command on the sliding-sync path. Client-level commands
