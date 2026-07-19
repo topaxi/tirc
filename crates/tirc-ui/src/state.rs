@@ -2886,7 +2886,11 @@ mod tests {
     fn log_line_routes_to_the_debug_status_buffer() {
         let mut state = test_state();
         state.show_debug_buffer();
-        state.apply_log_line(log_line(tirc_core::logging::Level::WARN, "tirc::net", "boom"));
+        state.apply_log_line(log_line(
+            tirc_core::logging::Level::WARN,
+            "tirc::net",
+            "boom",
+        ));
 
         let buf = state
             .buffers
@@ -2921,7 +2925,11 @@ mod tests {
         let mut state = test_state();
         state.show_debug_buffer();
         for i in 0..(DEBUG_BUFFER_CAP + 50) {
-            state.apply_log_line(log_line(tirc_core::logging::Level::INFO, "tirc", &format!("line {i}")));
+            state.apply_log_line(log_line(
+                tirc_core::logging::Level::INFO,
+                "tirc",
+                &format!("line {i}"),
+            ));
         }
 
         let buf = state.buffers.get(&BufferId::status(DEBUG_BACKEND)).unwrap();
@@ -2955,7 +2963,10 @@ mod tests {
 
         // Nothing shows up while hidden: no buffer, no backend tab.
         assert!(!state.debug_visible());
-        assert!(state.buffers.get(&BufferId::status(DEBUG_BACKEND)).is_none());
+        assert!(state
+            .buffers
+            .get(&BufferId::status(DEBUG_BACKEND))
+            .is_none());
         assert!(!state.backends.contains_key(&DEBUG_BACKEND));
 
         // Revealing flushes the lines captured while hidden into the buffer...

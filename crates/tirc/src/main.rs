@@ -17,7 +17,8 @@ use tirc_core::backend::{spawn as spawn_backend, ChatBackend};
 use tirc_core::{BackendId, BackendMessage, BufferId, Protocol, TxnAllocator, DEBUG_BACKEND};
 use tirc_tui::preview::{build_client, link_preview_worker};
 use tirc_tui::{
-    DecodeRequest, DecodedImage, EncodedImage, PreviewCacheStore, PreviewRequest, PreviewResult, Tui,
+    DecodeRequest, DecodedImage, EncodedImage, PreviewCacheStore, PreviewRequest, PreviewResult,
+    Tui,
 };
 use tirc_ui::{State, ViewState};
 

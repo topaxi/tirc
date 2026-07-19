@@ -2495,7 +2495,10 @@ mod tests {
             let expected = Resize::Fit(None).size_for(&img, FontSize::from(font), avail);
             let got = fit_cell_size(w, h, font, avail);
             assert_eq!(got, expected, "mismatch for {w}x{h}");
-            assert!(got.height <= avail.height, "{w}x{h} overflowed avail height");
+            assert!(
+                got.height <= avail.height,
+                "{w}x{h} overflowed avail height"
+            );
         }
     }
 

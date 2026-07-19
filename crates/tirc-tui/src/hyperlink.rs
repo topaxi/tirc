@@ -152,7 +152,11 @@ fn slice_cow<'a>(content: &Cow<'a, str>, start: usize, end: usize) -> Cow<'a, st
 /// a URL. A link wrapped across rows yields one entry per row; because this runs
 /// after every overlay has `Clear`ed its cells, runs hidden under a popup are
 /// not recorded.
-pub(crate) fn apply_hyperlinks(buf: &mut Buffer, area: Rect, urls: &[String]) -> Vec<(Rect, String)> {
+pub(crate) fn apply_hyperlinks(
+    buf: &mut Buffer,
+    area: Rect,
+    urls: &[String],
+) -> Vec<(Rect, String)> {
     if urls.is_empty() {
         return Vec::new();
     }
@@ -189,10 +193,7 @@ pub(crate) fn apply_hyperlinks(buf: &mut Buffer, area: Rect, urls: &[String]) ->
             });
             rewrite_symbol(buf, (end, y), |sym| format!("{sym}\x1b]8;;\x1b\\"));
 
-            hits.push((
-                Rect::new(start, y, end - start + 1, 1),
-                url.clone(),
-            ));
+            hits.push((Rect::new(start, y, end - start + 1, 1), url.clone()));
 
             x = end + 1;
         }

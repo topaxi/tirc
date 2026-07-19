@@ -225,9 +225,7 @@ impl CachedPreview {
         });
         // Only report dimensions when the image is still on disk, so the renderer
         // never reserves rows for a thumbnail it cannot draw.
-        let image_dims = image_path
-            .as_ref()
-            .and(self.image_w.zip(self.image_h));
+        let image_dims = image_path.as_ref().and(self.image_w.zip(self.image_h));
         LinkPreview {
             title: self.title.clone(),
             description: self.description.clone(),
@@ -300,10 +298,9 @@ mod tests {
             "stale-success".to_string(),
             entry(now - 8 * 24 * 60 * 60, Some(success_preview())),
         );
-        store.entries.insert(
-            "fresh-failure".to_string(),
-            entry(now - 60 * 60, None),
-        );
+        store
+            .entries
+            .insert("fresh-failure".to_string(), entry(now - 60 * 60, None));
         store.entries.insert(
             "stale-failure".to_string(),
             entry(now - 2 * 24 * 60 * 60, None),
