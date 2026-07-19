@@ -199,8 +199,6 @@ impl Tui {
             self.renderer.enable_images();
         }
 
-        self.terminal.clear()?;
-
         execute!(
             self.terminal.backend_mut(),
             EnterAlternateScreen,
@@ -208,6 +206,14 @@ impl Tui {
             EnableBracketedPaste,
             EnableFocusChange
         )?;
+
+        // Clear the alternate screen without ratatui's `Terminal::clear`, which
+        // issues a DSR cursor-position query and reads the reply from stdin. That
+        // query hangs and then fails with "cursor position could not be read"
+        // when the terminal is unfocused before the first render - e.g. starting
+        // in an inactive tmux pane. `redraw` erases via a plain queued `Clear`
+        // and resets the back buffer, exactly as every frame already does.
+        self.redraw()?;
 
         Ok(picker)
     }
