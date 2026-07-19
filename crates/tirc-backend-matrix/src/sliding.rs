@@ -242,8 +242,7 @@ async fn run_room_timeline(
 ) {
     let (initial, stream) = timeline.subscribe().await;
     let own_user = room.own_user_id().to_owned();
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut reactions: ReactionState = HashMap::new();
+    let mut tracker = TimelineTracker::default();
 
     for item in &initial {
         translate_item(
@@ -253,9 +252,7 @@ async fn run_room_timeline(
             id,
             &events,
             &media_dir,
-            &mut seen,
-            &mut reactions,
-            false,
+            &mut tracker,
         )
         .await;
     }
@@ -273,8 +270,13 @@ async fn run_room_timeline(
     pin_mut!(stream);
     while let Some(diffs) = stream.next().await {
         for diff in diffs {
+            // Every diff that carries item(s) is translated the same way; the
+            // tracker de-duplicates by event id, so an item re-delivered by a
+            // reset, a metadata-only `Set`, or an overlapping backfill page does
+            // not produce a duplicate line. Removals are ignored: buffers are
+            // not torn down, mirroring the classic driver.
             match diff {
-                VectorDiff::Append { values } => {
+                VectorDiff::Append { values } | VectorDiff::Reset { values } => {
                     for item in &values {
                         translate_item(
                             item,
@@ -283,37 +285,15 @@ async fn run_room_timeline(
                             id,
                             &events,
                             &media_dir,
-                            &mut seen,
-                            &mut reactions,
-                            false,
-                        )
-                        .await;
-                    }
-                }
-                // A reset replaces the whole timeline (e.g. a gappy sync). Clear
-                // the tracked state and re-emit; `State`'s event-id de-dup
-                // absorbs the overlap so nothing doubles.
-                VectorDiff::Reset { values } => {
-                    seen.clear();
-                    reactions.clear();
-                    for item in &values {
-                        translate_item(
-                            item,
-                            &room,
-                            &own_user,
-                            id,
-                            &events,
-                            &media_dir,
-                            &mut seen,
-                            &mut reactions,
-                            false,
+                            &mut tracker,
                         )
                         .await;
                     }
                 }
                 VectorDiff::PushFront { value }
                 | VectorDiff::PushBack { value }
-                | VectorDiff::Insert { value, .. } => {
+                | VectorDiff::Insert { value, .. }
+                | VectorDiff::Set { value, .. } => {
                     translate_item(
                         &value,
                         &room,
@@ -321,23 +301,7 @@ async fn run_room_timeline(
                         id,
                         &events,
                         &media_dir,
-                        &mut seen,
-                        &mut reactions,
-                        false,
-                    )
-                    .await;
-                }
-                VectorDiff::Set { value, .. } => {
-                    translate_item(
-                        &value,
-                        &room,
-                        &own_user,
-                        id,
-                        &events,
-                        &media_dir,
-                        &mut seen,
-                        &mut reactions,
-                        true,
+                        &mut tracker,
                     )
                     .await;
                 }
@@ -351,13 +315,32 @@ async fn run_room_timeline(
     }
 }
 
-/// Translates a single timeline item into a [`ChatEvent`]. `is_update` marks a
-/// `VectorDiff::Set` (an item changing in place): a message already emitted then
-/// re-appearing is an edit, while a first sighting is a new message. Virtual
-/// items (date dividers, read markers) and still-unsent local echoes (no event
-/// id) are skipped - the optimistic echo emitted on send already covers the
-/// latter until it confirms with a real id.
-#[allow(clippy::too_many_arguments)]
+/// Per-room de-duplication state for the timeline consumer. The timeline emits a
+/// `Set` for an item on any change (read receipts, sender-profile resolution,
+/// decryption), not only content edits, and re-delivers items on resets and
+/// overlapping backfill pages. Lines are therefore keyed by event id so each is
+/// emitted once: state changes, membership, stickers and undecryptable
+/// placeholders emit a single line; a message re-emits as an edit only when its
+/// body text actually changes; a redaction emits once.
+#[derive(Default)]
+struct TimelineTracker {
+    /// Message event id -> last emitted body text, to detect real edits.
+    message_bodies: HashMap<String, String>,
+    /// Event ids for which a one-shot line has been emitted.
+    emitted: HashSet<String>,
+    /// Event ids for which a redaction has been emitted.
+    redacted: HashSet<String>,
+    /// Per-message reaction snapshot, diffed to emit reaction add/remove deltas.
+    reactions: ReactionState,
+}
+
+/// Translates a single timeline item into a [`ChatEvent`], de-duplicating by
+/// event id via `tracker`. The timeline re-delivers items (resets, metadata-only
+/// `Set`s, overlapping backfill), so a message re-emits only as an edit when its
+/// body text changes and every other line is emitted once. Virtual items (date
+/// dividers, read markers) and still-unsent local echoes (no event id) are
+/// skipped - the optimistic echo emitted on send covers the latter until it
+/// confirms with a real id.
 async fn translate_item(
     item: &Arc<TimelineItem>,
     room: &Room,
@@ -365,9 +348,7 @@ async fn translate_item(
     id: BackendId,
     events: &EventSender,
     media_dir: &Path,
-    seen: &mut HashSet<String>,
-    reactions: &mut ReactionState,
-    is_update: bool,
+    tracker: &mut TimelineTracker,
 ) {
     let Some(event) = item.as_event() else { return };
     let Some(event_id) = event.event_id() else {
@@ -383,7 +364,7 @@ async fn translate_item(
                 &msglike.reactions,
                 room,
                 own_user,
-                reactions,
+                &mut tracker.reactions,
                 id,
                 events,
                 &target,
@@ -394,87 +375,98 @@ async fn translate_item(
                 MsgLikeKind::Message(message) => {
                     let (kind, body) =
                         msgtype_to_body(room, message.msgtype().clone(), media_dir).await;
-                    if is_update && seen.contains(&id_str) {
-                        emit(
-                            events,
-                            id,
-                            ChatEvent::Edit {
-                                target,
-                                id: EventId(id_str),
-                                body,
-                            },
-                        );
-                    } else {
-                        let echo_of = event
-                            .transaction_id()
-                            .and_then(|txn| txn.as_str().parse::<u64>().ok())
-                            .map(TxnId);
+                    let previous = tracker.message_bodies.get(&id_str).cloned();
+                    match previous {
+                        // First sighting: a new message.
+                        None => {
+                            let echo_of = event
+                                .transaction_id()
+                                .and_then(|txn| txn.as_str().parse::<u64>().ok())
+                                .map(TxnId);
+                            tracker
+                                .message_bodies
+                                .insert(id_str.clone(), body.text.clone());
+                            emit(
+                                events,
+                                id,
+                                ChatEvent::Message {
+                                    target,
+                                    id: Some(EventId(id_str)),
+                                    sender: sender_ref(room, event.sender()).await,
+                                    body,
+                                    kind,
+                                    echo_of,
+                                    time: server_ts(event.timestamp()),
+                                },
+                            );
+                        }
+                        // Seen before with different text: a real edit. An
+                        // unchanged body means a metadata-only update - skip it.
+                        Some(previous) if previous != body.text => {
+                            tracker
+                                .message_bodies
+                                .insert(id_str.clone(), body.text.clone());
+                            emit(
+                                events,
+                                id,
+                                ChatEvent::Edit {
+                                    target,
+                                    id: EventId(id_str),
+                                    body,
+                                },
+                            );
+                        }
+                        Some(_) => {}
+                    }
+                }
+                MsgLikeKind::Sticker(sticker) => {
+                    if tracker.emitted.insert(id_str.clone()) {
                         emit(
                             events,
                             id,
                             ChatEvent::Message {
                                 target,
-                                id: Some(EventId(id_str.clone())),
+                                id: Some(EventId(id_str)),
                                 sender: sender_ref(room, event.sender()).await,
-                                body,
-                                kind,
-                                echo_of,
+                                body: MessageBody::plain(sticker.content().body.clone()),
+                                kind: MsgKind::Text,
+                                echo_of: None,
                                 time: server_ts(event.timestamp()),
                             },
                         );
-                        seen.insert(id_str);
                     }
-                }
-                MsgLikeKind::Sticker(sticker) => {
-                    if is_update && seen.contains(&id_str) {
-                        return;
-                    }
-                    emit(
-                        events,
-                        id,
-                        ChatEvent::Message {
-                            target,
-                            id: Some(EventId(id_str.clone())),
-                            sender: sender_ref(room, event.sender()).await,
-                            body: MessageBody::plain(sticker.content().body.clone()),
-                            kind: MsgKind::Text,
-                            echo_of: None,
-                            time: server_ts(event.timestamp()),
-                        },
-                    );
-                    seen.insert(id_str);
                 }
                 MsgLikeKind::UnableToDecrypt(_) => {
-                    if is_update && seen.contains(&id_str) {
-                        return;
+                    if tracker.emitted.insert(id_str.clone()) {
+                        emit(
+                            events,
+                            id,
+                            ChatEvent::Message {
+                                target,
+                                id: Some(EventId(id_str)),
+                                sender: sender_ref(room, event.sender()).await,
+                                body: MessageBody::plain(
+                                    "[unable to decrypt message - encryption keys unavailable]",
+                                ),
+                                kind: MsgKind::Text,
+                                echo_of: None,
+                                time: server_ts(event.timestamp()),
+                            },
+                        );
                     }
-                    emit(
-                        events,
-                        id,
-                        ChatEvent::Message {
-                            target,
-                            id: Some(EventId(id_str.clone())),
-                            sender: sender_ref(room, event.sender()).await,
-                            body: MessageBody::plain(
-                                "[unable to decrypt message - encryption keys unavailable]",
-                            ),
-                            kind: MsgKind::Text,
-                            echo_of: None,
-                            time: server_ts(event.timestamp()),
-                        },
-                    );
-                    seen.insert(id_str);
                 }
                 MsgLikeKind::Redacted => {
-                    emit(
-                        events,
-                        id,
-                        ChatEvent::Redaction {
-                            target,
-                            id: EventId(id_str),
-                            by: None,
-                        },
-                    );
+                    if tracker.redacted.insert(id_str.clone()) {
+                        emit(
+                            events,
+                            id,
+                            ChatEvent::Redaction {
+                                target,
+                                id: EventId(id_str),
+                                by: None,
+                            },
+                        );
+                    }
                 }
                 // Polls, live location, and other message-likes have no line
                 // equivalent yet; skip rather than emit noise.
@@ -482,6 +474,9 @@ async fn translate_item(
             }
         }
         TimelineItemContent::MembershipChange(change) => {
+            if !tracker.emitted.insert(id_str) {
+                return;
+            }
             let Some(mapped) = map_membership(change.change(), event.sender()) else {
                 return;
             };
@@ -499,7 +494,7 @@ async fn translate_item(
                 },
             );
         }
-        TimelineItemContent::OtherState(other) => {
+        TimelineItemContent::OtherState(other) if tracker.emitted.insert(id_str) => {
             translate_other_state(other.content(), room, event, id, events).await;
         }
         // Profile-only changes are intentionally not surfaced, matching the
