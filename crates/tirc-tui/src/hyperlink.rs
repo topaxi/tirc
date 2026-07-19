@@ -146,11 +146,18 @@ fn slice_cow<'a>(content: &Cow<'a, str>, start: usize, end: usize) -> Cow<'a, st
 /// bytes and skip the rest of the row (same technique as `draw_raw_image` in
 /// the renderer). Every marked cell has its `underline_color` reset so the
 /// marker never reaches the terminal as SGR 58.
-pub(crate) fn apply_hyperlinks(buf: &mut Buffer, area: Rect, urls: &[String]) {
+///
+/// Returns one hit box per rewritten run - `(Rect, url)` covering the run's
+/// cells on its row - so the input handler can resolve a click position back to
+/// a URL. A link wrapped across rows yields one entry per row; because this runs
+/// after every overlay has `Clear`ed its cells, runs hidden under a popup are
+/// not recorded.
+pub(crate) fn apply_hyperlinks(buf: &mut Buffer, area: Rect, urls: &[String]) -> Vec<(Rect, String)> {
     if urls.is_empty() {
-        return;
+        return Vec::new();
     }
     let area = area.intersection(buf.area);
+    let mut hits = Vec::new();
 
     for y in area.top()..area.bottom() {
         let mut x = area.left();
@@ -182,9 +189,16 @@ pub(crate) fn apply_hyperlinks(buf: &mut Buffer, area: Rect, urls: &[String]) {
             });
             rewrite_symbol(buf, (end, y), |sym| format!("{sym}\x1b]8;;\x1b\\"));
 
+            hits.push((
+                Rect::new(start, y, end - start + 1, 1),
+                url.clone(),
+            ));
+
             x = end + 1;
         }
     }
+
+    hits
 }
 
 /// Replaces a cell's symbol via `f`, forcing the diff width to the symbol's
@@ -368,7 +382,17 @@ mod tests {
             10,
         );
 
-        apply_hyperlinks(&mut buf, area, &urls);
+        let hits = apply_hyperlinks(&mut buf, area, &urls);
+
+        // One hit box per wrapped row, each spanning the full marked run and
+        // carrying the whole URL.
+        assert_eq!(
+            hits,
+            vec![
+                (Rect::new(0, 0, 10, 1), urls[0].clone()),
+                (Rect::new(0, 1, 10, 1), urls[0].clone()),
+            ]
+        );
 
         for y in 0..2 {
             let first = buf.cell((0, y)).unwrap();
@@ -418,7 +442,8 @@ mod tests {
             3,
         );
 
-        apply_hyperlinks(&mut buf, area, &urls);
+        let hits = apply_hyperlinks(&mut buf, area, &urls);
+        assert_eq!(hits, vec![(Rect::new(0, 0, 1, 1), urls[0].clone())]);
 
         let symbol = buf.cell((0, 0)).unwrap().symbol().to_string();
         assert_eq!(symbol, "\x1b]8;id=l0;https://e.com\x1b\\x\x1b]8;;\x1b\\");
@@ -438,7 +463,8 @@ mod tests {
             2,
         );
 
-        apply_hyperlinks(&mut buf, area, &urls);
+        let hits = apply_hyperlinks(&mut buf, area, &urls);
+        assert!(hits.is_empty(), "an out-of-range marker is not a link hit");
 
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "a");
         assert_eq!(buf.cell((0, 0)).unwrap().underline_color, Color::Indexed(5));

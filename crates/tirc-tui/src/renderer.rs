@@ -2264,6 +2264,8 @@ impl Renderer {
             split_x,
             reactions: reaction_hits,
             message_rows,
+            // Recorded below by the hyperlink post-pass, after every overlay.
+            links: Vec::new(),
         };
 
         // Highlight the app-level selection by reversing the covered cells of the
@@ -2295,8 +2297,12 @@ impl Renderer {
 
         // Rewrite link-marked cells into OSC 8 hyperlinks as the very last step
         // of the frame, after every overlay: overlays `Clear` their cells (which
-        // wipes the marker), so no hyperlink escape can leak under a popup.
-        super::hyperlink::apply_hyperlinks(f.buffer_mut(), msg_rect, &self.link_urls.borrow());
+        // wipes the marker), so no hyperlink escape can leak under a popup. The
+        // returned per-run hit boxes are recorded for the input handler to
+        // resolve a right-click into the URL under the cursor; because this runs
+        // after the overlays, links hidden under a popup are not clickable.
+        view.layout.links =
+            super::hyperlink::apply_hyperlinks(f.buffer_mut(), msg_rect, &self.link_urls.borrow());
     }
 
     /// Reverses the cells of every row the selection covers, clamped to the

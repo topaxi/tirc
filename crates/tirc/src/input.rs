@@ -1044,6 +1044,24 @@ impl<'lua> InputHandler<'lua> {
         x: u16,
         y: u16,
     ) -> bool {
+        // A right-click on a hyperlink takes precedence over message-row
+        // selection: open a menu to copy or open the URL under the cursor.
+        if let Some(url) = view.layout.link_at(x, y) {
+            let target = MenuTarget::Link(url.to_string());
+            let items = vec![
+                MenuItem {
+                    label: "Open link".to_string(),
+                    action: MenuAction::OpenLink,
+                },
+                MenuItem {
+                    label: "Copy link".to_string(),
+                    action: MenuAction::CopyLink,
+                },
+            ];
+            view.menu.open_at(x, y, target, items);
+            return true;
+        }
+
         // Only buffer tabs get a context menu: none of the actions below is
         // well-defined for a backend tab, so those are deliberately ignored.
         if let Some(BarHit::Buffer(id)) = view.layout.tab_at(x, y) {
@@ -1145,11 +1163,37 @@ impl<'lua> InputHandler<'lua> {
                 self.ui.set_input(&line);
                 view.mode = Mode::Insert;
             }
+            (Some(MenuAction::CopyLink), Some(MenuTarget::Link(url))) => {
+                let notice = match copy_to_clipboard(&url) {
+                    Ok(()) => "Copied link to clipboard".to_string(),
+                    Err(err) => {
+                        log::warn!("clipboard copy failed: {err}");
+                        format!("Clipboard error: {err}").replace(['\r', '\n'], " ")
+                    }
+                };
+                self.notify(state, view, notice);
+            }
+            (Some(MenuAction::OpenLink), Some(MenuTarget::Link(url))) => {
+                if let Err(err) = open::that(&url) {
+                    log::warn!("could not open link {url}: {err}");
+                    let notice = format!("Could not open link: {err}").replace(['\r', '\n'], " ");
+                    self.notify(state, view, notice);
+                }
+            }
             _ => {}
         }
 
         view.menu.close();
         true
+    }
+
+    /// Surfaces a one-line status notice on the focused buffer's backend (a
+    /// server info line), matching how [`Self::yank_selection`] reports results.
+    /// A no-op when nothing is focused.
+    fn notify(&self, state: &mut State, view: &ViewState, notice: String) {
+        if let Some(backend) = view.focused.as_ref().map(|b| b.backend) {
+            state.apply(backend, server_info(notice));
+        }
     }
 
     /// Returns whether the paste was applied to the input line (Insert mode).

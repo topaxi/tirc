@@ -915,6 +915,11 @@ pub struct LayoutMap {
     /// message's index-from-newest in the focused buffer. Used to turn a plain
     /// (non-drag) click on a message into a selection.
     pub message_rows: Vec<(Rect, usize)>,
+    /// Per-run hit boxes for the hyperlinks drawn this frame, paired with the
+    /// full URL. One entry per visual row of a (possibly wrapped) link, so a
+    /// right-click on any fragment resolves to the whole URL. Recorded after all
+    /// overlays are drawn, so links hidden under a popup are excluded.
+    pub links: Vec<(Rect, String)>,
 }
 
 /// Identifies one reaction pill: the message it belongs to and the emoji key.
@@ -977,6 +982,14 @@ impl LayoutMap {
             .find_map(|(rect, hit)| rect_contains(rect, x, y).then_some(hit))
     }
 
+    /// Returns the URL of the hyperlink whose hit box contains `(x, y)`, if any.
+    /// Used to turn a right-click over a link into a context menu.
+    pub fn link_at(&self, x: u16, y: u16) -> Option<&str> {
+        self.links
+            .iter()
+            .find_map(|(rect, url)| rect_contains(rect, x, y).then_some(url.as_str()))
+    }
+
     /// Returns the index-from-newest of the message whose row span contains
     /// `(x, y)`, if any. Used to turn a plain click into a message selection.
     pub fn message_at(&self, x: u16, y: u16) -> Option<usize> {
@@ -1005,6 +1018,8 @@ pub enum MenuTarget {
     Buffer(BufferId),
     /// A user-list row: the menu acts on this member of the focused buffer.
     User { backend: BackendId, nick: String },
+    /// A hyperlink in the message area: the menu acts on this URL.
+    Link(String),
 }
 
 /// The abstract action a menu item performs. Deliberately decoupled from
@@ -1025,6 +1040,10 @@ pub enum MenuAction {
     OpenQuery,
     /// Insert a `nick: ` mention into the input line.
     Mention,
+    /// Copy a hyperlink's URL to the system clipboard.
+    CopyLink,
+    /// Open a hyperlink's URL in the default browser.
+    OpenLink,
 }
 
 /// One selectable row in a [`ContextMenu`].
@@ -2333,6 +2352,25 @@ mod tests {
     fn member_row_at_without_userlist_is_none() {
         let layout = LayoutMap::default();
         assert_eq!(layout.member_row_at(0, 0), None);
+    }
+
+    #[test]
+    fn link_at_resolves_clicks_to_recorded_runs() {
+        let layout = LayoutMap {
+            links: vec![
+                (Rect::new(4, 1, 20, 1), "https://example.com/a".to_string()),
+                (Rect::new(0, 3, 10, 1), "https://example.org".to_string()),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(layout.link_at(4, 1), Some("https://example.com/a"));
+        assert_eq!(layout.link_at(23, 1), Some("https://example.com/a"));
+        assert_eq!(layout.link_at(0, 3), Some("https://example.org"));
+        // Just outside either run.
+        assert_eq!(layout.link_at(24, 1), None);
+        assert_eq!(layout.link_at(4, 2), None);
+        assert_eq!(LayoutMap::default().link_at(0, 0), None);
     }
 
     #[test]
