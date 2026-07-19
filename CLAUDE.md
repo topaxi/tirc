@@ -126,10 +126,15 @@ identical `ChatEvent`/`BackendEvent` vocabulary so nothing downstream differs:
 
 `lib.rs::run` authenticates once (`auth.rs`), then selects the driver: the `sliding_sync`
 config option (`auto`/`on`/`off`, default `auto`) or, for `auto`, probing
-`client.unstable_features()` for `FeatureFlag::Msc4186`. Shared, driver-agnostic translation
-(message/media/state-change wording, room metadata, latency probe) lives in `convert.rs`;
-SAS device verification in `verify.rs`. When touching translation, prefer `convert.rs` so
-both drivers stay in sync, and keep both drivers emitting the same `ChatEvent` shapes.
+`client.unstable_features()` for `FeatureFlag::Msc4186`. If the sliding driver's
+`SyncService` reports a terminal error (a homeserver that advertises MSC4186 but whose
+implementation matrix-sdk cannot talk to - notably matrix.org today), `run_sliding` returns
+`SlidingOutcome::FallBack` with the command receiver and `run` transparently continues on
+the classic driver, so a broken sliding sync never leaves a dead connection. Shared,
+driver-agnostic translation (message/media/state-change wording, room metadata, latency
+probe) lives in `convert.rs`; SAS device verification in `verify.rs`. When touching
+translation, prefer `convert.rs` so both drivers stay in sync, and keep both drivers
+emitting the same `ChatEvent` shapes.
 
 ### Rendering (`crates/tirc-tui/src/`)
 `Tui` (`ui.rs`) drives the `ratatui` terminal; `renderer.rs` builds the layout and, for

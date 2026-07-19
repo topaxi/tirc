@@ -28,7 +28,7 @@ use matrix_sdk::{Client, Room};
 use matrix_sdk_ui::eyeball_im::VectorDiff;
 use matrix_sdk_ui::room_list_service::filters::new_filter_non_left;
 use matrix_sdk_ui::room_list_service::RoomListItem;
-use matrix_sdk_ui::sync_service::SyncService;
+use matrix_sdk_ui::sync_service::{State as SyncState, SyncService};
 use matrix_sdk_ui::timeline::{
     AnyOtherStateEventContentChange, EventTimelineItem,
     MembershipChange as TimelineMembershipChange, MsgLikeKind, ReactionsByKeyBySender, RoomExt,
@@ -69,6 +69,17 @@ const INITIAL_HISTORY: u16 = 30;
 /// add/remove deltas from the aggregate the timeline exposes.
 type ReactionState = HashMap<String, HashMap<String, HashSet<OwnedUserId>>>;
 
+/// Outcome of the sliding-sync driver, so the caller can degrade gracefully.
+pub(crate) enum SlidingOutcome {
+    /// The driver ran to completion (the command channel closed).
+    Completed,
+    /// The sliding sync failed (e.g. a homeserver that advertises MSC4186 but
+    /// whose implementation the SDK cannot talk to). The command receiver is
+    /// handed back so the caller can fall back to the classic driver without
+    /// losing queued commands.
+    FallBack(CommandReceiver),
+}
+
 /// Runs the Simplified Sliding Sync driver to completion: starts the sync
 /// service, surfaces rooms from the sorted room list (spawning a timeline
 /// consumer per room), and applies outgoing commands until the command channel
@@ -81,7 +92,7 @@ pub(crate) async fn run_sliding(
     mut commands: CommandReceiver,
     store_path: &Path,
     media_dir: PathBuf,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<SlidingOutcome> {
     // The sync service bundles the room-list sync and the encryption/to-device
     // sync under one supervised task that reconnects on its own. Raise the
     // room-list timeline limit off its default of 1 so listed rooms carry recent
@@ -91,6 +102,7 @@ pub(crate) async fn run_sliding(
         .build()
         .await?;
     sync_service.start().await;
+    let mut service_state = sync_service.state();
 
     // SAS verification is shared with the classic driver; the request handler
     // fires on to-device events delivered by the encryption sync.
@@ -129,6 +141,11 @@ pub(crate) async fn run_sliding(
 
     let mut announced_synced = false;
 
+    // Set when the sync service reports a terminal error, so the caller can fall
+    // back to the classic driver (e.g. matrix-sdk's simplified sliding sync is
+    // incompatible with the homeserver even though it advertised support).
+    let mut fall_back = false;
+
     loop {
         tokio::select! {
             diffs = entries.next() => {
@@ -149,6 +166,13 @@ pub(crate) async fn run_sliding(
                 apply_command(&client, id, &events, &verifications, &announcer.timelines, command)
                     .await;
             }
+            Some(state) = service_state.next() => {
+                if let SyncState::Error(err) = state {
+                    log::warn!("sliding sync failed ({err}); falling back to classic sync");
+                    fall_back = true;
+                    break;
+                }
+            }
         }
     }
 
@@ -157,7 +181,12 @@ pub(crate) async fn run_sliding(
     }
     ping_task.abort();
     sync_service.stop().await;
-    Ok(())
+
+    if fall_back {
+        Ok(SlidingOutcome::FallBack(commands))
+    } else {
+        Ok(SlidingOutcome::Completed)
+    }
 }
 
 /// Tracks which rooms have already been surfaced as buffers, keeps a handle to

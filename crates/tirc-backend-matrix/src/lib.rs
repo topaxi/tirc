@@ -159,16 +159,43 @@ impl ChatBackend for MatrixBackend {
 
         if use_sliding {
             log::info!("using the simplified sliding sync driver");
-            sliding::run_sliding(
-                client,
+            match sliding::run_sliding(
+                client.clone(),
                 id,
                 &self.config,
-                events,
+                events.clone(),
                 commands,
                 &store_path,
-                media_dir,
+                media_dir.clone(),
             )
-            .await
+            .await?
+            {
+                sliding::SlidingOutcome::Completed => Ok(()),
+                // The homeserver advertised MSC4186 but the sync failed (e.g. an
+                // SDK/server incompatibility). Fall back to the classic driver so
+                // the connection still works, and say so in the status buffer.
+                sliding::SlidingOutcome::FallBack(commands) => {
+                    emit(
+                        &events,
+                        id,
+                        status_line(
+                            "Simplified sliding sync is unavailable on this homeserver; \
+                             using classic sync instead."
+                                .to_string(),
+                        ),
+                    );
+                    classic::run_classic(
+                        client,
+                        id,
+                        &self.config,
+                        events,
+                        commands,
+                        &store_path,
+                        media_dir,
+                    )
+                    .await
+                }
+            }
         } else {
             classic::run_classic(
                 client,
