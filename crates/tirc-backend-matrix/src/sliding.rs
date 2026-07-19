@@ -54,6 +54,16 @@ use crate::MatrixBackendConfig;
 /// still covering the rooms a user is realistically looking at.
 const PAGE_SIZE: usize = 200;
 
+/// Timeline events the room-list sync requests per room. The SDK default is 1
+/// (just the latest event, for a room-list preview), which leaves buffers with
+/// no history; a modest window gives every listed room recent context up front.
+const ROOM_LIST_TIMELINE_LIMIT: u32 = 20;
+
+/// Events to backfill when a room's timeline is first opened, so a buffer shows
+/// history immediately rather than only what the room-list window carried.
+/// Mirrors the classic driver's startup backfill.
+const INITIAL_HISTORY: u16 = 30;
+
 /// Per-message reaction snapshot: message event id -> reaction key -> the set of
 /// users who reacted with it. Diffed between timeline updates to emit reaction
 /// add/remove deltas from the aggregate the timeline exposes.
@@ -73,8 +83,13 @@ pub(crate) async fn run_sliding(
     media_dir: PathBuf,
 ) -> anyhow::Result<()> {
     // The sync service bundles the room-list sync and the encryption/to-device
-    // sync under one supervised task that reconnects on its own.
-    let sync_service = SyncService::builder(client.clone()).build().await?;
+    // sync under one supervised task that reconnects on its own. Raise the
+    // room-list timeline limit off its default of 1 so listed rooms carry recent
+    // history instead of just their latest event.
+    let sync_service = SyncService::builder(client.clone())
+        .with_room_list_timeline_limit(ROOM_LIST_TIMELINE_LIMIT)
+        .build()
+        .await?;
     sync_service.start().await;
 
     // SAS verification is shared with the classic driver; the request handler
@@ -243,6 +258,16 @@ async fn run_room_timeline(
             false,
         )
         .await;
+    }
+
+    // Backfill an initial page so the buffer shows history immediately rather
+    // than only the events the room-list window carried. The fetched older
+    // events arrive as front-insertions on the subscription stream below.
+    if let Err(err) = timeline.paginate_backwards(INITIAL_HISTORY).await {
+        log::warn!(
+            "initial history backfill for {} failed: {err}",
+            room.room_id()
+        );
     }
 
     pin_mut!(stream);
