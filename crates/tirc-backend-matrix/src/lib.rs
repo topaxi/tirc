@@ -28,6 +28,7 @@
 mod auth;
 mod classic;
 mod convert;
+mod sliding;
 mod verify;
 
 use tirc_core::backend::{BackendInfo, ChatBackend, CommandReceiver, EventSender};
@@ -155,26 +156,31 @@ impl ChatBackend for MatrixBackend {
             SlidingSyncMode::Off => false,
             SlidingSyncMode::Auto => auth::supports_simplified_sliding_sync(&client).await,
         };
-        if use_sliding {
-            // The sliding-sync driver lands in a follow-up change; until then
-            // detection falls back to the classic driver so capability probing
-            // is testable on its own.
-            log::info!(
-                "homeserver supports simplified sliding sync; driver not yet implemented, \
-                 using classic sync"
-            );
-        }
 
-        classic::run_classic(
-            client,
-            id,
-            &self.config,
-            events,
-            commands,
-            &store_path,
-            media_dir,
-        )
-        .await
+        if use_sliding {
+            log::info!("using the simplified sliding sync driver");
+            sliding::run_sliding(
+                client,
+                id,
+                &self.config,
+                events,
+                commands,
+                &store_path,
+                media_dir,
+            )
+            .await
+        } else {
+            classic::run_classic(
+                client,
+                id,
+                &self.config,
+                events,
+                commands,
+                &store_path,
+                media_dir,
+            )
+            .await
+        }
     }
 }
 

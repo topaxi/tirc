@@ -35,15 +35,15 @@ use matrix_sdk::{Client, Room};
 
 use tirc_core::backend::{CommandReceiver, EventSender};
 use tirc_core::{
-    BackendEvent, BackendId, BackendMessage, BufferKind, ChatEvent, Command, EventId,
-    MembershipChange, MessageBody, MsgKind, TargetId, UserRef,
+    BackendEvent, BackendId, BackendMessage, ChatEvent, Command, EventId, MembershipChange,
+    MessageBody, MsgKind, TargetId, UserRef,
 };
 
 use crate::convert::{
-    already_joined, emit, is_handled_timeline_event, is_server_notice_room, join,
-    list_public_rooms, load_known_topics, message_event_to_chat, own_or_sender_ref,
-    role_from_power, room_by_target, room_can_post, room_event_line, room_target,
-    save_known_topics, sender_ref, server_ts, status_line, trim_display_name, utd_placeholder,
+    already_joined, emit, emit_room_metadata, is_handled_timeline_event, join, list_public_rooms,
+    load_known_topics, message_event_to_chat, own_or_sender_ref, room_by_target, room_can_post,
+    room_event_line, room_target, save_known_topics, sender_ref, server_ts, spawn_latency_probe,
+    status_line, trim_display_name, utd_placeholder,
 };
 use crate::verify::{apply_verify, register_verification_handler, Verifications};
 use crate::MatrixBackendConfig;
@@ -127,52 +127,7 @@ pub(crate) async fn run_classic(
         }
     });
 
-    // Periodic round-trip probe: call whoami() every 30s and emit the RTT
-    // as a Latency event. After 3 consecutive failures, emit Disconnected so
-    // the buffer bar shows an offline indicator (the SDK retries sync internally
-    // so we won't get an explicit Disconnected otherwise). The transitions are
-    // edge-triggered via `degraded`: Disconnected is emitted once when the probe
-    // starts failing, and a visible "Connection restored" line once it recovers
-    // (the Latency event alone silently flips the bar back to Connected, so
-    // without this the reconnection - which the SDK performs transparently -
-    // would never appear in the status buffer, unlike IRC's reconnect logging).
-    let ping_client = client.clone();
-    let ping_events = events.clone();
-    let ping_task = tokio::spawn(async move {
-        let mut interval = std::time::Duration::from_secs(30);
-        let mut failures: u32 = 0;
-        let mut degraded = false;
-        loop {
-            tokio::time::sleep(interval).await;
-            interval = std::time::Duration::from_secs(30);
-            let start = std::time::Instant::now();
-            if ping_client.whoami().await.is_ok() {
-                failures = 0;
-                if degraded {
-                    degraded = false;
-                    emit(
-                        &ping_events,
-                        id,
-                        status_line("Connection restored".to_string()),
-                    );
-                }
-                let ms = start.elapsed().as_millis() as u64;
-                let _ = ping_events.send(BackendMessage {
-                    backend: id,
-                    event: BackendEvent::Latency { ms },
-                });
-            } else {
-                failures += 1;
-                if failures >= 3 && !degraded {
-                    degraded = true;
-                    let _ = ping_events.send(BackendMessage {
-                        backend: id,
-                        event: BackendEvent::Disconnected { reason: None },
-                    });
-                }
-            }
-        }
-    });
+    let ping_task = spawn_latency_probe(client.clone(), id, events.clone());
 
     // Autojoin configured rooms (aliases or ids), skipping ones we are
     // already in. Re-joining wastes a round-trip and some homeservers even
@@ -678,94 +633,7 @@ async fn populate_room(
     media_dir: &Path,
     history_cursors: &HistoryCursors,
 ) {
-    let target = room_target(room);
-
-    let name = room
-        .display_name()
-        .await
-        .map(|name| name.to_string())
-        .unwrap_or_else(|_| target.0.clone());
-    emit(
-        events,
-        id,
-        ChatEvent::BufferName {
-            target: target.clone(),
-            name,
-        },
-    );
-
-    emit(
-        events,
-        id,
-        ChatEvent::BufferPostPolicy {
-            target: target.clone(),
-            can_post: room_can_post(room).await,
-        },
-    );
-
-    // The homeserver's server-notices room (matrix.org surfaces this as the
-    // "Official Account") is tagged `m.server_notice`. Flag it so the UI can mark
-    // it distinctly, akin to an IRC server window, while it stays a real room.
-    if is_server_notice_room(room).await {
-        emit(
-            events,
-            id,
-            ChatEvent::BufferKind {
-                target: target.clone(),
-                kind: BufferKind::System,
-            },
-        );
-    }
-
-    if let Some(topic) = room.topic() {
-        let room_id = room.room_id().to_string();
-        if known_topics.get(&room_id).map(String::as_str) == Some(topic.as_str()) {
-            emit(
-                events,
-                id,
-                ChatEvent::BufferTopic {
-                    target: target.clone(),
-                    topic,
-                },
-            );
-        } else {
-            known_topics.insert(room_id, topic.clone());
-            emit(
-                events,
-                id,
-                ChatEvent::Topic {
-                    target: target.clone(),
-                    who: None,
-                    topic,
-                    time: None,
-                },
-            );
-        }
-    }
-
-    if let Ok(members) = room.members(matrix_sdk::RoomMemberships::JOIN).await {
-        for member in members {
-            emit(
-                events,
-                id,
-                ChatEvent::Membership {
-                    target: target.clone(),
-                    who: UserRef {
-                        id: member.user_id().to_string(),
-                        display: member
-                            .display_name()
-                            .map(trim_display_name)
-                            .map(str::to_string),
-                    },
-                    change: MembershipChange::Present {
-                        role: role_from_power(member.power_level()),
-                    },
-                    time: None,
-                },
-            );
-        }
-    }
-
+    emit_room_metadata(room, id, events, known_topics).await;
     backfill_room(room, id, events, media_dir, history_cursors).await;
 }
 

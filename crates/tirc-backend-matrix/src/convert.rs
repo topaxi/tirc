@@ -20,8 +20,9 @@ use matrix_sdk::{Client, Room};
 
 use tirc_core::backend::EventSender;
 use tirc_core::{
-    Attachment, AttachmentKind, BackendEvent, BackendId, BackendMessage, ChatEvent, EventId,
-    Formatted, MemberRole, MessageBody, MsgKind, TargetId, TxnId, UserRef,
+    Attachment, AttachmentKind, BackendEvent, BackendId, BackendMessage, BufferKind, ChatEvent,
+    EventId, Formatted, MemberRole, MembershipChange, MessageBody, MsgKind, TargetId, TxnId,
+    UserRef,
 };
 
 pub(crate) fn trim_display_name(s: &str) -> &str {
@@ -712,6 +713,151 @@ pub(crate) fn emit(events: &EventSender, backend: BackendId, event: ChatEvent) {
         backend,
         event: BackendEvent::Event(event),
     });
+}
+
+/// Emits the buffer-metadata lines for a room - its name, post policy,
+/// server-notice kind, topic, and joined-member roster - so a joined room is
+/// visible with its roster without waiting for new activity. Shared by both
+/// drivers. Topic de-duplication uses `known_topics`: an unchanged topic is
+/// sent as a passive `BufferTopic`, a changed one as a `Topic` line (and
+/// recorded so the next run can suppress it).
+pub(crate) async fn emit_room_metadata(
+    room: &Room,
+    id: BackendId,
+    events: &EventSender,
+    known_topics: &mut HashMap<String, String>,
+) {
+    let target = room_target(room);
+
+    let name = room
+        .display_name()
+        .await
+        .map(|name| name.to_string())
+        .unwrap_or_else(|_| target.0.clone());
+    emit(
+        events,
+        id,
+        ChatEvent::BufferName {
+            target: target.clone(),
+            name,
+        },
+    );
+
+    emit(
+        events,
+        id,
+        ChatEvent::BufferPostPolicy {
+            target: target.clone(),
+            can_post: room_can_post(room).await,
+        },
+    );
+
+    // The homeserver's server-notices room (matrix.org surfaces this as the
+    // "Official Account") is tagged `m.server_notice`. Flag it so the UI can mark
+    // it distinctly, akin to an IRC server window, while it stays a real room.
+    if is_server_notice_room(room).await {
+        emit(
+            events,
+            id,
+            ChatEvent::BufferKind {
+                target: target.clone(),
+                kind: BufferKind::System,
+            },
+        );
+    }
+
+    if let Some(topic) = room.topic() {
+        let room_id = room.room_id().to_string();
+        if known_topics.get(&room_id).map(String::as_str) == Some(topic.as_str()) {
+            emit(
+                events,
+                id,
+                ChatEvent::BufferTopic {
+                    target: target.clone(),
+                    topic,
+                },
+            );
+        } else {
+            known_topics.insert(room_id, topic.clone());
+            emit(
+                events,
+                id,
+                ChatEvent::Topic {
+                    target: target.clone(),
+                    who: None,
+                    topic,
+                    time: None,
+                },
+            );
+        }
+    }
+
+    if let Ok(members) = room.members(matrix_sdk::RoomMemberships::JOIN).await {
+        for member in members {
+            emit(
+                events,
+                id,
+                ChatEvent::Membership {
+                    target: target.clone(),
+                    who: UserRef {
+                        id: member.user_id().to_string(),
+                        display: member
+                            .display_name()
+                            .map(trim_display_name)
+                            .map(str::to_string),
+                    },
+                    change: MembershipChange::Present {
+                        role: role_from_power(member.power_level()),
+                    },
+                    time: None,
+                },
+            );
+        }
+    }
+}
+
+/// Spawns the periodic round-trip probe: calls `whoami()` every 30s and emits
+/// the RTT as a [`BackendEvent::Latency`]. After 3 consecutive failures it emits
+/// [`BackendEvent::Disconnected`] once so the buffer bar shows an offline
+/// indicator (the SDK retries its sync internally, so no explicit disconnect
+/// arrives otherwise), and a visible "Connection restored" line once the probe
+/// recovers. Shared by both drivers. The returned handle should be aborted on
+/// shutdown.
+pub(crate) fn spawn_latency_probe(
+    client: Client,
+    id: BackendId,
+    events: EventSender,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let interval = std::time::Duration::from_secs(30);
+        let mut failures: u32 = 0;
+        let mut degraded = false;
+        loop {
+            tokio::time::sleep(interval).await;
+            let start = std::time::Instant::now();
+            if client.whoami().await.is_ok() {
+                failures = 0;
+                if degraded {
+                    degraded = false;
+                    emit(&events, id, status_line("Connection restored".to_string()));
+                }
+                let ms = start.elapsed().as_millis() as u64;
+                let _ = events.send(BackendMessage {
+                    backend: id,
+                    event: BackendEvent::Latency { ms },
+                });
+            } else {
+                failures += 1;
+                if failures >= 3 && !degraded {
+                    degraded = true;
+                    let _ = events.send(BackendMessage {
+                        backend: id,
+                        event: BackendEvent::Disconnected { reason: None },
+                    });
+                }
+            }
+        }
+    })
 }
 
 #[cfg(test)]
