@@ -18,8 +18,11 @@ use tokio::task::JoinHandle;
 
 use matrix_sdk::ruma::api::client::presence::set_presence;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
+use matrix_sdk::ruma::events::StateEventContentChange;
 use matrix_sdk::ruma::presence::PresenceState;
-use matrix_sdk::ruma::{OwnedRoomId, OwnedTransactionId, OwnedUserId, RoomId, UserId};
+use matrix_sdk::ruma::{
+    EventId as RumaEventId, OwnedRoomId, OwnedTransactionId, OwnedUserId, RoomId, UserId,
+};
 use matrix_sdk::{Client, Room};
 
 use matrix_sdk_ui::eyeball_im::VectorDiff;
@@ -27,6 +30,7 @@ use matrix_sdk_ui::room_list_service::filters::new_filter_non_left;
 use matrix_sdk_ui::room_list_service::RoomListItem;
 use matrix_sdk_ui::sync_service::SyncService;
 use matrix_sdk_ui::timeline::{
+    AnyOtherStateEventContentChange, EventTimelineItem,
     MembershipChange as TimelineMembershipChange, MsgLikeKind, ReactionsByKeyBySender, RoomExt,
     Timeline, TimelineEventItemId, TimelineItem, TimelineItemContent,
 };
@@ -38,9 +42,9 @@ use tirc_core::{
 };
 
 use crate::convert::{
-    already_joined, emit, emit_room_metadata, join, list_public_rooms, load_known_topics,
-    msgtype_to_body, own_or_sender_ref, room_by_target, room_target, save_known_topics, sender_ref,
-    server_ts, spawn_latency_probe,
+    already_joined, describe_room_state_change, emit, emit_room_metadata, join, list_public_rooms,
+    load_known_topics, msgtype_to_body, own_or_sender_ref, room_by_target, room_target,
+    save_known_topics, sender_ref, server_ts, spawn_latency_probe, RoomStateChange,
 };
 use crate::verify::{apply_verify, register_verification_handler, Verifications};
 use crate::MatrixBackendConfig;
@@ -470,10 +474,128 @@ async fn translate_item(
                 },
             );
         }
-        // Profile changes and room state changes (name/topic/power/...) are not
-        // surfaced on the sliding path yet; buffer name and topic still come
-        // from the room-list metadata. Tracked as a follow-up.
+        TimelineItemContent::OtherState(other) => {
+            translate_other_state(other.content(), room, event, id, events).await;
+        }
+        // Profile-only changes are intentionally not surfaced, matching the
+        // classic driver (which suppresses member profile changes). Failed-to-
+        // parse events and call notifications have no line equivalent.
         _ => {}
+    }
+}
+
+/// Renders a room state change (name/topic/power/join-rule/...) as a line,
+/// reusing the shared wording. A name or topic change also updates the buffer's
+/// tab label / topic, mirroring the classic driver's dedicated handlers.
+async fn translate_other_state(
+    other: &AnyOtherStateEventContentChange,
+    room: &Room,
+    event: &EventTimelineItem,
+    id: BackendId,
+    events: &EventSender,
+) {
+    let target = room_target(room);
+    let time = server_ts(event.timestamp());
+    let actor = sender_ref(room, event.sender()).await;
+    let actor_name = actor.display.clone().unwrap_or_else(|| actor.id.clone());
+
+    match other {
+        AnyOtherStateEventContentChange::RoomName(StateEventContentChange::Original {
+            content,
+            ..
+        }) => {
+            // Keep the tab label in sync; an empty name falls back to the
+            // member-derived display name, matching the classic name handler.
+            let name = if content.name.trim().is_empty() {
+                room.display_name()
+                    .await
+                    .map(|name| name.to_string())
+                    .unwrap_or_else(|_| target.0.clone())
+            } else {
+                content.name.clone()
+            };
+            emit(
+                events,
+                id,
+                ChatEvent::BufferName {
+                    target: target.clone(),
+                    name,
+                },
+            );
+        }
+        AnyOtherStateEventContentChange::RoomTopic(StateEventContentChange::Original {
+            content,
+            ..
+        }) => {
+            // The topic line renders the change; no separate descriptive line.
+            emit(
+                events,
+                id,
+                ChatEvent::Topic {
+                    target,
+                    who: Some(actor),
+                    topic: content.topic.clone(),
+                    time,
+                },
+            );
+            return;
+        }
+        _ => {}
+    }
+
+    if let Some((code, change)) = map_other_state(other) {
+        emit(
+            events,
+            id,
+            ChatEvent::ServerInfo {
+                target: Some(target),
+                from: Some(actor_name.clone()),
+                code: Some(code.to_string()),
+                text: describe_room_state_change(&actor_name, &change),
+                raw: None,
+                time,
+            },
+        );
+    }
+}
+
+/// Extracts the event type and a [`RoomStateChange`] from a timeline state
+/// change, or `None` for changes we do not describe (redacted ones, and types
+/// without a line). Mirrors the classic driver's `room_state_change`, but over
+/// the timeline's content-change enum.
+fn map_other_state(
+    other: &AnyOtherStateEventContentChange,
+) -> Option<(&'static str, RoomStateChange<'_>)> {
+    use AnyOtherStateEventContentChange as Other;
+    match other {
+        Other::RoomCreate(StateEventContentChange::Original { .. }) => {
+            Some(("m.room.create", RoomStateChange::Created))
+        }
+        Other::RoomName(StateEventContentChange::Original { content, .. }) => {
+            Some(("m.room.name", RoomStateChange::Renamed(&content.name)))
+        }
+        Other::RoomPowerLevels(StateEventContentChange::Original { .. }) => {
+            Some(("m.room.power_levels", RoomStateChange::PowerLevels))
+        }
+        Other::RoomJoinRules(StateEventContentChange::Original { content, .. }) => Some((
+            "m.room.join_rules",
+            RoomStateChange::JoinRule(content.join_rule.as_str()),
+        )),
+        Other::RoomHistoryVisibility(StateEventContentChange::Original { content, .. }) => Some((
+            "m.room.history_visibility",
+            RoomStateChange::HistoryVisibility(content.history_visibility.as_str()),
+        )),
+        Other::RoomGuestAccess(StateEventContentChange::Original { content, .. }) => Some((
+            "m.room.guest_access",
+            RoomStateChange::GuestAccess(content.guest_access.as_str()),
+        )),
+        Other::RoomAvatar(StateEventContentChange::Original { content, .. }) => Some((
+            "m.room.avatar",
+            RoomStateChange::Avatar {
+                removed: content.url.is_none(),
+            },
+        )),
+        _ => None,
     }
 }
 
@@ -677,19 +799,28 @@ async fn apply_command(
             target,
             id: event_id,
             key,
-            ..
+            add,
         } => {
             let Some(timeline) = timeline_for(timelines, &target) else {
                 return;
             };
-            match matrix_sdk::ruma::EventId::parse(&event_id.0) {
-                Ok(parsed) => {
-                    let item = TimelineEventItemId::EventId(parsed);
-                    if let Err(err) = timeline.toggle_reaction(&item, &key).await {
-                        log::warn!("React toggle failed: {err}");
-                    }
+            let parsed = match RumaEventId::parse(&event_id.0) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    log::warn!("React: invalid event id {}: {err}", event_id.0);
+                    return;
                 }
-                Err(err) => log::warn!("React: invalid event id {}: {err}", event_id.0),
+            };
+            // `toggle_reaction` flips the current state, so only act when the
+            // desired state differs from what we already have - otherwise a
+            // redundant add/remove would invert the reaction.
+            let own = client.user_id();
+            if own_reacted(timeline, &parsed, &key, own).await == add {
+                return;
+            }
+            let item = TimelineEventItemId::EventId(parsed);
+            if let Err(err) = timeline.toggle_reaction(&item, &key).await {
+                log::warn!("React toggle failed: {err}");
             }
         }
         // IRC-only commands are not handled here.
@@ -704,4 +835,25 @@ fn timeline_for<'a>(
 ) -> Option<&'a Arc<Timeline>> {
     let room_id = RoomId::parse(target.as_str()).ok()?;
     timelines.get(&room_id)
+}
+
+/// Whether the local user has already reacted to `event_id` with `key`, read
+/// from the timeline's current item, so a React command can skip a no-op toggle.
+async fn own_reacted(
+    timeline: &Timeline,
+    event_id: &RumaEventId,
+    key: &str,
+    own: Option<&UserId>,
+) -> bool {
+    let Some(own) = own else { return false };
+    let Some(item) = timeline.item_by_event_id(event_id).await else {
+        return false;
+    };
+    let Some(msglike) = item.content().as_msglike() else {
+        return false;
+    };
+    msglike
+        .reactions
+        .get(key)
+        .is_some_and(|senders| senders.keys().any(|user| user.as_str() == own.as_str()))
 }

@@ -175,7 +175,7 @@ fn unsupported_room_event(
 /// A recognized room state change, extracted from its ruma event so the wording
 /// in [`describe_room_state_change`] can be built (and unit-tested) without a
 /// [`Room`] or a live homeserver.
-enum RoomStateChange<'a> {
+pub(crate) enum RoomStateChange<'a> {
     Created,
     Renamed(&'a str),
     PowerLevels,
@@ -189,7 +189,7 @@ enum RoomStateChange<'a> {
 /// The wording mirrors Element's timeline strings for consistency; unrecognized
 /// enum values (the content enums are `#[non_exhaustive]`) fall back to a plain
 /// "set X to <value>" form using the raw value.
-fn describe_room_state_change(actor: &str, change: &RoomStateChange) -> String {
+pub(crate) fn describe_room_state_change(actor: &str, change: &RoomStateChange) -> String {
     match change {
         RoomStateChange::Created => format!("{actor} created the room"),
         RoomStateChange::Renamed("") => format!("{actor} removed the room name"),

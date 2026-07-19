@@ -51,8 +51,8 @@ features live in `[workspace.dependencies]`). Dependency edges are strictly acyc
 - `crates/tirc-tui` - the `ratatui` layer: `Tui` terminal lifecycle, the renderer,
   link previews, hyperlinks, wrapping, tmux passthrough.
 - `crates/tirc-backend-{irc,matrix,mattermost}` - one crate per protocol; each depends
-  only on `tirc-core`. `matrix-sdk` (and its `#![recursion_limit = "256"]`) is isolated
-  in `tirc-backend-matrix`.
+  only on `tirc-core`. `matrix-sdk`/`matrix-sdk-ui` (and its `#![recursion_limit = "256"]`)
+  are isolated in `tirc-backend-matrix`.
 - `crates/tirc` - the binary: `main.rs` (runtime/event loop) and `input.rs`
   (`InputHandler`, the app orchestrator owning the `Tui`, `&Lua`, and backend handles).
 
@@ -113,6 +113,23 @@ fire the Lua `"event"` callback before being pushed to state.
   the `tirc.event`/`tirc.buffer` Lua modules (datetime methods are native); the
   metatables live under named registry keys (`tirc_lua::meta`) and are re-pointed by
   `register_builtin_modules` on every reload, so they never go stale.
+
+### Matrix backend (`crates/tirc-backend-matrix/src/`)
+The Matrix backend has **two sync drivers behind one capability check**, both emitting the
+identical `ChatEvent`/`BackendEvent` vocabulary so nothing downstream differs:
+- `classic.rs` - the classic `/sync` driver (SDK sync loop + per-event-type handlers +
+  `room.messages` history backfill), used for homeservers without Simplified Sliding Sync.
+- `sliding.rs` - the Simplified Sliding Sync (MSC4186) driver on the `matrix-sdk-ui` Element X
+  stack (`SyncService` = room list + encryption sync under a supervisor; a per-room `Timeline`
+  whose item diffs are lowered into `ChatEvent`s). Rooms stream in from a sorted, windowed
+  room list, so the buffer list paints without a full-account sync.
+
+`lib.rs::run` authenticates once (`auth.rs`), then selects the driver: the `sliding_sync`
+config option (`auto`/`on`/`off`, default `auto`) or, for `auto`, probing
+`client.unstable_features()` for `FeatureFlag::Msc4186`. Shared, driver-agnostic translation
+(message/media/state-change wording, room metadata, latency probe) lives in `convert.rs`;
+SAS device verification in `verify.rs`. When touching translation, prefer `convert.rs` so
+both drivers stay in sync, and keep both drivers emitting the same `ChatEvent` shapes.
 
 ### Rendering (`crates/tirc-tui/src/`)
 `Tui` (`ui.rs`) drives the `ratatui` terminal; `renderer.rs` builds the layout and, for
