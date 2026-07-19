@@ -1,15 +1,24 @@
-# Lightweight local Matrix homeserver for tirc development and testing.
+# Lightweight local Matrix homeservers for tirc development and testing.
 #
-# Conduit is a single-binary homeserver that is quick to start and supports
-# both unencrypted and E2E-encrypted rooms (encryption is client-side; the
-# homeserver only relays ciphertext). Open registration is enabled for
-# convenience - this is a throwaway local instance, never expose it.
+# Two homeservers are provided so both sync drivers can be exercised:
+#
+#   * `homeserver` (Conduit, port 6167) does NOT implement Simplified Sliding
+#     Sync (MSC4186), so tirc talks to it with the classic `/sync` driver.
+#   * `homeserver-sss` (continuwuity, port 6168) advertises
+#     `org.matrix.simplified_msc3575`, so tirc auto-selects the sliding-sync
+#     driver against it. Force it either way with the `sliding_sync` server
+#     option ('on' / 'off' / 'auto').
+#
+# Both are single-binary homeservers that start quickly and support unencrypted
+# and E2E-encrypted rooms (encryption is client-side; the homeserver only relays
+# ciphertext). Open registration is enabled for convenience - these are
+# throwaway local instances, never expose them.
 #
 #   docker compose -f dev/matrix/docker-compose.yml up -d
-#   ./dev/matrix/register.sh alice alicepassword
-#   ./dev/matrix/register.sh bob   bobpassword
+#   ./dev/matrix/register.sh alice alicepassword                       # Conduit
+#   HOMESERVER=http://localhost:6168 ./dev/matrix/register.sh alice alicepassword  # continuwuity
 #
-# Then point an init.lua Matrix server entry at http://localhost:6167 with
+# Then point an init.lua Matrix server entry at the chosen homeserver with
 # user_id '@alice:localhost'.
 
 services:
@@ -38,5 +47,27 @@ services:
     volumes:
       - conduit_data:/var/lib/matrix-conduit/
 
+  # continuwuity (a maintained conduwuit fork) implements Simplified Sliding
+  # Sync, so it is the target for exercising tirc's sliding-sync driver. Its
+  # config keys mirror Conduit's, under the CONTINUWUITY_ prefix.
+  homeserver-sss:
+    image: forgejo.ellis.link/continuwuation/continuwuity:latest
+    restart: unless-stopped
+    ports:
+      - "6168:6168"
+    environment:
+      CONTINUWUITY_SERVER_NAME: localhost
+      CONTINUWUITY_ADDRESS: 0.0.0.0
+      CONTINUWUITY_PORT: 6168
+      CONTINUWUITY_DATABASE_PATH: /var/lib/continuwuity/
+      CONTINUWUITY_MAX_REQUEST_SIZE: "20000000"
+      CONTINUWUITY_ALLOW_REGISTRATION: "true"
+      CONTINUWUITY_YES_I_AM_VERY_VERY_SURE_I_WANT_AN_OPEN_REGISTRATION_SERVER_PRONE_TO_ABUSE: "true"
+      CONTINUWUITY_ALLOW_FEDERATION: "false"
+      CONTINUWUITY_ALLOW_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - continuwuity_data:/var/lib/continuwuity/
+
 volumes:
   conduit_data:
+  continuwuity_data:

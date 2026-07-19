@@ -19,7 +19,7 @@ use tokio::task::JoinHandle;
 use matrix_sdk::ruma::api::client::presence::set_presence;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 use matrix_sdk::ruma::presence::PresenceState;
-use matrix_sdk::ruma::{OwnedRoomId, OwnedTransactionId};
+use matrix_sdk::ruma::{OwnedRoomId, OwnedTransactionId, OwnedUserId, RoomId, UserId};
 use matrix_sdk::{Client, Room};
 
 use matrix_sdk_ui::eyeball_im::VectorDiff;
@@ -27,20 +27,20 @@ use matrix_sdk_ui::room_list_service::filters::new_filter_non_left;
 use matrix_sdk_ui::room_list_service::RoomListItem;
 use matrix_sdk_ui::sync_service::SyncService;
 use matrix_sdk_ui::timeline::{
-    MembershipChange as TimelineMembershipChange, MsgLikeKind, RoomExt, TimelineItem,
-    TimelineItemContent,
+    MembershipChange as TimelineMembershipChange, MsgLikeKind, ReactionsByKeyBySender, RoomExt,
+    Timeline, TimelineEventItemId, TimelineItem, TimelineItemContent,
 };
 
 use tirc_core::backend::{CommandReceiver, EventSender};
 use tirc_core::{
     BackendEvent, BackendId, BackendMessage, ChatEvent, Command, EventId, MembershipChange,
-    MessageBody, MsgKind, TxnId, UserRef,
+    MessageBody, MsgKind, TargetId, TxnId, UserRef,
 };
 
 use crate::convert::{
     already_joined, emit, emit_room_metadata, join, list_public_rooms, load_known_topics,
-    msgtype_to_body, room_by_target, room_target, save_known_topics, sender_ref, server_ts,
-    spawn_latency_probe,
+    msgtype_to_body, own_or_sender_ref, room_by_target, room_target, save_known_topics, sender_ref,
+    server_ts, spawn_latency_probe,
 };
 use crate::verify::{apply_verify, register_verification_handler, Verifications};
 use crate::MatrixBackendConfig;
@@ -49,6 +49,11 @@ use crate::MatrixBackendConfig;
 /// but a first page this size keeps the initial buffer list responsive while
 /// still covering the rooms a user is realistically looking at.
 const PAGE_SIZE: usize = 200;
+
+/// Per-message reaction snapshot: message event id -> reaction key -> the set of
+/// users who reacted with it. Diffed between timeline updates to emit reaction
+/// add/remove deltas from the aggregate the timeline exposes.
+type ReactionState = HashMap<String, HashMap<String, HashSet<OwnedUserId>>>;
 
 /// Runs the Simplified Sliding Sync driver to completion: starts the sync
 /// service, surfaces rooms from the sorted room list (spawning a timeline
@@ -92,7 +97,8 @@ pub(crate) async fn run_sliding(
         known_topics: load_known_topics(&known_topics_path),
         known_topics_path,
         seen: HashSet::new(),
-        timelines: Vec::new(),
+        timelines: HashMap::new(),
+        consumers: Vec::new(),
     };
 
     let room_list = sync_service.room_list_service().all_rooms().await?;
@@ -121,22 +127,24 @@ pub(crate) async fn run_sliding(
             }
             command = commands.recv() => {
                 let Some(command) = command else { break };
-                apply_command(&client, id, &events, &verifications, command).await;
+                apply_command(&client, id, &events, &verifications, &announcer.timelines, command)
+                    .await;
             }
         }
     }
 
-    for timeline in &announcer.timelines {
-        timeline.abort();
+    for consumer in &announcer.consumers {
+        consumer.abort();
     }
     ping_task.abort();
     sync_service.stop().await;
     Ok(())
 }
 
-/// Tracks which rooms have already been surfaced as buffers and owns the spawned
-/// per-room timeline consumers, so a room is announced (and its timeline driven)
-/// exactly once even as the room list re-orders it.
+/// Tracks which rooms have already been surfaced as buffers, keeps a handle to
+/// each room's [`Timeline`] (so commands can paginate and react), and owns the
+/// spawned per-room timeline consumers so a room is driven exactly once even as
+/// the room list re-orders it.
 struct RoomAnnouncer {
     id: BackendId,
     events: EventSender,
@@ -144,7 +152,8 @@ struct RoomAnnouncer {
     known_topics: HashMap<String, String>,
     known_topics_path: PathBuf,
     seen: HashSet<OwnedRoomId>,
-    timelines: Vec<JoinHandle<()>>,
+    timelines: HashMap<OwnedRoomId, Arc<Timeline>>,
+    consumers: Vec<JoinHandle<()>>,
 }
 
 impl RoomAnnouncer {
@@ -172,47 +181,64 @@ impl RoomAnnouncer {
         }
     }
 
-    /// Emits a room's buffer metadata the first time it is seen and spawns its
-    /// timeline consumer. `RoomListItem` derefs to the underlying [`Room`], so
-    /// the shared metadata emitter is reused unchanged.
+    /// Emits a room's buffer metadata the first time it is seen, then opens its
+    /// timeline and spawns the consumer. `RoomListItem` derefs to the underlying
+    /// [`Room`], so the shared metadata emitter is reused unchanged.
     async fn announce_room(&mut self, item: &RoomListItem) {
         let room: &Room = item;
-        if !self.seen.insert(room.room_id().to_owned()) {
+        let room_id = room.room_id().to_owned();
+        if !self.seen.insert(room_id.clone()) {
             return;
         }
         emit_room_metadata(room, self.id, &self.events, &mut self.known_topics).await;
         save_known_topics(&self.known_topics_path, &self.known_topics);
 
-        self.timelines.push(tokio::spawn(run_room_timeline(
-            room.clone(),
-            self.id,
-            self.events.clone(),
-            self.media_dir.clone(),
-        )));
+        match room.timeline().await {
+            Ok(timeline) => {
+                let timeline = Arc::new(timeline);
+                self.timelines.insert(room_id, timeline.clone());
+                self.consumers.push(tokio::spawn(run_room_timeline(
+                    timeline,
+                    room.clone(),
+                    self.id,
+                    self.events.clone(),
+                    self.media_dir.clone(),
+                )));
+            }
+            Err(err) => log::warn!("could not open timeline for {}: {err}", room.room_id()),
+        }
     }
 }
 
-/// Per-room timeline consumer: builds the room's [`Timeline`] (which owns
-/// decryption, edit collapsing, and local echo), then translates its item diffs
+/// Per-room timeline consumer: subscribes to the room's [`Timeline`] (which owns
+/// decryption, edit collapsing, and local echo) and translates its item diffs
 /// into [`ChatEvent`]s. The initial item set replaces the classic driver's
 /// history backfill; live diffs replace its per-event sync handlers.
-async fn run_room_timeline(room: Room, id: BackendId, events: EventSender, media_dir: PathBuf) {
-    let timeline = match room.timeline().await {
-        Ok(timeline) => timeline,
-        Err(err) => {
-            log::warn!(
-                "could not open timeline for {}: {err}",
-                room.room_id()
-            );
-            return;
-        }
-    };
-
+async fn run_room_timeline(
+    timeline: Arc<Timeline>,
+    room: Room,
+    id: BackendId,
+    events: EventSender,
+    media_dir: PathBuf,
+) {
     let (initial, stream) = timeline.subscribe().await;
+    let own_user = room.own_user_id().to_owned();
     let mut seen: HashSet<String> = HashSet::new();
+    let mut reactions: ReactionState = HashMap::new();
 
     for item in &initial {
-        translate_item(item, &room, id, &events, &media_dir, &mut seen, false).await;
+        translate_item(
+            item,
+            &room,
+            &own_user,
+            id,
+            &events,
+            &media_dir,
+            &mut seen,
+            &mut reactions,
+            false,
+        )
+        .await;
     }
 
     pin_mut!(stream);
@@ -221,27 +247,70 @@ async fn run_room_timeline(room: Room, id: BackendId, events: EventSender, media
             match diff {
                 VectorDiff::Append { values } => {
                     for item in &values {
-                        translate_item(item, &room, id, &events, &media_dir, &mut seen, false)
-                            .await;
+                        translate_item(
+                            item,
+                            &room,
+                            &own_user,
+                            id,
+                            &events,
+                            &media_dir,
+                            &mut seen,
+                            &mut reactions,
+                            false,
+                        )
+                        .await;
                     }
                 }
                 // A reset replaces the whole timeline (e.g. a gappy sync). Clear
-                // the seen set and re-emit; `State`'s event-id de-dup absorbs the
-                // overlap so nothing doubles.
+                // the tracked state and re-emit; `State`'s event-id de-dup
+                // absorbs the overlap so nothing doubles.
                 VectorDiff::Reset { values } => {
                     seen.clear();
+                    reactions.clear();
                     for item in &values {
-                        translate_item(item, &room, id, &events, &media_dir, &mut seen, false)
-                            .await;
+                        translate_item(
+                            item,
+                            &room,
+                            &own_user,
+                            id,
+                            &events,
+                            &media_dir,
+                            &mut seen,
+                            &mut reactions,
+                            false,
+                        )
+                        .await;
                     }
                 }
                 VectorDiff::PushFront { value }
                 | VectorDiff::PushBack { value }
                 | VectorDiff::Insert { value, .. } => {
-                    translate_item(&value, &room, id, &events, &media_dir, &mut seen, false).await;
+                    translate_item(
+                        &value,
+                        &room,
+                        &own_user,
+                        id,
+                        &events,
+                        &media_dir,
+                        &mut seen,
+                        &mut reactions,
+                        false,
+                    )
+                    .await;
                 }
                 VectorDiff::Set { value, .. } => {
-                    translate_item(&value, &room, id, &events, &media_dir, &mut seen, true).await;
+                    translate_item(
+                        &value,
+                        &room,
+                        &own_user,
+                        id,
+                        &events,
+                        &media_dir,
+                        &mut seen,
+                        &mut reactions,
+                        true,
+                    )
+                    .await;
                 }
                 VectorDiff::Clear
                 | VectorDiff::PopFront
@@ -259,13 +328,16 @@ async fn run_room_timeline(room: Room, id: BackendId, events: EventSender, media
 /// items (date dividers, read markers) and still-unsent local echoes (no event
 /// id) are skipped - the optimistic echo emitted on send already covers the
 /// latter until it confirms with a real id.
+#[allow(clippy::too_many_arguments)]
 async fn translate_item(
     item: &Arc<TimelineItem>,
     room: &Room,
+    own_user: &UserId,
     id: BackendId,
     events: &EventSender,
     media_dir: &Path,
     seen: &mut HashSet<String>,
+    reactions: &mut ReactionState,
     is_update: bool,
 ) {
     let Some(event) = item.as_event() else { return };
@@ -276,24 +348,58 @@ async fn translate_item(
     let target = room_target(room);
 
     match event.content() {
-        TimelineItemContent::MsgLike(msglike) => match &msglike.kind {
-            MsgLikeKind::Message(message) => {
-                let (kind, body) = msgtype_to_body(room, message.msgtype().clone(), media_dir).await;
-                if is_update && seen.contains(&id_str) {
-                    emit(
-                        events,
-                        id,
-                        ChatEvent::Edit {
-                            target,
-                            id: EventId(id_str),
-                            body,
-                        },
-                    );
-                } else {
-                    let echo_of = event
-                        .transaction_id()
-                        .and_then(|txn| txn.as_str().parse::<u64>().ok())
-                        .map(TxnId);
+        TimelineItemContent::MsgLike(msglike) => {
+            diff_reactions(
+                &id_str,
+                &msglike.reactions,
+                room,
+                own_user,
+                reactions,
+                id,
+                events,
+                &target,
+            )
+            .await;
+
+            match &msglike.kind {
+                MsgLikeKind::Message(message) => {
+                    let (kind, body) =
+                        msgtype_to_body(room, message.msgtype().clone(), media_dir).await;
+                    if is_update && seen.contains(&id_str) {
+                        emit(
+                            events,
+                            id,
+                            ChatEvent::Edit {
+                                target,
+                                id: EventId(id_str),
+                                body,
+                            },
+                        );
+                    } else {
+                        let echo_of = event
+                            .transaction_id()
+                            .and_then(|txn| txn.as_str().parse::<u64>().ok())
+                            .map(TxnId);
+                        emit(
+                            events,
+                            id,
+                            ChatEvent::Message {
+                                target,
+                                id: Some(EventId(id_str.clone())),
+                                sender: sender_ref(room, event.sender()).await,
+                                body,
+                                kind,
+                                echo_of,
+                                time: server_ts(event.timestamp()),
+                            },
+                        );
+                        seen.insert(id_str);
+                    }
+                }
+                MsgLikeKind::Sticker(sticker) => {
+                    if is_update && seen.contains(&id_str) {
+                        return;
+                    }
                     emit(
                         events,
                         id,
@@ -301,70 +407,51 @@ async fn translate_item(
                             target,
                             id: Some(EventId(id_str.clone())),
                             sender: sender_ref(room, event.sender()).await,
-                            body,
-                            kind,
-                            echo_of,
+                            body: MessageBody::plain(sticker.content().body.clone()),
+                            kind: MsgKind::Text,
+                            echo_of: None,
                             time: server_ts(event.timestamp()),
                         },
                     );
                     seen.insert(id_str);
                 }
-            }
-            MsgLikeKind::Sticker(sticker) => {
-                if is_update && seen.contains(&id_str) {
-                    return;
+                MsgLikeKind::UnableToDecrypt(_) => {
+                    if is_update && seen.contains(&id_str) {
+                        return;
+                    }
+                    emit(
+                        events,
+                        id,
+                        ChatEvent::Message {
+                            target,
+                            id: Some(EventId(id_str.clone())),
+                            sender: sender_ref(room, event.sender()).await,
+                            body: MessageBody::plain(
+                                "[unable to decrypt message - encryption keys unavailable]",
+                            ),
+                            kind: MsgKind::Text,
+                            echo_of: None,
+                            time: server_ts(event.timestamp()),
+                        },
+                    );
+                    seen.insert(id_str);
                 }
-                emit(
-                    events,
-                    id,
-                    ChatEvent::Message {
-                        target,
-                        id: Some(EventId(id_str.clone())),
-                        sender: sender_ref(room, event.sender()).await,
-                        body: MessageBody::plain(sticker.content().body.clone()),
-                        kind: MsgKind::Text,
-                        echo_of: None,
-                        time: server_ts(event.timestamp()),
-                    },
-                );
-                seen.insert(id_str);
-            }
-            MsgLikeKind::UnableToDecrypt(_) => {
-                if is_update && seen.contains(&id_str) {
-                    return;
+                MsgLikeKind::Redacted => {
+                    emit(
+                        events,
+                        id,
+                        ChatEvent::Redaction {
+                            target,
+                            id: EventId(id_str),
+                            by: None,
+                        },
+                    );
                 }
-                emit(
-                    events,
-                    id,
-                    ChatEvent::Message {
-                        target,
-                        id: Some(EventId(id_str.clone())),
-                        sender: sender_ref(room, event.sender()).await,
-                        body: MessageBody::plain(
-                            "[unable to decrypt message - encryption keys unavailable]",
-                        ),
-                        kind: MsgKind::Text,
-                        echo_of: None,
-                        time: server_ts(event.timestamp()),
-                    },
-                );
-                seen.insert(id_str);
+                // Polls, live location, and other message-likes have no line
+                // equivalent yet; skip rather than emit noise.
+                MsgLikeKind::Poll(_) | MsgLikeKind::LiveLocation(_) | MsgLikeKind::Other(_) => {}
             }
-            MsgLikeKind::Redacted => {
-                emit(
-                    events,
-                    id,
-                    ChatEvent::Redaction {
-                        target,
-                        id: EventId(id_str),
-                        by: None,
-                    },
-                );
-            }
-            // Polls, live location, and other message-likes have no line
-            // equivalent yet; skip rather than emit noise.
-            MsgLikeKind::Poll(_) | MsgLikeKind::LiveLocation(_) | MsgLikeKind::Other(_) => {}
-        },
+        }
         TimelineItemContent::MembershipChange(change) => {
             let Some(mapped) = map_membership(change.change(), event.sender()) else {
                 return;
@@ -390,12 +477,87 @@ async fn translate_item(
     }
 }
 
+/// Emits reaction add/remove deltas for a message by diffing the timeline's
+/// aggregate reaction set against the last snapshot we saw for it. The timeline
+/// exposes reactions as a materialized `key -> senders` map, so add/remove
+/// events are recovered by comparing successive snapshots.
+#[allow(clippy::too_many_arguments)]
+async fn diff_reactions(
+    id_str: &str,
+    current: &ReactionsByKeyBySender,
+    room: &Room,
+    own_user: &UserId,
+    state: &mut ReactionState,
+    id: BackendId,
+    events: &EventSender,
+    target: &TargetId,
+) {
+    let mut next: HashMap<String, HashSet<OwnedUserId>> = HashMap::new();
+    for (key, senders) in current.iter() {
+        next.insert(key.clone(), senders.keys().cloned().collect());
+    }
+
+    let previous = state.get(id_str).cloned().unwrap_or_default();
+
+    for (key, senders) in &next {
+        for user in senders {
+            let existed = previous.get(key).is_some_and(|set| set.contains(user));
+            if !existed {
+                emit_reaction(id_str, key, user, room, own_user, id, events, target, true).await;
+            }
+        }
+    }
+    for (key, senders) in &previous {
+        for user in senders {
+            let still_present = next.get(key).is_some_and(|set| set.contains(user));
+            if !still_present {
+                emit_reaction(id_str, key, user, room, own_user, id, events, target, false).await;
+            }
+        }
+    }
+
+    if next.is_empty() {
+        state.remove(id_str);
+    } else {
+        state.insert(id_str.to_string(), next);
+    }
+}
+
+/// Emits a single reaction add/remove line, attributing it to the reacting user
+/// (or the local user's registered nickname for our own reactions, matching the
+/// classic driver so `State` can mark it `mine`).
+#[allow(clippy::too_many_arguments)]
+async fn emit_reaction(
+    id_str: &str,
+    key: &str,
+    user: &UserId,
+    room: &Room,
+    own_user: &UserId,
+    id: BackendId,
+    events: &EventSender,
+    target: &TargetId,
+    add: bool,
+) {
+    let mine = user == own_user;
+    emit(
+        events,
+        id,
+        ChatEvent::Reaction {
+            target: target.clone(),
+            id: EventId(id_str.to_string()),
+            sender: own_or_sender_ref(room, user, mine).await,
+            key: key.to_string(),
+            add,
+        },
+    );
+}
+
 /// Maps the timeline's rich membership-change enum onto the normalized
 /// [`MembershipChange`], attributing invites to the acting sender. Returns
 /// `None` for changes we do not surface as a join/leave/invite line.
 fn map_membership(
     change: Option<TimelineMembershipChange>,
-    sender: &matrix_sdk::ruma::UserId,
+    sender: &UserId,
 ) -> Option<MembershipChange> {
     match change? {
         TimelineMembershipChange::Joined | TimelineMembershipChange::InvitationAccepted => {
@@ -420,12 +582,14 @@ fn map_membership(
 /// Applies an outgoing command on the sliding-sync path. Client-level commands
 /// (join/part/topic/list/verify/away) are identical to the classic driver;
 /// message send uses the same optimistic-echo-then-send pattern so the echoed
-/// event de-duplicates in `State`.
+/// event de-duplicates in `State`. History and reactions act on the room's
+/// [`Timeline`], looked up by target.
 async fn apply_command(
     client: &Client,
     id: BackendId,
     events: &EventSender,
     verifications: &Verifications,
+    timelines: &HashMap<OwnedRoomId, Arc<Timeline>>,
     command: Command,
 ) {
     match command {
@@ -499,22 +663,45 @@ async fn apply_command(
                 log::warn!("Away: set_presence failed: {err}");
             }
         }
-        // History pagination and reactions move onto the room `Timeline` in a
-        // follow-up. Answer FetchHistory so the UI's loading indicator resolves
-        // instead of waiting forever.
-        Command::FetchHistory { target, .. } => {
+        Command::FetchHistory { target, limit, .. } => {
+            let at_start = match timeline_for(timelines, &target) {
+                Some(timeline) => timeline.paginate_backwards(limit).await.unwrap_or(false),
+                None => false,
+            };
             let _ = events.send(BackendMessage {
                 backend: id,
-                event: BackendEvent::HistoryFetched {
-                    target,
-                    at_start: false,
-                },
+                event: BackendEvent::HistoryFetched { target, at_start },
             });
         }
-        Command::React { .. } => {
-            log::warn!("reactions on the sliding-sync path are not implemented yet");
+        Command::React {
+            target,
+            id: event_id,
+            key,
+            ..
+        } => {
+            let Some(timeline) = timeline_for(timelines, &target) else {
+                return;
+            };
+            match matrix_sdk::ruma::EventId::parse(&event_id.0) {
+                Ok(parsed) => {
+                    let item = TimelineEventItemId::EventId(parsed);
+                    if let Err(err) = timeline.toggle_reaction(&item, &key).await {
+                        log::warn!("React toggle failed: {err}");
+                    }
+                }
+                Err(err) => log::warn!("React: invalid event id {}: {err}", event_id.0),
+            }
         }
         // IRC-only commands are not handled here.
         _ => {}
     }
+}
+
+/// Looks up the room `Timeline` for a target id, if the room has been surfaced.
+fn timeline_for<'a>(
+    timelines: &'a HashMap<OwnedRoomId, Arc<Timeline>>,
+    target: &TargetId,
+) -> Option<&'a Arc<Timeline>> {
+    let room_id = RoomId::parse(target.as_str()).ok()?;
+    timelines.get(&room_id)
 }
