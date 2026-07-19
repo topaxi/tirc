@@ -53,6 +53,15 @@ matrix-sdk = { version = "0.18.0", default-features = false, features = [
 ] }
 # The high-level Element X stack (SyncService, RoomListService, Timeline) driving
 # the Simplified Sliding Sync path. Pinned to match matrix-sdk exactly.
+#
+# REVISIT ON UPGRADE: matrix-sdk 0.18's simplified sliding sync is incompatible
+# with matrix.org today - Synapse rejects the `extensions.to_device.since` token
+# the SDK sends ("should look like an int"), which the SyncService turns into a
+# terminal error, so the Matrix backend auto-falls back to the classic `/sync`
+# driver (see crates/tirc-backend-matrix/src/sliding.rs + lib.rs). When bumping
+# matrix-sdk/matrix-sdk-ui, re-test sliding sync against matrix.org; if it works,
+# the fast-first-sync path is finally usable there and the fallback should just
+# stop triggering.
 matrix-sdk-ui = { version = "0.18.0", default-features = false }
 ratatui-image = { version = "11", default-features = false, features = ["crossterm", "image-defaults"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
