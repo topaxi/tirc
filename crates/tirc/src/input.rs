@@ -1469,6 +1469,7 @@ impl<'lua> InputHandler<'lua> {
                 self.ui.redraw()?;
             }
             BuiltinCmd::Debug => {
+                state.show_debug_buffer();
                 self.focus_buffer(state, view, DEBUG_BACKEND, TargetId::STATUS);
             }
             BuiltinCmd::Reload => {

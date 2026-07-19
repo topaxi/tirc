@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ops::RangeInclusive;
 
 use chrono::{DateTime, Local};
@@ -10,7 +10,7 @@ use tirc_core::backend::BackendInfo;
 use tirc_core::logging::LogLine;
 use tirc_core::{
     BackendId, BufferId, BufferKind, ChatEvent, EventId, MemberRole, MembershipChange, MessageBody,
-    TargetId, TxnId, UserRef, DEBUG_BACKEND,
+    Protocol, TargetId, TxnId, UserRef, DEBUG_BACKEND,
 };
 
 /// Upper bound on lines retained in the debug log buffer; older lines are dropped
@@ -381,6 +381,15 @@ pub struct State {
     /// Buffer ranks snapshotted on `:bufmove`, mirrored to the persisted
     /// [`tirc_config::buffer_order::BufferOrderStore`].
     pub user_order: HashMap<BufferId, usize>,
+    /// Whether the synthetic debug log buffer has been revealed. It stays
+    /// hidden (no tab, no backend registration) until `:debug` or the
+    /// `debug_log` config flag calls [`State::show_debug_buffer`]; log lines
+    /// captured before then are held in `debug_pending`.
+    debug_visible: bool,
+    /// Log lines captured while the debug buffer is hidden, flushed into it on
+    /// reveal. Bounded to [`DEBUG_BUFFER_CAP`] so a chatty log filter cannot
+    /// grow it without bound before the buffer is ever opened.
+    debug_pending: VecDeque<StoredMessage>,
 }
 
 impl State {
@@ -512,15 +521,54 @@ impl State {
         self.buffers.sort_by(|a, _, b, _| rank(a).cmp(&rank(b)));
     }
 
-    /// Appends a captured log line to the synthetic debug backend's buffer,
-    /// capped at [`DEBUG_BUFFER_CAP`]. The line renders through the theme like any
-    /// other `ServerInfo`; routing to the status buffer means it never sets
-    /// unread/mention flags.
+    /// Records a captured log line, capped at [`DEBUG_BUFFER_CAP`]. While the
+    /// debug buffer is hidden the line is held in `debug_pending`; once revealed
+    /// it lands in the synthetic debug backend's status buffer, rendering through
+    /// the theme like any other `ServerInfo` (routing to the status buffer means
+    /// it never sets unread/mention flags).
     pub fn apply_log_line(&mut self, line: LogLine) {
         let time = Some(line.time.with_timezone(&chrono::Utc));
         let message = StoredMessage::new_at(line.into_event(), time);
-        self.ensure_buffer(BufferId::status(DEBUG_BACKEND))
-            .insert_message_bounded(message, DEBUG_BUFFER_CAP);
+        if self.debug_visible {
+            self.ensure_buffer(BufferId::status(DEBUG_BACKEND))
+                .insert_message_bounded(message, DEBUG_BUFFER_CAP);
+        } else {
+            self.debug_pending.push_back(message);
+            while self.debug_pending.len() > DEBUG_BUFFER_CAP {
+                self.debug_pending.pop_front();
+            }
+        }
+    }
+
+    /// Whether the synthetic debug log buffer is currently revealed.
+    pub fn debug_visible(&self) -> bool {
+        self.debug_visible
+    }
+
+    /// Reveals the synthetic debug log buffer: registers the internal backend
+    /// (Connected, so its tab never shows a perpetual "Connecting") and flushes
+    /// any log lines captured while it was hidden into its status buffer. The
+    /// buffer stays hidden - no tab, no backend - until this is called, via the
+    /// `:debug` command or the `debug_log` config flag, so log tabs never appear
+    /// unless asked for. Idempotent; returns whether the buffer was newly
+    /// revealed.
+    pub fn show_debug_buffer(&mut self) -> bool {
+        if self.debug_visible {
+            return false;
+        }
+        self.debug_visible = true;
+        self.register_backend(BackendInfo {
+            id: DEBUG_BACKEND,
+            protocol: Protocol::Internal,
+            name: "internal".to_string(),
+        });
+        self.set_connection_status(DEBUG_BACKEND, ConnectionStatus::Connected);
+        let pending: Vec<StoredMessage> = self.debug_pending.drain(..).collect();
+        let buffer = self.ensure_buffer(BufferId::status(DEBUG_BACKEND));
+        for message in pending {
+            buffer.insert_message_bounded(message, DEBUG_BUFFER_CAP);
+        }
+        true
     }
 
     /// Applies a normalized event from `backend`, mutating buffers, rosters, and
@@ -2799,6 +2847,7 @@ mod tests {
     #[test]
     fn log_line_routes_to_the_debug_status_buffer() {
         let mut state = test_state();
+        state.show_debug_buffer();
         state.apply_log_line(log_line(tirc_core::logging::Level::WARN, "tirc::net", "boom"));
 
         let buf = state
@@ -2821,6 +2870,7 @@ mod tests {
     #[test]
     fn debug_buffer_never_marks_unread() {
         let mut state = test_state();
+        state.show_debug_buffer();
         state.apply_log_line(log_line(tirc_core::logging::Level::ERROR, "tirc", "oops"));
 
         let buf = state.buffers.get(&BufferId::status(DEBUG_BACKEND)).unwrap();
@@ -2831,6 +2881,7 @@ mod tests {
     #[test]
     fn debug_buffer_caps_at_the_limit() {
         let mut state = test_state();
+        state.show_debug_buffer();
         for i in 0..(DEBUG_BUFFER_CAP + 50) {
             state.apply_log_line(log_line(tirc_core::logging::Level::INFO, "tirc", &format!("line {i}")));
         }
@@ -2849,12 +2900,59 @@ mod tests {
     #[test]
     fn debug_buffer_always_sorts_last() {
         let mut state = test_state();
-        // A log line creates the debug buffer first...
+        // Revealing the debug buffer creates it first...
+        state.show_debug_buffer();
         state.apply_log_line(log_line(tirc_core::logging::Level::INFO, "tirc", "early"));
         // ...then a real channel arrives on the config backend.
         state.apply(backend(), message("#late", "alice", None));
 
         let last = state.buffers.keys().last().expect("has buffers");
         assert_eq!(last.backend, DEBUG_BACKEND);
+    }
+
+    #[test]
+    fn debug_buffer_is_hidden_until_revealed() {
+        let mut state = test_state();
+        state.apply_log_line(log_line(tirc_core::logging::Level::INFO, "tirc", "before"));
+
+        // Nothing shows up while hidden: no buffer, no backend tab.
+        assert!(!state.debug_visible());
+        assert!(state.buffers.get(&BufferId::status(DEBUG_BACKEND)).is_none());
+        assert!(!state.backends.contains_key(&DEBUG_BACKEND));
+
+        // Revealing flushes the lines captured while hidden into the buffer...
+        assert!(state.show_debug_buffer());
+        state.apply_log_line(log_line(tirc_core::logging::Level::INFO, "tirc", "after"));
+        let buf = state
+            .buffers
+            .get(&BufferId::status(DEBUG_BACKEND))
+            .expect("debug buffer created on reveal");
+        assert_eq!(buf.messages.len(), 2);
+        assert!(state.backends.contains_key(&DEBUG_BACKEND));
+
+        // ...and a second reveal is a no-op.
+        assert!(!state.show_debug_buffer());
+    }
+
+    #[test]
+    fn debug_pending_is_bounded_while_hidden() {
+        let mut state = test_state();
+        for i in 0..(DEBUG_BUFFER_CAP + 50) {
+            state.apply_log_line(log_line(
+                tirc_core::logging::Level::INFO,
+                "tirc",
+                &format!("line {i}"),
+            ));
+        }
+        state.show_debug_buffer();
+
+        let buf = state.buffers.get(&BufferId::status(DEBUG_BACKEND)).unwrap();
+        assert_eq!(buf.messages.len(), DEBUG_BUFFER_CAP);
+        match &buf.messages[buf.messages.len() - 1].event {
+            ChatEvent::ServerInfo { text, .. } => {
+                assert_eq!(text, &format!("line {}", DEBUG_BUFFER_CAP + 49));
+            }
+            other => panic!("expected ServerInfo, got {other:?}"),
+        }
     }
 }

@@ -166,6 +166,12 @@ pub struct TircConfig {
     /// Quick reactions offered on the selected message. See [`QuickReactions`].
     #[serde(default)]
     pub quick_reactions: QuickReactions,
+
+    /// Reveal the internal debug log buffer on startup instead of only when
+    /// `:debug` is invoked. Log lines are captured regardless; this controls
+    /// whether the buffer's tab is shown from the start.
+    #[serde(default)]
+    pub debug_log: bool,
 }
 
 fn get_default_config() -> &'static str {

@@ -6,6 +6,7 @@
 ---@field image_protocol? 'auto' | 'kitty' | 'sixel' | 'iterm2' terminal graphics protocol for inline images; 'auto' queries the terminal, the others force a protocol (default 'auto')
 ---@field link_previews? boolean fetch Open Graph metadata for links and preview title/description/thumbnail inline (default true); set false to avoid contacting linked servers
 ---@field quick_reactions? TircQuickReactions quick reactions offered on the selected message
+---@field debug_log? boolean reveal the internal debug log buffer on startup instead of only when `:debug` is invoked (default false)
 
 --- Quick reactions shown on the selected message (message-select mode, entered
 --- with `v`). The emojis are bound to number keys `1`..`9` in select mode.
@@ -59,6 +60,7 @@ function M.create_config()
       enabled = true,
       emojis = { '👍', '❤️', '😂', '🎉', '😢', '🔥' },
     },
+    debug_log = false,
   }
 end
 
