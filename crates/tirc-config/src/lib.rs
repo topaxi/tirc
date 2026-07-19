@@ -25,6 +25,19 @@ fn default_port() -> u16 {
     6697
 }
 
+/// Whether a Matrix server entry uses Simplified Sliding Sync (MSC4186).
+/// `Auto` (the default) probes the homeserver's advertised capabilities; `On`
+/// and `Off` force one driver, useful for testing and for servers that
+/// misreport support.
+#[derive(Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SlidingSync {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
 /// One configured backend. The required `protocol` selects which fields apply;
 /// IRC fields and Matrix fields share this struct so a Lua config author fills in
 /// only the relevant subset.
@@ -73,6 +86,10 @@ pub struct ServerConfig {
     pub user_id: Option<String>,
     pub password: Option<String>,
     pub device_id: Option<String>,
+
+    /// Sliding-sync selection for Matrix servers; ignored by other protocols.
+    #[serde(default)]
+    pub sliding_sync: SlidingSync,
 
     // Mattermost fields.
     pub url: Option<String>,
@@ -638,6 +655,42 @@ mod tests {
             )
             .unwrap();
         assert!(without.aliases.is_empty());
+    }
+
+    #[test]
+    fn server_sliding_sync_deserializes_and_defaults_to_auto() {
+        let lua = Lua::new();
+
+        let server: ServerConfig = lua
+            .from_value(
+                lua.load(
+                    "{ protocol = 'matrix', homeserver = 'https://example.org', sliding_sync = 'on' }",
+                )
+                .eval()
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(server.sliding_sync, SlidingSync::On);
+
+        let off: ServerConfig = lua
+            .from_value(
+                lua.load(
+                    "{ protocol = 'matrix', homeserver = 'https://example.org', sliding_sync = 'off' }",
+                )
+                .eval()
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(off.sliding_sync, SlidingSync::Off);
+
+        let without: ServerConfig = lua
+            .from_value(
+                lua.load("{ protocol = 'matrix', homeserver = 'https://example.org' }")
+                    .eval()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(without.sliding_sync, SlidingSync::Auto);
     }
 
     #[test]

@@ -3,9 +3,28 @@
 //! keeping the device stable across runs.
 
 use matrix_sdk::authentication::matrix::MatrixSession;
+use matrix_sdk::ruma::api::FeatureFlag;
 use matrix_sdk::Client;
 
 use crate::MatrixBackendConfig;
+
+/// Whether the homeserver advertises Simplified Sliding Sync (MSC4186) in its
+/// `/versions` unstable features - the same flag the SDK's native sliding-sync
+/// client requires. A failed probe counts as unsupported (and is logged), so a
+/// flaky `/versions` round-trip degrades to the classic driver instead of
+/// erroring out.
+pub(crate) async fn supports_simplified_sliding_sync(client: &Client) -> bool {
+    match client.unstable_features().await {
+        Ok(features) => features.contains(&FeatureFlag::Msc4186),
+        Err(err) => {
+            log::warn!(
+                "could not query homeserver unstable features: {err}; \
+                 assuming no simplified sliding sync"
+            );
+            false
+        }
+    }
+}
 
 /// Builds and authenticates the client, reusing a persisted session when
 /// possible so we do not register a new device on every connect. A restored

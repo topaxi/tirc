@@ -36,6 +36,17 @@ use tirc_core::{BackendEvent, BackendId, BackendMessage, Protocol};
 use auth::authenticate;
 use convert::{emit, report_crypto_status, status_line};
 
+/// Which sync driver to use. `Auto` (the default) probes the homeserver for
+/// Simplified Sliding Sync (MSC4186) support after login; `On` and `Off` force
+/// one driver, useful for testing and for servers that misreport support.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SlidingSyncMode {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
 /// Connection parameters for a Matrix backend, built from the user config.
 #[derive(Clone, Debug)]
 pub struct MatrixBackendConfig {
@@ -47,6 +58,8 @@ pub struct MatrixBackendConfig {
     /// Override for the SQLite store directory. Defaults to an XDG data path
     /// derived from the user id when `None`.
     pub store_dir: Option<std::path::PathBuf>,
+    /// Sync driver selection; see [`SlidingSyncMode`].
+    pub sliding_sync: SlidingSyncMode,
 }
 
 pub struct MatrixBackend {
@@ -137,6 +150,21 @@ impl ChatBackend for MatrixBackend {
         emit(&events, id, status_line(format!("Logged in as {user_id}")));
         report_crypto_status(&client, id, &events).await;
 
+        let use_sliding = match self.config.sliding_sync {
+            SlidingSyncMode::On => true,
+            SlidingSyncMode::Off => false,
+            SlidingSyncMode::Auto => auth::supports_simplified_sliding_sync(&client).await,
+        };
+        if use_sliding {
+            // The sliding-sync driver lands in a follow-up change; until then
+            // detection falls back to the classic driver so capability probing
+            // is testable on its own.
+            log::info!(
+                "homeserver supports simplified sliding sync; driver not yet implemented, \
+                 using classic sync"
+            );
+        }
+
         classic::run_classic(
             client,
             id,
@@ -185,6 +213,7 @@ mod tests {
             device_id: None,
             autojoin: vec![std::env::var("TIRC_TEST_ROOM").unwrap()],
             store_dir: Some(unique_store_dir()),
+            sliding_sync: SlidingSyncMode::default(),
         };
         let room = config.autojoin[0].clone();
 
@@ -273,6 +302,7 @@ mod tests {
             device_id: None,
             autojoin: vec![room.clone()],
             store_dir: Some(unique_store_dir()),
+            sliding_sync: SlidingSyncMode::default(),
         };
 
         let backend = Box::new(MatrixBackend::new(BackendId(0), config));
@@ -327,6 +357,7 @@ mod tests {
             device_id: None,
             autojoin: vec![],
             store_dir: Some(unique_store_dir()),
+            sliding_sync: SlidingSyncMode::default(),
         };
 
         let backend = Box::new(MatrixBackend::new(BackendId(0), config));

@@ -10,7 +10,7 @@ use tirc_core::ChatEvent;
 use anyhow::Context;
 
 use tirc_backend_irc::{IrcBackend, IrcBackendConfig};
-use tirc_backend_matrix::{MatrixBackend, MatrixBackendConfig};
+use tirc_backend_matrix::{MatrixBackend, MatrixBackendConfig, SlidingSyncMode};
 use tirc_backend_mattermost::{MattermostBackend, MattermostBackendConfig};
 use tirc_config::{load_config, ServerConfig, TircConfig};
 use tirc_core::backend::{spawn as spawn_backend, ChatBackend};
@@ -91,6 +91,11 @@ fn build_backend(id: BackendId, server: &ServerConfig) -> anyhow::Result<Box<dyn
                     device_id: server.device_id.clone(),
                     autojoin: server.autojoin.clone(),
                     store_dir: None,
+                    sliding_sync: match server.sliding_sync {
+                        tirc_config::SlidingSync::Auto => SlidingSyncMode::Auto,
+                        tirc_config::SlidingSync::On => SlidingSyncMode::On,
+                        tirc_config::SlidingSync::Off => SlidingSyncMode::Off,
+                    },
                 },
             )))
         }
