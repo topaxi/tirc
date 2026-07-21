@@ -658,6 +658,50 @@ mod tests {
     }
 
     #[test]
+    fn tirc_dev_servers_deserialize_into_valid_server_configs() {
+        let lua = Lua::new();
+        register_builtin_modules(&lua).unwrap();
+
+        let servers: Vec<ServerConfig> = lua
+            .from_value(
+                lua.load("return require('tirc.dev').servers")
+                    .eval()
+                    .unwrap(),
+            )
+            .unwrap();
+
+        let protocols: Vec<Protocol> = servers.iter().map(|s| s.protocol).collect();
+        assert_eq!(
+            protocols,
+            [
+                Protocol::Irc,
+                Protocol::Matrix,
+                Protocol::Matrix,
+                Protocol::Mattermost
+            ]
+        );
+
+        let irc = &servers[0];
+        assert_eq!(irc.host.as_deref(), Some("localhost"));
+        assert!(!irc.use_tls);
+
+        let matrix = &servers[1];
+        assert_eq!(matrix.homeserver.as_deref(), Some("http://localhost:6167"));
+        assert_eq!(matrix.sliding_sync, SlidingSync::Off);
+
+        let matrix_sliding = &servers[2];
+        assert_eq!(
+            matrix_sliding.homeserver.as_deref(),
+            Some("http://localhost:6168")
+        );
+        assert_eq!(matrix_sliding.sliding_sync, SlidingSync::On);
+
+        let mattermost = &servers[3];
+        assert_eq!(mattermost.url.as_deref(), Some("http://localhost:8065"));
+        assert_eq!(mattermost.team.as_deref(), Some("testteam"));
+    }
+
+    #[test]
     fn server_sliding_sync_deserializes_and_defaults_to_auto() {
         let lua = Lua::new();
 

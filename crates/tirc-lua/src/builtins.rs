@@ -59,6 +59,7 @@ fn get_version_lua_value(lua: &Lua) -> mlua::Table {
 
 const TIRC_INIT_LUA: &str = include_str!("../lua/tirc/init.lua");
 const TIRC_CONFIG_LUA: &str = include_str!("../lua/tirc/config.lua");
+const TIRC_DEV_LUA: &str = include_str!("../lua/tirc/dev.lua");
 const TIRC_UTILS_LUA: &str = include_str!("../lua/tirc/utils.lua");
 const TIRC_PROMISE_LUA: &str = include_str!("../lua/tirc/promise.lua");
 const TIRC_PROCESS_LUA: &str = include_str!("../lua/tirc/process.lua");
@@ -82,6 +83,7 @@ const TIRC_NICK_COLORS_PLUGIN_LUA: &str = include_str!("../lua/tirc/plugins/nick
 pub const TYPE_DEFINITIONS: &[(&str, &str)] = &[
     ("tirc/init.lua", TIRC_INIT_LUA),
     ("tirc/config.lua", TIRC_CONFIG_LUA),
+    ("tirc/dev.lua", TIRC_DEV_LUA),
     ("tirc/utils.lua", TIRC_UTILS_LUA),
     ("tirc/promise.lua", TIRC_PROMISE_LUA),
     ("tirc/process.lua", TIRC_PROCESS_LUA),
@@ -130,6 +132,7 @@ fn load_builtin(
 const BUILTIN_LUA_FILES: &[&str] = &[
     "lua/tirc/init.lua",
     "lua/tirc/config.lua",
+    "lua/tirc/dev.lua",
     "lua/tirc/utils.lua",
     "lua/tirc/promise.lua",
     "lua/tirc/process.lua",
@@ -197,6 +200,10 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
     let (name, src) = load_builtin("lua/tirc/config.lua", TIRC_CONFIG_LUA);
     let config_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
     set_loaded_modules(lua, "tirc.config", config_module)?;
+
+    let (name, src) = load_builtin("lua/tirc/dev.lua", TIRC_DEV_LUA);
+    let dev_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
+    set_loaded_modules(lua, "tirc.dev", dev_module)?;
 
     let (name, src) = load_builtin("lua/tirc/utils.lua", TIRC_UTILS_LUA);
     let utils_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;

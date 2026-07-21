@@ -15,7 +15,7 @@
 ---@field emojis? string[] ordered emoji offered as quick reactions (default a small common set)
 
 --- A configured backend. `protocol` is required and selects the variant.
----@alias TircConfigServer TircIrcServer | TircMatrixServer
+---@alias TircConfigServer TircIrcServer | TircMatrixServer | TircMattermostServer
 
 --- An IRC server.
 ---@class TircIrcServer
@@ -40,10 +40,25 @@
 ---@field user_id string e.g. '@me:matrix.org'
 ---@field password string
 ---@field device_id? string
+---@field sliding_sync? 'auto' | 'on' | 'off' whether to use Simplified Sliding Sync (MSC4186); 'auto' (default) probes the homeserver
 ---@field autojoin? string[] room ids/aliases to join on connect
 ---@field aliases? table<string, string> display aliases for buffers on this server: raw target -> shown name
 ---@field buffer_order? string[] explicit tab order for this server's buffers; listed targets sort first, unlisted follow in arrival order. Include '(status)' to position the status buffer
 ---@field metadata? table<string, any> free-form data passed back to Lua for rendering (e.g. `{ label = 'matrix' }`)
+
+--- A Mattermost server.
+---@class TircMattermostServer
+---@field protocol 'mattermost'
+---@field enabled? boolean connect to this server on startup (default true); set to false to skip without removing the entry
+---@field url string base URL, e.g. 'https://mattermost.example.com'
+---@field user_id? string login id (username or email); required unless `token` is set
+---@field password? string required when using `user_id`
+---@field token? string personal access token; when set, `user_id`/`password` are ignored
+---@field team string
+---@field autojoin? string[] channel names to join on connect
+---@field aliases? table<string, string> display aliases for buffers on this server: raw target -> shown name
+---@field buffer_order? string[] explicit tab order for this server's buffers; listed targets sort first, unlisted follow in arrival order. Include '(status)' to position the status buffer
+---@field metadata? table<string, any> free-form data passed back to Lua for rendering (e.g. `{ label = 'mattermost' }`)
 
 local M = {}
 
