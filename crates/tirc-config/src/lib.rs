@@ -693,7 +693,11 @@ mod tests {
         let matrix = &servers[1];
         assert_eq!(matrix.homeserver.as_deref(), Some("https://localhost:8448"));
         assert_eq!(matrix.sliding_sync, SlidingSync::Off);
-        assert!(matrix.root_ca_pem.as_deref().unwrap().contains("BEGIN CERTIFICATE"));
+        assert!(matrix
+            .root_ca_pem
+            .as_deref()
+            .unwrap()
+            .contains("BEGIN CERTIFICATE"));
 
         let matrix_sliding = &servers[2];
         assert_eq!(

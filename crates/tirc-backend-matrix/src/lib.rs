@@ -301,6 +301,88 @@ mod tests {
         let _ = handle.await;
     }
 
+    /// Regression test for a sliding-sync-only bug: the Timeline's own
+    /// `EventTimelineItem::transaction_id()` is only populated while the SDK
+    /// still considers an item a local echo, and can already be gone by the
+    /// first diff our subscriber sees for the confirmed event - especially
+    /// under a federated room's extra latency. Without `PendingEchoes` as a
+    /// fallback, the confirmed message's `echo_of` comes back `None`,
+    /// `apply_message` never matches it to the pending optimistic echo, and
+    /// the line duplicates (one stuck pending forever, one confirmed) instead
+    /// of replacing in place. Run against a `sliding_sync = 'on'` homeserver
+    /// (see the module doc for env vars); irrelevant to the classic driver.
+    #[tokio::test]
+    #[ignore = "requires the local matrix homeserver from dev/matrix"]
+    async fn sliding_send_confirms_with_matching_echo_of() {
+        let config = MatrixBackendConfig {
+            homeserver: std::env::var("TIRC_TEST_HOMESERVER").unwrap(),
+            user_id: std::env::var("TIRC_TEST_USER").unwrap(),
+            password: std::env::var("TIRC_TEST_PASSWORD").unwrap(),
+            device_id: None,
+            autojoin: vec![std::env::var("TIRC_TEST_ROOM").unwrap()],
+            store_dir: Some(unique_store_dir()),
+            sliding_sync: SlidingSyncMode::On,
+            root_ca_pem: std::env::var("TIRC_TEST_ROOT_CA_PEM")
+                .ok()
+                .map(|path| std::fs::read_to_string(path).unwrap()),
+        };
+        let room = config.autojoin[0].clone();
+        let marker = format!("tirc-test-{}", std::process::id());
+
+        let backend = Box::new(MatrixBackend::new(BackendId(0), config));
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(backend.run(event_tx, command_rx));
+
+        assert!(
+            wait_for(&mut event_rx, |m| matches!(
+                m.event,
+                BackendEvent::Ready { .. }
+            ))
+            .await,
+            "expected a Ready event after login"
+        );
+
+        command_tx
+            .send(Command::SendMessage {
+                target: TargetId(room),
+                body: marker.clone(),
+                kind: MsgKind::Text,
+                txn: TxnId(1),
+            })
+            .unwrap();
+
+        // The pending optimistic echo (id: None) always arrives first; wait
+        // specifically for the *confirmed* delivery (a real id) and assert it
+        // carries the matching echo_of, so `apply_message` replaces the
+        // pending line in place instead of leaving both around.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let mut confirmed_echo_of = None;
+        while let Ok(Some(m)) = tokio::time::timeout_at(deadline, event_rx.recv()).await {
+            if let BackendEvent::Event(ChatEvent::Message {
+                id: Some(_),
+                echo_of,
+                body,
+                ..
+            }) = &m.event
+            {
+                if body.text == marker {
+                    confirmed_echo_of = Some(*echo_of);
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(
+            confirmed_echo_of,
+            Some(Some(TxnId(1))),
+            "expected the confirmed delivery to carry echo_of matching the sent txn"
+        );
+
+        drop(command_tx);
+        let _ = handle.await;
+    }
+
     /// Same round-trip as [`login_join_send_roundtrip`], but in an E2E-encrypted
     /// room: a throwaway setup client (a second device of the same user) joins
     /// `TIRC_TEST_ROOM` and turns on encryption, then the backend sends into it.

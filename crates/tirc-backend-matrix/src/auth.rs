@@ -48,7 +48,10 @@ pub(crate) async fn authenticate(
                 .context("invalid `root_ca_pem` for Matrix server")?;
             builder = builder.add_root_certificates(vec![cert]);
         }
-        builder.build().await.context("failed to build matrix client")
+        builder
+            .build()
+            .await
+            .context("failed to build matrix client")
     };
 
     if let Some(session) = load_session(session_path) {

@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use futures::{pin_mut, StreamExt};
 use tokio::task::JoinHandle;
@@ -21,7 +21,8 @@ use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 use matrix_sdk::ruma::events::StateEventContentChange;
 use matrix_sdk::ruma::presence::PresenceState;
 use matrix_sdk::ruma::{
-    EventId as RumaEventId, OwnedRoomId, OwnedTransactionId, OwnedUserId, RoomId, UserId,
+    EventId as RumaEventId, OwnedEventId, OwnedRoomId, OwnedTransactionId, OwnedUserId, RoomId,
+    UserId,
 };
 use matrix_sdk::{Client, Room};
 
@@ -120,6 +121,12 @@ pub(crate) async fn run_sliding(
         let _ = join(&client, room).await;
     }
 
+    // Correlates our own sends to their eventual timeline delivery. The
+    // Timeline's own `transaction_id()` on a confirmed item is unreliable (see
+    // `PendingEchoes`'s doc), so this is the fallback `translate_item` uses to
+    // still replace the optimistic echo in place instead of duplicating it.
+    let pending_echoes: PendingEchoes = Arc::new(Mutex::new(HashMap::new()));
+
     let known_topics_path = store_path.join("known_topics.json");
     let mut announcer = RoomAnnouncer {
         id,
@@ -130,6 +137,7 @@ pub(crate) async fn run_sliding(
         seen: HashSet::new(),
         timelines: HashMap::new(),
         consumers: Vec::new(),
+        pending_echoes: pending_echoes.clone(),
     };
 
     let room_list = sync_service.room_list_service().all_rooms().await?;
@@ -163,8 +171,16 @@ pub(crate) async fn run_sliding(
             }
             command = commands.recv() => {
                 let Some(command) = command else { break };
-                apply_command(&client, id, &events, &verifications, &announcer.timelines, command)
-                    .await;
+                apply_command(
+                    &client,
+                    id,
+                    &events,
+                    &verifications,
+                    &announcer.timelines,
+                    &pending_echoes,
+                    command,
+                )
+                .await;
             }
             Some(state) = service_state.next() => {
                 if let SyncState::Error(err) = state {
@@ -202,6 +218,7 @@ struct RoomAnnouncer {
     seen: HashSet<OwnedRoomId>,
     timelines: HashMap<OwnedRoomId, Arc<Timeline>>,
     consumers: Vec<JoinHandle<()>>,
+    pending_echoes: PendingEchoes,
 }
 
 impl RoomAnnouncer {
@@ -251,6 +268,7 @@ impl RoomAnnouncer {
                     self.id,
                     self.events.clone(),
                     self.media_dir.clone(),
+                    self.pending_echoes.clone(),
                 )));
             }
             Err(err) => log::warn!("could not open timeline for {}: {err}", room.room_id()),
@@ -268,22 +286,20 @@ async fn run_room_timeline(
     id: BackendId,
     events: EventSender,
     media_dir: PathBuf,
+    pending_echoes: PendingEchoes,
 ) {
     let (initial, stream) = timeline.subscribe().await;
     let own_user = room.own_user_id().to_owned();
     let mut tracker = TimelineTracker::default();
+    let ctx = RoomTimelineCtx {
+        id,
+        events: &events,
+        media_dir: &media_dir,
+        pending_echoes: &pending_echoes,
+    };
 
     for item in &initial {
-        translate_item(
-            item,
-            &room,
-            &own_user,
-            id,
-            &events,
-            &media_dir,
-            &mut tracker,
-        )
-        .await;
+        translate_item(item, &room, &own_user, &ctx, &mut tracker).await;
     }
 
     // Backfill an initial page so the buffer shows history immediately rather
@@ -307,32 +323,14 @@ async fn run_room_timeline(
             match diff {
                 VectorDiff::Append { values } | VectorDiff::Reset { values } => {
                     for item in &values {
-                        translate_item(
-                            item,
-                            &room,
-                            &own_user,
-                            id,
-                            &events,
-                            &media_dir,
-                            &mut tracker,
-                        )
-                        .await;
+                        translate_item(item, &room, &own_user, &ctx, &mut tracker).await;
                     }
                 }
                 VectorDiff::PushFront { value }
                 | VectorDiff::PushBack { value }
                 | VectorDiff::Insert { value, .. }
                 | VectorDiff::Set { value, .. } => {
-                    translate_item(
-                        &value,
-                        &room,
-                        &own_user,
-                        id,
-                        &events,
-                        &media_dir,
-                        &mut tracker,
-                    )
-                    .await;
+                    translate_item(&value, &room, &own_user, &ctx, &mut tracker).await;
                 }
                 VectorDiff::Clear
                 | VectorDiff::PopFront
@@ -343,6 +341,30 @@ async fn run_room_timeline(
         }
     }
 }
+
+/// Bundles `translate_item`'s per-backend/per-room context so its argument
+/// list stays manageable as it grows.
+struct RoomTimelineCtx<'a> {
+    id: BackendId,
+    events: &'a EventSender,
+    media_dir: &'a Path,
+    pending_echoes: &'a PendingEchoes,
+}
+
+/// Correlates our own sends to their eventual confirmed delivery, as a fallback
+/// for [`EventTimelineItem::transaction_id`]. That accessor is only populated
+/// while the SDK still considers the item a *local* echo; empirically (see the
+/// `sliding_send_confirms_with_matching_echo_of` test in `lib.rs`) the
+/// item can already have lost its local-echo status - and with it,
+/// `transaction_id()` - by the first diff `translate_item` observes for a given
+/// event id, especially under the extra latency of a federated room. Without a
+/// fallback, `apply_message` never matches the confirmed event back to the
+/// pending optimistic echo, leaving it stuck pending forever and duplicating
+/// the line. Populated in `apply_command`'s `SendMessage` handling from the
+/// send response's real event id (known synchronously, unlike the timeline's
+/// own tracking); consumed (and removed) the first time `translate_item` sees
+/// that event id.
+type PendingEchoes = Arc<Mutex<HashMap<OwnedEventId, TxnId>>>;
 
 /// Per-room de-duplication state for the timeline consumer. The timeline emits a
 /// `Set` for an item on any change (read receipts, sender-profile resolution,
@@ -374,11 +396,15 @@ async fn translate_item(
     item: &Arc<TimelineItem>,
     room: &Room,
     own_user: &UserId,
-    id: BackendId,
-    events: &EventSender,
-    media_dir: &Path,
+    ctx: &RoomTimelineCtx<'_>,
     tracker: &mut TimelineTracker,
 ) {
+    let RoomTimelineCtx {
+        id,
+        events,
+        media_dir,
+        pending_echoes,
+    } = *ctx;
     let Some(event) = item.as_event() else { return };
     let Some(event_id) = event.event_id() else {
         return;
@@ -411,7 +437,8 @@ async fn translate_item(
                             let echo_of = event
                                 .transaction_id()
                                 .and_then(|txn| txn.as_str().parse::<u64>().ok())
-                                .map(TxnId);
+                                .map(TxnId)
+                                .or_else(|| pending_echoes.lock().unwrap().remove(event_id));
                             tracker
                                 .message_bodies
                                 .insert(id_str.clone(), body.text.clone());
@@ -761,6 +788,7 @@ async fn apply_command(
     events: &EventSender,
     verifications: &Verifications,
     timelines: &HashMap<OwnedRoomId, Arc<Timeline>>,
+    pending_echoes: &PendingEchoes,
     command: Command,
 ) {
     match command {
@@ -802,7 +830,17 @@ async fn apply_command(
                 _ => RoomMessageEventContent::text_plain(body),
             };
             let transaction_id = OwnedTransactionId::from(txn.0.to_string());
-            let _ = room.send(content).with_transaction_id(transaction_id).await;
+            // Record the real event id as soon as the send response gives it to
+            // us, so `translate_item` can still recognize this as our own echo
+            // even if the Timeline's own `transaction_id()` has already been
+            // dropped by the time it delivers the confirmed event (see
+            // `PendingEchoes`).
+            if let Ok(result) = room.send(content).with_transaction_id(transaction_id).await {
+                pending_echoes
+                    .lock()
+                    .unwrap()
+                    .insert(result.response.event_id, txn);
+            }
         }
         Command::Join { target } => {
             let _ = join(client, target.as_str()).await;
