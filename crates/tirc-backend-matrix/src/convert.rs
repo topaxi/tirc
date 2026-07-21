@@ -178,6 +178,7 @@ fn unsupported_room_event(
 pub(crate) enum RoomStateChange<'a> {
     Created,
     Renamed(&'a str),
+    CanonicalAlias(Option<&'a str>),
     PowerLevels,
     JoinRule(&'a str),
     HistoryVisibility(&'a str),
@@ -195,6 +196,12 @@ pub(crate) fn describe_room_state_change(actor: &str, change: &RoomStateChange) 
         RoomStateChange::Renamed("") => format!("{actor} removed the room name"),
         RoomStateChange::Renamed(name) => {
             format!("{actor} changed the room name to {name}")
+        }
+        RoomStateChange::CanonicalAlias(None) => {
+            format!("{actor} removed the main address for this room")
+        }
+        RoomStateChange::CanonicalAlias(Some(alias)) => {
+            format!("{actor} set the main address for this room to {alias}")
         }
         RoomStateChange::PowerLevels => format!("{actor} changed the power levels"),
         RoomStateChange::JoinRule(rule) => match *rule {
@@ -239,6 +246,10 @@ fn room_state_change(state: &AnySyncStateEvent) -> Option<(&'static str, RoomSta
         AnySyncStateEvent::RoomName(SyncStateEvent::Original(event)) => {
             Some(("m.room.name", RoomStateChange::Renamed(&event.content.name)))
         }
+        AnySyncStateEvent::RoomCanonicalAlias(SyncStateEvent::Original(event)) => Some((
+            "m.room.canonical_alias",
+            RoomStateChange::CanonicalAlias(event.content.alias.as_ref().map(|a| a.as_str())),
+        )),
         AnySyncStateEvent::RoomPowerLevels(SyncStateEvent::Original(_)) => {
             Some(("m.room.power_levels", RoomStateChange::PowerLevels))
         }
@@ -886,6 +897,14 @@ mod tests {
         assert_eq!(
             describe(RoomStateChange::Renamed("")),
             "alice removed the room name"
+        );
+        assert_eq!(
+            describe(RoomStateChange::CanonicalAlias(Some("#lounge:example.org"))),
+            "alice set the main address for this room to #lounge:example.org"
+        );
+        assert_eq!(
+            describe(RoomStateChange::CanonicalAlias(None)),
+            "alice removed the main address for this room"
         );
         assert_eq!(
             describe(RoomStateChange::PowerLevels),
