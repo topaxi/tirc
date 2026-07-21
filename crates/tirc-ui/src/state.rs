@@ -289,11 +289,19 @@ impl ChatBuffer {
     /// already in the roster. Callers use this to suppress a redundant "has
     /// joined" line for a member that is already present (e.g. a re-delivered or
     /// self membership event).
-    fn upsert_member(&mut self, user: UserRef, role: MemberRole) -> bool {
+    ///
+    /// `keep_role` preserves an existing member's role instead of overwriting it,
+    /// used by the `Join` path: a join carries no authoritative role (it defaults
+    /// to [`MemberRole::Member`]), so a re-delivered join - notably our own, which
+    /// Matrix streams from the timeline after the roster was seeded with real
+    /// power levels - must not downgrade the role that `Present`/`SetRole` set.
+    fn upsert_member(&mut self, user: UserRef, role: MemberRole, keep_role: bool) -> bool {
         let is_new = match self.members.iter_mut().find(|m| m.user.id == user.id) {
             Some(member) => {
                 member.user = user;
-                member.role = role;
+                if !keep_role {
+                    member.role = role;
+                }
                 false
             }
             None => {
@@ -823,7 +831,7 @@ impl State {
         match &change {
             // Roster seeding and role changes update the member list silently.
             MembershipChange::Present { role } => {
-                buffer.upsert_member(who, *role);
+                buffer.upsert_member(who, *role, false);
                 return;
             }
             MembershipChange::SetRole { role } => {
@@ -833,8 +841,9 @@ impl State {
             MembershipChange::Join { .. } => {
                 // Suppress the line when the member is already present: a
                 // re-delivered membership (notably our own, where Matrix may omit
-                // `prev_content`) must not produce a phantom "has joined".
-                if !buffer.upsert_member(who, MemberRole::Member) {
+                // `prev_content`) must not produce a phantom "has joined" nor
+                // downgrade a role the roster already seeded (`keep_role`).
+                if !buffer.upsert_member(who, MemberRole::Member, true) {
                     return;
                 }
             }
@@ -1743,6 +1752,43 @@ mod tests {
         assert_eq!(buffer.messages.len(), 0, "roster seeding renders no line");
         assert_eq!(buffer.members[0].user.id, "alice", "op sorts first");
         assert_eq!(buffer.members[1].user.id, "carol");
+    }
+
+    #[test]
+    fn rejoin_keeps_role_seeded_by_present() {
+        // The roster seeds our own membership with its real power level, then
+        // Matrix re-delivers our join from the timeline. The join must not
+        // downgrade us back to a plain member (dropping the power-level prefix).
+        let mut state = test_state();
+        state.apply(
+            backend(),
+            ChatEvent::Membership {
+                target: TargetId::from("#tirc"),
+                who: UserRef::new("alice"),
+                change: MembershipChange::Present {
+                    role: MemberRole::Owner,
+                },
+                time: None,
+            },
+        );
+        state.apply(
+            backend(),
+            ChatEvent::Membership {
+                target: TargetId::from("#tirc"),
+                who: UserRef::new("alice"),
+                change: MembershipChange::Join { realname: None },
+                time: None,
+            },
+        );
+
+        let buffer = buffer(&state, "#tirc");
+        assert_eq!(buffer.members.len(), 1);
+        assert_eq!(buffer.members[0].role, MemberRole::Owner, "role preserved");
+        assert_eq!(
+            buffer.messages.len(),
+            0,
+            "a re-delivered join for a present member renders no line"
+        );
     }
 
     #[test]
