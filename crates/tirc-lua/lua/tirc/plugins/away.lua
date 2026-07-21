@@ -31,6 +31,7 @@ local tirc = require('tirc')
 ---@field reply? fun(event: TircEvent, text: string) executor override, replaces the send_notice reply
 ---@field now? fun(): integer clock override (default os.time)
 
+---@class TircAwayPlugin
 local M = {}
 
 --- Current away state. `last_reply` maps `backend_id .. ':' .. sender_id` to

@@ -34,6 +34,7 @@ local utils = require('tirc.utils')
 --- Maximum notification body length in bytes; longer messages are truncated.
 local MAX_BODY_LEN = 300
 
+---@class TircNotifyPlugin
 local M = {}
 
 --- The notification decision, kept pure for testability: all runtime state

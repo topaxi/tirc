@@ -72,6 +72,7 @@ const TIRC_THEME_LUA: &str = include_str!("../lua/tirc/tui/theme.lua");
 const TIRC_BAR_ROW_LUA: &str = include_str!("../lua/tirc/tui/bar_row.lua");
 const TIRC_DEFAULT_THEME_LUA: &str = include_str!("../lua/tirc/tui/themes/default.lua");
 const TIRC_SLANTED_THEME_LUA: &str = include_str!("../lua/tirc/tui/themes/slanted.lua");
+const TIRC_PLUGINS_LUA: &str = include_str!("../lua/tirc/plugins/init.lua");
 const TIRC_NOTIFY_PLUGIN_LUA: &str = include_str!("../lua/tirc/plugins/notify.lua");
 const TIRC_AWAY_PLUGIN_LUA: &str = include_str!("../lua/tirc/plugins/away.lua");
 const TIRC_NICK_COLORS_PLUGIN_LUA: &str = include_str!("../lua/tirc/plugins/nick_colors.lua");
@@ -96,6 +97,7 @@ pub const TYPE_DEFINITIONS: &[(&str, &str)] = &[
     ("tirc/tui/bar_row.lua", TIRC_BAR_ROW_LUA),
     ("tirc/tui/themes/default.lua", TIRC_DEFAULT_THEME_LUA),
     ("tirc/tui/themes/slanted.lua", TIRC_SLANTED_THEME_LUA),
+    ("tirc/plugins/init.lua", TIRC_PLUGINS_LUA),
     ("tirc/plugins/notify.lua", TIRC_NOTIFY_PLUGIN_LUA),
     ("tirc/plugins/away.lua", TIRC_AWAY_PLUGIN_LUA),
     ("tirc/plugins/nick_colors.lua", TIRC_NICK_COLORS_PLUGIN_LUA),
@@ -145,6 +147,7 @@ const BUILTIN_LUA_FILES: &[&str] = &[
     "lua/tirc/tui/bar_row.lua",
     "lua/tirc/tui/themes/default.lua",
     "lua/tirc/tui/themes/slanted.lua",
+    "lua/tirc/plugins/init.lua",
     "lua/tirc/plugins/notify.lua",
     "lua/tirc/plugins/away.lua",
     "lua/tirc/plugins/nick_colors.lua",
@@ -253,13 +256,17 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
     let slanted_theme_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
     set_loaded_modules(lua, "tirc.tui.themes.slanted", slanted_theme_module)?;
 
-    let (name, src) = load_builtin("lua/tirc/plugins/notify.lua", TIRC_NOTIFY_PLUGIN_LUA);
-    let notify_plugin_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
-    set_loaded_modules(lua, "tirc.plugins.notify", notify_plugin_module)?;
+    let (name, src) = load_builtin("lua/tirc/plugins/init.lua", TIRC_PLUGINS_LUA);
+    let plugins_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
+    set_loaded_modules(lua, "tirc.plugins", plugins_module)?;
 
     let (name, src) = load_builtin("lua/tirc/plugins/away.lua", TIRC_AWAY_PLUGIN_LUA);
     let away_plugin_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
     set_loaded_modules(lua, "tirc.plugins.away", away_plugin_module)?;
+
+    let (name, src) = load_builtin("lua/tirc/plugins/notify.lua", TIRC_NOTIFY_PLUGIN_LUA);
+    let notify_plugin_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
+    set_loaded_modules(lua, "tirc.plugins.notify", notify_plugin_module)?;
 
     let (name, src) = load_builtin(
         "lua/tirc/plugins/nick_colors.lua",

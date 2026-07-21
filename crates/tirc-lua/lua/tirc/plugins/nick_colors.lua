@@ -38,6 +38,7 @@ local DEFAULT_PALETTE = {
   '#ff87af',
 }
 
+---@class TircNickColorsPlugin
 local M = {}
 
 M.default_palette = DEFAULT_PALETTE
