@@ -7,7 +7,7 @@ use mlua::{Lua, LuaSerdeExt, Table, Value};
 use serde::Deserialize;
 
 use tirc_core::Protocol;
-use tirc_lua::builtins::{register_builtin_modules, TYPE_DEFINITIONS};
+use tirc_lua::builtins::{register_builtin_modules, type_definitions};
 use tirc_lua::get_or_create_module;
 use tirc_lua::runtime::reset_runtime;
 
@@ -217,9 +217,9 @@ const LUARC_JSON: &str = r#"{
 fn write_type_definitions(config_dir: &Path) -> anyhow::Result<()> {
     let types_dir = config_dir.join("types");
 
-    for (relative, content) in TYPE_DEFINITIONS {
+    for (relative, content) in type_definitions() {
         let path = types_dir.join(relative);
-        let up_to_date = std::fs::read_to_string(&path).is_ok_and(|existing| existing == *content);
+        let up_to_date = std::fs::read_to_string(&path).is_ok_and(|existing| existing == content);
         if !up_to_date {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -699,6 +699,14 @@ mod tests {
         let mattermost = &servers[3];
         assert_eq!(mattermost.url.as_deref(), Some("http://localhost:8065"));
         assert_eq!(mattermost.team.as_deref(), Some("testteam"));
+
+        // `cargo test` builds with debug_assertions on, so this is the real
+        // dev.lua module (not the release-mode native stand-in).
+        let is_dev: bool = lua
+            .load("return require('tirc.dev').is_dev()")
+            .eval()
+            .unwrap();
+        assert!(is_dev);
     }
 
     #[test]

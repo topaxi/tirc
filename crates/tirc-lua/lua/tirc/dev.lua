@@ -9,6 +9,13 @@
 ---
 --- Or pick individual entries (`dev.irc`, `dev.matrix`, `dev.matrix_sliding`,
 --- `dev.mattermost`) to combine only some of the dev servers with your own.
+---
+--- This module only exists in dev builds (`cargo run`, `cargo test`). Release
+--- builds register a native replacement in Rust that exposes nothing but
+--- `is_dev()`, returning `false` - none of the servers below are compiled into
+--- a release binary, not even as an embedded string. Guard usage with
+--- `is_dev()` if your init.lua is shared between a dev checkout and a release
+--- install.
 
 ---@type TircIrcServer
 local irc = {
@@ -63,5 +70,12 @@ local M = {
 
 ---@type TircConfigServer[]
 M.servers = { irc, matrix, matrix_sliding, mattermost }
+
+--- Always `true` here (the dev build). The release build's native stand-in
+--- for this module returns `false` instead.
+---@return boolean
+function M.is_dev()
+  return true
+end
 
 return M

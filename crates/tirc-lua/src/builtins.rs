@@ -59,6 +59,12 @@ fn get_version_lua_value(lua: &Lua) -> mlua::Table {
 
 const TIRC_INIT_LUA: &str = include_str!("../lua/tirc/init.lua");
 const TIRC_CONFIG_LUA: &str = include_str!("../lua/tirc/config.lua");
+// Dev-build only: exposes `TircConfigServer` entries for the throwaway servers
+// under `dev/`. Its source is not embedded in release builds at all (not even
+// as a string constant), so its contents never ship to end users; see the
+// `not(debug_assertions)` branch in `register_builtin_modules` below for the
+// production stand-in.
+#[cfg(debug_assertions)]
 const TIRC_DEV_LUA: &str = include_str!("../lua/tirc/dev.lua");
 const TIRC_UTILS_LUA: &str = include_str!("../lua/tirc/utils.lua");
 const TIRC_PROMISE_LUA: &str = include_str!("../lua/tirc/promise.lua");
@@ -81,27 +87,36 @@ const TIRC_NICK_COLORS_PLUGIN_LUA: &str = include_str!("../lua/tirc/plugins/nick
 /// Lua language server can resolve `require('tirc.*')` and the `---@class` types
 /// (`TircEvent`, `TircUi`, `TircTheme`, ...) when editing `init.lua`. Keyed by
 /// their require path relative to `types/`.
-pub const TYPE_DEFINITIONS: &[(&str, &str)] = &[
-    ("tirc/init.lua", TIRC_INIT_LUA),
-    ("tirc/config.lua", TIRC_CONFIG_LUA),
-    ("tirc/dev.lua", TIRC_DEV_LUA),
-    ("tirc/utils.lua", TIRC_UTILS_LUA),
-    ("tirc/promise.lua", TIRC_PROMISE_LUA),
-    ("tirc/process.lua", TIRC_PROCESS_LUA),
-    ("tirc/http.lua", TIRC_HTTP_LUA),
-    ("tirc/event.lua", TIRC_EVENT_LUA),
-    ("tirc/buffer.lua", TIRC_BUFFER_LUA),
-    ("tirc/hash.lua", TIRC_HASH_LUA),
-    ("tirc/class.lua", TIRC_CLASS_LUA),
-    ("tirc/tui/theme.lua", TIRC_THEME_LUA),
-    ("tirc/tui/bar_row.lua", TIRC_BAR_ROW_LUA),
-    ("tirc/tui/themes/default.lua", TIRC_DEFAULT_THEME_LUA),
-    ("tirc/tui/themes/slanted.lua", TIRC_SLANTED_THEME_LUA),
-    ("tirc/plugins/init.lua", TIRC_PLUGINS_LUA),
-    ("tirc/plugins/notify.lua", TIRC_NOTIFY_PLUGIN_LUA),
-    ("tirc/plugins/away.lua", TIRC_AWAY_PLUGIN_LUA),
-    ("tirc/plugins/nick_colors.lua", TIRC_NICK_COLORS_PLUGIN_LUA),
-];
+///
+/// A function rather than a `const` slice so `tirc/dev.lua` (whose source is not
+/// even compiled into release builds) can be omitted there instead of always
+/// existing behind a cfg'd constant reference.
+pub fn type_definitions() -> Vec<(&'static str, &'static str)> {
+    #[allow(unused_mut)]
+    let mut defs = vec![
+        ("tirc/init.lua", TIRC_INIT_LUA),
+        ("tirc/config.lua", TIRC_CONFIG_LUA),
+        ("tirc/utils.lua", TIRC_UTILS_LUA),
+        ("tirc/promise.lua", TIRC_PROMISE_LUA),
+        ("tirc/process.lua", TIRC_PROCESS_LUA),
+        ("tirc/http.lua", TIRC_HTTP_LUA),
+        ("tirc/event.lua", TIRC_EVENT_LUA),
+        ("tirc/buffer.lua", TIRC_BUFFER_LUA),
+        ("tirc/hash.lua", TIRC_HASH_LUA),
+        ("tirc/class.lua", TIRC_CLASS_LUA),
+        ("tirc/tui/theme.lua", TIRC_THEME_LUA),
+        ("tirc/tui/bar_row.lua", TIRC_BAR_ROW_LUA),
+        ("tirc/tui/themes/default.lua", TIRC_DEFAULT_THEME_LUA),
+        ("tirc/tui/themes/slanted.lua", TIRC_SLANTED_THEME_LUA),
+        ("tirc/plugins/init.lua", TIRC_PLUGINS_LUA),
+        ("tirc/plugins/notify.lua", TIRC_NOTIFY_PLUGIN_LUA),
+        ("tirc/plugins/away.lua", TIRC_AWAY_PLUGIN_LUA),
+        ("tirc/plugins/nick_colors.lua", TIRC_NICK_COLORS_PLUGIN_LUA),
+    ];
+    #[cfg(debug_assertions)]
+    defs.push(("tirc/dev.lua", TIRC_DEV_LUA));
+    defs
+}
 
 /// In debug (non-test) builds, reads a builtin Lua file from the source tree so
 /// edits are picked up without recompiling. Falls back to the embedded string if
@@ -204,9 +219,21 @@ pub fn register_builtin_modules(lua: &Lua) -> anyhow::Result<()> {
     let config_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
     set_loaded_modules(lua, "tirc.config", config_module)?;
 
-    let (name, src) = load_builtin("lua/tirc/dev.lua", TIRC_DEV_LUA);
-    let dev_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
-    set_loaded_modules(lua, "tirc.dev", dev_module)?;
+    // Dev build: the real module (server presets, hot-reloadable from disk).
+    // Release build: a native stand-in exposing only `is_dev() == false`, so
+    // none of `dev.lua`'s contents (not even its source string) ship to users.
+    #[cfg(debug_assertions)]
+    {
+        let (name, src) = load_builtin("lua/tirc/dev.lua", TIRC_DEV_LUA);
+        let dev_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;
+        set_loaded_modules(lua, "tirc.dev", dev_module)?;
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let dev_module = lua.create_table()?;
+        dev_module.set("is_dev", lua.create_function(|_, ()| Ok(false))?)?;
+        set_loaded_modules(lua, "tirc.dev", dev_module)?;
+    }
 
     let (name, src) = load_builtin("lua/tirc/utils.lua", TIRC_UTILS_LUA);
     let utils_module: Table = lua.load(src.as_ref()).set_name(name).call(())?;

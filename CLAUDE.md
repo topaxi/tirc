@@ -147,7 +147,9 @@ builds a style on the Lua side (`tirc_lua::theme::create_tirc_theme_lua_module`)
 - `init.lua` - the public `tirc` module (`create_config`, `use`, re-exports `_tirc`).
 - `config.lua` - `create_config` shape.
 - `dev.lua` - `TircConfigServer` entries for the throwaway servers under `dev/` (see
-  `dev/README.md`); not useful outside this repo's checkout.
+  `dev/README.md`). Dev-build only: `builtins.rs` only embeds/registers this file
+  when `debug_assertions` is set; a release build registers a native Rust stand-in
+  exposing only `is_dev() == false` instead, so none of its contents ship.
 - `tui/theme.lua` - theme helper API.
 - `tui/themes/default.lua` - the bundled default theme; the canonical example of how
   formatter callbacks are written.

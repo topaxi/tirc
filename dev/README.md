@@ -27,3 +27,16 @@ config.servers = utils.list_concat(dev.servers, my_real_servers)
 
 Or pick individual entries (`dev.irc`, `dev.matrix`, `dev.matrix_sliding`,
 `dev.mattermost`) to combine only some of them with your own servers.
+
+`tirc.dev` only exists in dev builds (`cargo run`). A release build registers a
+stand-in module exposing nothing but `dev.is_dev()`, which returns `false` instead of
+`true` - useful if you share one `init.lua` between a dev checkout and a release
+install:
+
+```lua
+if require('tirc.dev').is_dev() then
+  config.servers = utils.list_concat(dev.servers, my_real_servers)
+else
+  config.servers = my_real_servers
+end
+```
