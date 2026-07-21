@@ -1874,6 +1874,26 @@ mod tests {
             .set("focused_buffer", "0:#tirc")
             .unwrap();
         assert!(is_focused(&tab));
+
+        // is_hovered compares against _tirc.hovered_buffer, independently of
+        // is_focused.
+        let is_hovered = |tab: &mlua::Table| -> bool {
+            tab.get::<mlua::Function>("is_hovered")
+                .unwrap()
+                .call(tab)
+                .unwrap()
+        };
+        assert!(!is_hovered(&tab));
+        get_or_create_module(&lua, "_tirc")
+            .unwrap()
+            .set("hovered_buffer", "0:#tirc")
+            .unwrap();
+        assert!(is_hovered(&tab));
+        get_or_create_module(&lua, "_tirc")
+            .unwrap()
+            .set("hovered_buffer", "0:#other")
+            .unwrap();
+        assert!(!is_hovered(&tab));
     }
 
     #[test]

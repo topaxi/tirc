@@ -113,6 +113,7 @@ function Theme:make_styles(overrides)
     tab_focused = theme.style { fg = 'white', bg = 'darkgray' },
     tab_unread = theme.style { fg = 'white', bg = 'darkgray' },
     tab_mention = theme.style { fg = 'red', bg = 'darkgray' },
+    tab_hover = theme.style { fg = 'white', bg = 'gray' },
     backend_tab = theme.style { fg = 'gray', bg = 'darkgray' },
     backend_tab_selected = theme.style { fg = 'white', bg = 'blue' },
     bar_group_label = theme.style { fg = 'darkgray' },
@@ -120,6 +121,9 @@ function Theme:make_styles(overrides)
     reaction = theme.style { fg = 'gray', bg = 'darkgray' },
     reaction_mine = theme.style { fg = 'white', bg = 'blue' },
     reaction_hover = theme.style { fg = 'white', bg = 'gray' },
+    -- Underline rather than a background fill: a bright bg would clash with
+    -- per-nick foreground colors (e.g. from the nick_colors plugin).
+    user_hover = theme.style { underline = true },
   }
 
   if overrides then
@@ -621,10 +625,24 @@ end
 
 ---@param user TircUser
 function Theme:user(user)
+  local s = self.styles
   return {
     self:role_styles()[user.role] or {},
-    { user.name, self:nick_style(user, self.styles.blue) },
+    { user.name, self:nick_style(user, s.blue) },
   }
+end
+
+--- Optional whole-row background for a user-list entry, applied by the
+--- renderer across the full row width (unlike `user`'s spans, which only
+--- paint under the glyphs). Returning nil paints nothing extra.
+---
+--- Hovering underlines the whole row instead of using a background fill:
+--- a bright bg would fight with per-nick colors (e.g. `nick_colors`), while
+--- an underline layers on top of whatever foreground the nick already has.
+---@param user TircUser
+---@return TircThemeStyle?
+function Theme:userlist_row_style(user)
+  return user.is_hovered and self.styles.user_hover or nil
 end
 
 --- Fills a separator line: centers `label` (with a space on each side) within
@@ -710,7 +728,9 @@ function Theme:render_buffer_tab(buffer, first)
     or buffer.name
 
   local style
-  if buffer:is_focused() then
+  if buffer:is_hovered() then
+    style = s.tab_hover
+  elseif buffer:is_focused() then
     style = s.tab_focused
   elseif buffer.has_mention then
     style = s.tab_mention

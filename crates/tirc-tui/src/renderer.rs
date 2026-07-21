@@ -1815,6 +1815,13 @@ impl Renderer {
             Some(id) => tirc_mod.set("selected_backend", id.0)?,
             None => tirc_mod.set("selected_backend", mlua::Value::Nil)?,
         }
+        match &view.hovered_tab {
+            Some(BarHit::Buffer(id)) => {
+                let id_str = format!("{}:{}", id.backend.0, id.target.as_str());
+                tirc_mod.set("hovered_buffer", id_str)?;
+            }
+            _ => tirc_mod.set("hovered_buffer", mlua::Value::Nil)?,
+        }
         match &view.buffer_bar_style {
             Some(style) => tirc_mod.set("buffer_bar_style", style.as_str())?,
             None => tirc_mod.set("buffer_bar_style", mlua::Value::Nil)?,
@@ -2069,6 +2076,23 @@ impl Renderer {
         self.format_spans(lua, "user", user)
     }
 
+    /// Calls a formatter expected to return a `theme.style{...}` table (or
+    /// nil) rather than spans. Used for whole-row styling that a span-level
+    /// formatter can't reach: `List` paints `ListItem::style` across the
+    /// entire row width, while a style embedded in a span only paints under
+    /// its glyphs.
+    fn resolve_row_style<Args>(&self, lua: &mlua::Lua, name: &str, args: Args) -> Option<Style>
+    where
+        Args: mlua::IntoLuaMulti,
+    {
+        match tirc_lua::runtime::call_formatter(lua, name, args)? {
+            Ok(mlua::Value::Table(t)) if is_style_table(&t) => {
+                lua.from_value::<Style>(mlua::Value::Table(t)).ok()
+            }
+            _ => None,
+        }
+    }
+
     fn render_users(
         &self,
         f: &mut ratatui::Frame,
@@ -2076,22 +2100,39 @@ impl Renderer {
         lua: &mlua::Lua,
         title: &str,
         rect: Rect,
+        hovered_member: Option<usize>,
     ) {
         let users = members
             // Members are kept sorted by (role, name) in state, so render is a
             // pure read. TODO: make the user list scrollable.
             .iter()
+            .enumerate()
             .take(rect.height as usize)
-            .map(|member| {
-                let rendered = to_lua_user(lua, member)
-                    .ok()
-                    .and_then(|tbl| self.render_user(lua, &tbl).ok())
+            .map(|(index, member)| {
+                let is_hovered = Some(index) == hovered_member;
+                let table = to_lua_user(lua, member).ok();
+                if let Some(tbl) = &table {
+                    let _ = tbl.set("is_hovered", is_hovered);
+                }
+
+                let rendered = table
+                    .as_ref()
+                    .and_then(|tbl| self.render_user(lua, tbl).ok())
                     .unwrap_or_default();
 
-                if rendered.is_empty() {
+                let item = if rendered.is_empty() {
                     ListItem::new(member.user.name().to_string())
                 } else {
                     ListItem::new(Line::from(rendered))
+                };
+
+                let row_style = table
+                    .as_ref()
+                    .and_then(|tbl| self.resolve_row_style(lua, "userlist_row_style", tbl));
+
+                match row_style {
+                    Some(style) => item.style(style),
+                    None => item,
                 }
             });
 
@@ -2177,7 +2218,7 @@ impl Renderer {
                     .constraints([Constraint::Min(0), Constraint::Length(sidebar)])
                     .split(chunks[0]);
 
-                self.render_users(f, members, lua, &title, split[1]);
+                self.render_users(f, members, lua, &title, split[1], view.hovered_member);
                 userlist_rect = Some(split[1]);
                 split_x = Some(split[1].x);
                 split[0]
@@ -2463,7 +2504,7 @@ impl Renderer {
 mod tests {
     use super::*;
     use indoc::indoc;
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
     use ratatui::text::Span;
 
     use tirc_lua::theme::create_tirc_theme_lua_module;
@@ -2834,6 +2875,145 @@ mod tests {
 
         assert_eq!(tab.get::<String>("name")?, "alpha");
         assert_eq!(tab.get::<String>("target")?, "#a");
+        Ok(())
+    }
+
+    #[test]
+    fn update_render_context_sets_hovered_buffer_global() -> anyhow::Result<(), anyhow::Error> {
+        use tirc_core::BackendId;
+        use tirc_ui::{BarHit, State, ViewState};
+
+        let lua = mlua::Lua::new();
+        tirc_lua::builtins::register_builtin_modules(&lua)?;
+
+        let state = State::new();
+        let renderer = Renderer::new();
+        let id = BufferId::new(BackendId(0), "#a");
+
+        let hovered_buffer = |lua: &mlua::Lua| -> mlua::Result<Option<String>> {
+            lua.globals()
+                .get::<mlua::Table>("package")?
+                .get::<mlua::Table>("loaded")?
+                .get::<mlua::Table>("_tirc")?
+                .get("hovered_buffer")
+        };
+
+        // No hover: nil.
+        let view = ViewState::new();
+        renderer.update_render_context(&lua, &view, &state)?;
+        assert_eq!(hovered_buffer(&lua)?, None);
+
+        // Hovering a buffer tab sets the id string.
+        let mut view = ViewState::new();
+        view.hovered_tab = Some(BarHit::Buffer(id.clone()));
+        renderer.update_render_context(&lua, &view, &state)?;
+        assert_eq!(hovered_buffer(&lua)?, Some("0:#a".to_string()));
+
+        // Hovering a non-buffer bar element (a backend tab) leaves it nil.
+        let mut view = ViewState::new();
+        view.hovered_tab = Some(BarHit::Backend {
+            backend: BackendId(0),
+            select_only: false,
+        });
+        renderer.update_render_context(&lua, &view, &state)?;
+        assert_eq!(hovered_buffer(&lua)?, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn hovered_buffer_tab_uses_hover_style() -> anyhow::Result<(), anyhow::Error> {
+        use tirc_core::backend::BackendInfo;
+        use tirc_core::{BackendId, ChatEvent, MessageBody, MsgKind, Protocol, TargetId, UserRef};
+        use tirc_ui::{BarHit, State, ViewState};
+
+        let lua = mlua::Lua::new();
+        tirc_lua::builtins::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default'):setup({})")
+            .exec()?;
+
+        let backend = BackendId(0);
+        let mut state = State::new();
+        state.register_backend(BackendInfo {
+            id: backend,
+            protocol: Protocol::Irc,
+            name: "irc.example.com".to_string(),
+        });
+        state.apply(
+            backend,
+            ChatEvent::Message {
+                target: TargetId::from("#a"),
+                id: None,
+                sender: UserRef::new("alice"),
+                body: MessageBody::plain("hi"),
+                kind: MsgKind::Text,
+                echo_of: None,
+                time: None,
+            },
+        );
+
+        let id = BufferId::new(backend, "#a");
+        let renderer = Renderer::new();
+
+        let mut view = ViewState::new();
+        view.hovered_tab = Some(BarHit::Buffer(id.clone()));
+        renderer.update_render_context(&lua, &view, &state)?;
+
+        let buffer = state.buffers.get(&id).expect("buffer exists");
+        let tab = renderer.buffer_tab_table(&state, &lua, &id, buffer)?;
+        let spans = renderer.format_spans(&lua, "render_buffer_tab", tab)?;
+
+        assert_eq!(spans[0].style.fg, Some(Color::White));
+        assert_eq!(spans[0].style.bg, Some(Color::Gray));
+        Ok(())
+    }
+
+    /// Hovering a user-list row underlines the whole row rather than filling
+    /// it with a background color, so a per-nick foreground color (e.g. from
+    /// the `nick_colors` plugin, modeled here by the `member` role's plain
+    /// blue fallback) survives untouched.
+    #[test]
+    fn user_hover_underlines_row_without_touching_nick_color() -> anyhow::Result<(), anyhow::Error>
+    {
+        let lua = mlua::Lua::new();
+        tirc_lua::builtins::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default'):setup({})")
+            .exec()?;
+
+        let renderer = Renderer::new();
+
+        let build_user = |hovered: bool| -> mlua::Result<mlua::Table> {
+            let tbl = lua.create_table()?;
+            tbl.set("id", "alice")?;
+            tbl.set("name", "alice")?;
+            tbl.set("nickname", "alice")?;
+            tbl.set("role", "member")?;
+            tbl.set("is_hovered", hovered)?;
+            Ok(tbl)
+        };
+
+        let plain = build_user(false)?;
+        let spans = renderer.format_spans(&lua, "user", &plain)?;
+        assert_eq!(spans.last().unwrap().style.fg, Some(Color::Blue));
+        assert!(renderer
+            .resolve_row_style(&lua, "userlist_row_style", &plain)
+            .is_none());
+
+        let hovered = build_user(true)?;
+        let spans = renderer.format_spans(&lua, "user", &hovered)?;
+        assert_eq!(
+            spans.last().unwrap().style.fg,
+            Some(Color::Blue),
+            "hover must not override the nick's own color"
+        );
+
+        let row_style = renderer
+            .resolve_row_style(&lua, "userlist_row_style", &hovered)
+            .expect("row style");
+        assert!(row_style.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(row_style.fg, None);
+        assert_eq!(row_style.bg, None);
+
         Ok(())
     }
 

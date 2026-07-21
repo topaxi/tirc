@@ -68,6 +68,10 @@ pub fn create_tirc_theme_lua_module(lua: &mlua::Lua) -> mlua::Result<mlua::Table
                 style = style.bg(parse_color(&color)?);
             }
 
+            if let Ok(Some(true)) = tbl.get::<Option<bool>>("underline") {
+                style = style.add_modifier(ratatui::style::Modifier::UNDERLINED);
+            }
+
             tag_style(lua, style)
         })?,
     )?;
@@ -92,5 +96,25 @@ mod tests {
         let metatable = style.metatable().expect("style has metatable");
         assert!(metatable.get::<bool>(STYLE_MARKER).unwrap());
         assert!(is_style_table(&style));
+    }
+
+    #[test]
+    fn underline_flag_sets_the_underlined_modifier() {
+        use mlua::LuaSerdeExt;
+
+        let lua = mlua::Lua::new();
+        create_tirc_theme_lua_module(&lua).unwrap();
+
+        let style: mlua::Table = lua
+            .load("require('tirc.tui.theme').style { underline = true }")
+            .eval()
+            .unwrap();
+        let style: ratatui::style::Style = lua.from_value(mlua::Value::Table(style)).unwrap();
+
+        assert!(style
+            .add_modifier
+            .contains(ratatui::style::Modifier::UNDERLINED));
+        assert_eq!(style.fg, None);
+        assert_eq!(style.bg, None);
     }
 }

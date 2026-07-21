@@ -1264,6 +1264,17 @@ pub struct ViewState {
     /// The reaction pill currently under the mouse cursor, or `None`. Updated on
     /// mouse-move; read by the renderer to highlight that pill.
     pub hovered_reaction: Option<ReactionHit>,
+    /// The buffer-bar tab currently under the mouse cursor, or `None`. Updated
+    /// on mouse-move; read by the renderer to highlight that tab. Not cleared
+    /// on focus change: like `hovered_reaction`, it is keyed by a stable id
+    /// (the buffer/backend the hit names), so it revalidates on its own.
+    pub hovered_tab: Option<BarHit>,
+    /// Index into the focused buffer's `members` of the user-list row
+    /// currently under the mouse cursor, or `None`. Updated on mouse-move.
+    /// Unlike `hovered_tab`/`hovered_reaction`, this is a raw index rather
+    /// than a stable id, so it does not self-correct across a buffer switch -
+    /// cleared explicitly in `focus()`.
+    pub hovered_member: Option<usize>,
     /// The message selected for quick reactions in [`Mode::Select`], as an index
     /// **from the newest** message (0 = newest) in the focused buffer, or `None`
     /// when nothing is selected. Cleared on buffer switch. The renderer highlights
@@ -1423,6 +1434,10 @@ impl ViewState {
         self.exit_message_selection();
         // Trail positions are indices into the previous buffer's messages.
         self.page_trail.clear();
+        // Member indices are only meaningful within the buffer they were
+        // hit-tested against; a stale index would silently highlight the
+        // wrong nick in the new roster.
+        self.hovered_member = None;
     }
 
     /// The backend a tabbed bar layout should show: the explicitly selected one

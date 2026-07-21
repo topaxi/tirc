@@ -14,6 +14,7 @@
 ---@field is_status boolean true for the backend's status/server buffer
 ---@field is_system boolean true for a homeserver system buffer (e.g. a Matrix server-notices room)
 ---@field is_focused fun(self: TircBufferTab): boolean whether this buffer is the currently focused one
+---@field is_hovered fun(self: TircBufferTab): boolean whether this buffer's tab is currently under the mouse cursor
 ---@field focus fun(self: TircBufferTab) queue focusing this buffer (applied after the current callback)
 ---@field backend_label fun(self: TircBufferTab): string the backend's `metadata.label`, falling back to its name
 
@@ -111,6 +112,7 @@
 ---@field name string
 ---@field nickname string alias of `name` for back-compat
 ---@field role 'owner' | 'admin' | 'op' | 'halfop' | 'voice' | 'member'
+---@field is_hovered boolean true when this row is currently under the mouse cursor
 
 --- A calendar date-time. Supports `tostring(dt)` and strftime-style
 --- formatting via `dt:format('%H:%M')`.
@@ -132,6 +134,7 @@
 ---@field render_reactions? fun(event: TircEvent, hovered_key: string|nil): TircReactionPill[]
 ---@field render_quick_reactions? fun(event: TircEvent, emojis: string[], hovered_key: string|nil): TircReactionPill[]
 ---@field user? fun(user: TircUser): TircSpans
+---@field userlist_row_style? fun(user: TircUser): TircThemeStyle|nil whole-row background for a user-list entry (e.g. hovered), applied across the full row width
 ---@field render_buffer_tab? fun(buffer: TircBufferTab, first?: boolean): TircSpans
 ---@field render_buffer_bar? fun(buffers: TircBufferTab[]): TircBufferBar | TircSpans
 ---@field render_unread_separator? fun(width: integer): TircSpans
@@ -196,6 +199,7 @@
 ---@field version string
 ---@field ui TircUi
 ---@field focused_buffer? string opaque id of the currently focused buffer, or nil
+---@field hovered_buffer? string opaque id of the buffer-bar tab currently under the mouse cursor, or nil
 ---@field selected_backend? integer id of the backend a tabbed buffer bar shows (falls back to the focused buffer's backend), or nil
 ---@field buffer_bar_style? string runtime `:barstyle` override for the buffer-bar layout, or nil when the theme option applies
 ---@field mode 'normal' | 'command' | 'insert' | 'select' current editor mode

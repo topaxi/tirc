@@ -34,13 +34,18 @@ local TAB_BG_BACKEND = '#444444'
 local FOCUSED_BG = '#005f87'
 local FOCUSED_BG_BACKEND = '#0087af'
 local MENTION_BG = '#5f1f1f'
+local HOVER_BG = '#4a4a4a'
 local TAB_FG = '#9e9e9e'
 local FOCUSED_FG = '#ffffff'
 local UNREAD_FG = '#e0e0e0'
 
 ---@param buffer TircBufferTab
 ---@param focused boolean
-local function tab_bg(buffer, focused)
+---@param hovered boolean
+local function tab_bg(buffer, focused, hovered)
+  if hovered then
+    return HOVER_BG
+  end
   if focused then
     return FOCUSED_BG
   end
@@ -52,8 +57,9 @@ end
 
 ---@param buffer TircBufferTab
 ---@param focused boolean
-local function tab_fg(buffer, focused)
-  if focused then
+---@param hovered boolean
+local function tab_fg(buffer, focused, hovered)
+  if hovered or focused then
     return FOCUSED_FG
   end
   if buffer.has_unread then
@@ -64,27 +70,32 @@ end
 
 -- Returns the background of the first visible segment of a tab (backend label
 -- when shown, otherwise the room segment).
-local function tab_entry_bg(buffer, focused, show_backend)
+local function tab_entry_bg(buffer, focused, show_backend, hovered)
+  if hovered then
+    return HOVER_BG
+  end
   if show_backend then
     return focused and FOCUSED_BG_BACKEND or TAB_BG_BACKEND
   end
-  return tab_bg(buffer, focused)
+  return tab_bg(buffer, focused, hovered)
 end
 
 ---@param buffer TircBufferTab
 ---@param focused boolean
 ---@param show_backend boolean
 ---@param suffix string status/latency suffix appended to the room name segment
-local function tab_spans(buffer, focused, show_backend, suffix)
-  local bg = tab_bg(buffer, focused)
-  local fg = tab_fg(buffer, focused)
+---@param hovered boolean
+local function tab_spans(buffer, focused, show_backend, suffix, hovered)
+  local bg = tab_bg(buffer, focused, hovered)
+  local fg = tab_fg(buffer, focused, hovered)
   local label = buffer.name .. suffix
 
   if not show_backend then
     return { { ' ' .. label .. ' ', theme.style { fg = fg, bg = bg } } }
   end
 
-  local b_bg = focused and FOCUSED_BG_BACKEND or TAB_BG_BACKEND
+  local b_bg = hovered and HOVER_BG
+    or (focused and FOCUSED_BG_BACKEND or TAB_BG_BACKEND)
   return {
     {
       ' ' .. buffer:backend_label() .. ' ',
@@ -108,17 +119,20 @@ end
 ---@param first? boolean
 function Slanted:render_buffer_tab(buffer, first)
   local focused = buffer:is_focused()
+  local hovered = buffer:is_hovered()
   local show_backend = self:tab_needs_backend_prefix(buffer)
-  local bg = tab_bg(buffer, focused)
+  local bg = tab_bg(buffer, focused, hovered)
   local tab = {}
 
   if not first then
-    local entry_bg = tab_entry_bg(buffer, focused, show_backend)
+    local entry_bg = tab_entry_bg(buffer, focused, show_backend, hovered)
     tab[#tab + 1] = { SEP_LEFT, theme.style { fg = BAR_BG, bg = entry_bg } }
   end
 
   local suffix = self:tab_status_suffix(buffer)
-  for _, span in ipairs(tab_spans(buffer, focused, show_backend, suffix)) do
+  for _, span in
+    ipairs(tab_spans(buffer, focused, show_backend, suffix, hovered))
+  do
     tab[#tab + 1] = span
   end
 

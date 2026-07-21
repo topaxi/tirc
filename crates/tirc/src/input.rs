@@ -633,21 +633,8 @@ impl<'lua> InputHandler<'lua> {
                 }
                 was_selecting
             }
-            MouseEventKind::Moved => self.handle_mouse_moved(view, event.column, event.row),
+            MouseEventKind::Moved => handle_mouse_moved(view, event.column, event.row),
             _ => false,
-        }
-    }
-
-    /// Tracks the reaction pill under the cursor for hover highlighting. Returns
-    /// `true` (triggering a repaint) only when the hovered pill changes - moves
-    /// within the same pill, or over empty space, do not repaint.
-    fn handle_mouse_moved(&mut self, view: &mut ViewState, x: u16, y: u16) -> bool {
-        let hit = view.layout.reaction_at(x, y).cloned();
-        if hit != view.hovered_reaction {
-            view.hovered_reaction = hit;
-            true
-        } else {
-            false
         }
     }
 
@@ -2271,6 +2258,32 @@ fn parse_verify(arg: &str) -> VerifyAction {
     }
 }
 
+/// Tracks the reaction pill, buffer-bar tab, and user-list row under the
+/// cursor for hover highlighting. Returns `true` (triggering a repaint) when
+/// any of the three changes; moves that touch none of them (or stay within
+/// the same hit) do not repaint.
+fn handle_mouse_moved(view: &mut ViewState, x: u16, y: u16) -> bool {
+    let reaction_hit = view.layout.reaction_at(x, y).cloned();
+    let reaction_changed = reaction_hit != view.hovered_reaction;
+    if reaction_changed {
+        view.hovered_reaction = reaction_hit;
+    }
+
+    let tab_hit = view.layout.tab_at(x, y).cloned();
+    let tab_changed = tab_hit != view.hovered_tab;
+    if tab_changed {
+        view.hovered_tab = tab_hit;
+    }
+
+    let member_hit = view.layout.member_row_at(x, y);
+    let member_changed = member_hit != view.hovered_member;
+    if member_changed {
+        view.hovered_member = member_hit;
+    }
+
+    reaction_changed || tab_changed || member_changed
+}
+
 /// Removes `id` from the buffer list and refocuses a neighbour if it was the
 /// focused buffer. A pure `(State, ViewState)` transition with no `InputHandler`
 /// or terminal, so it is unit-testable directly.
@@ -2418,6 +2431,114 @@ mod tests {
             Some(b),
             "focus stays on the still-open buffer"
         );
+    }
+
+    #[test]
+    fn focus_clears_hovered_member_but_not_hovered_tab() {
+        let (_, backend) = state_with_buffers(&["#a"]);
+        let a = BufferId::new(backend, "#a");
+
+        let mut view = ViewState::new();
+        view.hovered_tab = Some(BarHit::Buffer(a.clone()));
+        view.hovered_member = Some(2);
+
+        view.focus(a.clone());
+
+        assert_eq!(
+            view.hovered_member, None,
+            "a member index only names a row in the buffer it was hit-tested against"
+        );
+        assert_eq!(
+            view.hovered_tab,
+            Some(BarHit::Buffer(a)),
+            "hovered_tab is keyed by a stable id, so it survives a focus change"
+        );
+    }
+
+    #[test]
+    fn handle_mouse_moved_reports_tab_hover_changes() {
+        let tab_rect = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 5,
+            height: 1,
+        };
+        let (_, backend) = state_with_buffers(&["#a"]);
+        let hit = BarHit::Buffer(BufferId::new(backend, "#a"));
+
+        let mut view = ViewState::new();
+        view.layout.bar_tabs = vec![(tab_rect, hit.clone())];
+
+        assert!(
+            handle_mouse_moved(&mut view, 2, 0),
+            "entering the tab's hit box changes hovered_tab"
+        );
+        assert_eq!(view.hovered_tab, Some(hit));
+        assert_eq!(view.hovered_reaction, None);
+        assert_eq!(view.hovered_member, None);
+
+        assert!(
+            !handle_mouse_moved(&mut view, 3, 0),
+            "moving within the same tab does not change anything"
+        );
+
+        assert!(
+            handle_mouse_moved(&mut view, 9, 0),
+            "leaving the tab's hit box changes hovered_tab back to None"
+        );
+        assert_eq!(view.hovered_tab, None);
+    }
+
+    #[test]
+    fn handle_mouse_moved_reports_member_hover_changes() {
+        let mut view = ViewState::new();
+        view.layout.userlist_rect = Some(ratatui::layout::Rect {
+            x: 80,
+            y: 0,
+            width: 10,
+            height: 5,
+        });
+
+        assert!(
+            handle_mouse_moved(&mut view, 85, 1),
+            "entering the user-list row changes hovered_member"
+        );
+        assert_eq!(view.hovered_member, Some(0));
+        assert_eq!(view.hovered_tab, None);
+        assert_eq!(view.hovered_reaction, None);
+
+        assert!(
+            !handle_mouse_moved(&mut view, 85, 1),
+            "moving within the same row does not change anything"
+        );
+
+        assert!(
+            handle_mouse_moved(&mut view, 85, 0),
+            "moving onto the title row changes hovered_member back to None"
+        );
+        assert_eq!(view.hovered_member, None);
+    }
+
+    #[test]
+    fn handle_mouse_moved_accumulates_independent_hover_changes() {
+        // A move that changes both `hovered_tab` and `hovered_member` at once
+        // (neither region overlaps the cursor any more) must repaint. A
+        // short-circuiting implementation that stops after the first
+        // unchanged kind - as the pre-hover-effects code did, when reactions
+        // were the only kind tracked - would wrongly report `false` here.
+        let (_, backend) = state_with_buffers(&["#a"]);
+        let mut view = ViewState::new();
+        view.hovered_tab = Some(BarHit::Buffer(BufferId::new(backend, "#a")));
+        view.hovered_member = Some(3);
+        view.hovered_reaction = None;
+
+        assert!(
+            handle_mouse_moved(&mut view, 200, 200),
+            "moving off every hit-tested region still repaints"
+        );
+        assert_eq!(view.hovered_tab, None);
+        assert_eq!(view.hovered_member, None);
+        assert_eq!(view.hovered_reaction, None);
     }
 
     #[test]

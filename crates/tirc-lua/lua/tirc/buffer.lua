@@ -11,6 +11,13 @@ function M.is_focused(self)
   return require('tirc').focused_buffer == self.id
 end
 
+--- Whether this buffer's tab is currently under the mouse cursor.
+---@param self TircBufferTab
+---@return boolean
+function M.is_hovered(self)
+  return require('tirc').hovered_buffer == self.id
+end
+
 --- Queues focusing this buffer (applied by the host after the current
 --- callback returns).
 ---@param self TircBufferTab
