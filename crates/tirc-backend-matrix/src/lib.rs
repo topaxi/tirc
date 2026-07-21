@@ -61,6 +61,9 @@ pub struct MatrixBackendConfig {
     pub store_dir: Option<std::path::PathBuf>,
     /// Sync driver selection; see [`SlidingSyncMode`].
     pub sliding_sync: SlidingSyncMode,
+    /// Extra CA certificate (PEM) to trust for this homeserver, on top of the
+    /// system trust store.
+    pub root_ca_pem: Option<String>,
 }
 
 pub struct MatrixBackend {
@@ -235,15 +238,16 @@ mod tests {
     /// normalized event. Ignored by default since it needs the homeserver:
     ///
     /// ```sh
-    /// TIRC_TEST_HOMESERVER=http://localhost:6167 \
-    /// TIRC_TEST_USER=@alice:localhost TIRC_TEST_PASSWORD=alicepassword \
-    /// TIRC_TEST_ROOM='!roomid' \
+    /// TIRC_TEST_HOMESERVER=https://localhost:8448 \
+    /// TIRC_TEST_USER=@alice:dendrite.local TIRC_TEST_PASSWORD=alicepassword \
+    /// TIRC_TEST_ROOM='!roomid:dendrite.local' \
+    /// TIRC_TEST_ROOT_CA_PEM=dev/matrix/tls/ca.cert.pem \
     ///   cargo test --lib matrix::tests -- --ignored --nocapture
     /// ```
     ///
     /// `TIRC_TEST_ROOM` must be the exact room id returned by `createRoom` -
-    /// modern room versions (e.g. Conduit's default) use server-less ids with no
-    /// `:server` suffix, and an over-qualified id will not resolve.
+    /// some room versions use server-less ids with no `:server` suffix, and an
+    /// over-qualified id will not resolve.
     #[tokio::test]
     #[ignore = "requires the local matrix homeserver from dev/matrix"]
     async fn login_join_send_roundtrip() {
@@ -255,6 +259,9 @@ mod tests {
             autojoin: vec![std::env::var("TIRC_TEST_ROOM").unwrap()],
             store_dir: Some(unique_store_dir()),
             sliding_sync: SlidingSyncMode::default(),
+            root_ca_pem: std::env::var("TIRC_TEST_ROOT_CA_PEM")
+                .ok()
+                .map(|path| std::fs::read_to_string(path).unwrap()),
         };
         let room = config.autojoin[0].clone();
 
@@ -344,6 +351,9 @@ mod tests {
             autojoin: vec![room.clone()],
             store_dir: Some(unique_store_dir()),
             sliding_sync: SlidingSyncMode::default(),
+            root_ca_pem: std::env::var("TIRC_TEST_ROOT_CA_PEM")
+                .ok()
+                .map(|path| std::fs::read_to_string(path).unwrap()),
         };
 
         let backend = Box::new(MatrixBackend::new(BackendId(0), config));
@@ -399,6 +409,9 @@ mod tests {
             autojoin: vec![],
             store_dir: Some(unique_store_dir()),
             sliding_sync: SlidingSyncMode::default(),
+            root_ca_pem: std::env::var("TIRC_TEST_ROOT_CA_PEM")
+                .ok()
+                .map(|path| std::fs::read_to_string(path).unwrap()),
         };
 
         let backend = Box::new(MatrixBackend::new(BackendId(0), config));

@@ -96,6 +96,7 @@ fn build_backend(id: BackendId, server: &ServerConfig) -> anyhow::Result<Box<dyn
                         tirc_config::SlidingSync::On => SlidingSyncMode::On,
                         tirc_config::SlidingSync::Off => SlidingSyncMode::Off,
                     },
+                    root_ca_pem: server.root_ca_pem.clone(),
                 },
             )))
         }

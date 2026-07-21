@@ -2,6 +2,7 @@
 //! restores a persisted login session (or falls back to a password login),
 //! keeping the device stable across runs.
 
+use anyhow::Context;
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::ruma::api::FeatureFlag;
 use matrix_sdk::Client;
@@ -39,11 +40,15 @@ pub(crate) async fn authenticate(
     session_path: &std::path::Path,
 ) -> anyhow::Result<Client> {
     let build_client = || async {
-        Client::builder()
+        let mut builder = Client::builder()
             .homeserver_url(&config.homeserver)
-            .sqlite_store(store_path, None)
-            .build()
-            .await
+            .sqlite_store(store_path, None);
+        if let Some(pem) = &config.root_ca_pem {
+            let cert = matrix_sdk::reqwest::Certificate::from_pem(pem.as_bytes())
+                .context("invalid `root_ca_pem` for Matrix server")?;
+            builder = builder.add_root_certificates(vec![cert]);
+        }
+        builder.build().await.context("failed to build matrix client")
     };
 
     if let Some(session) = load_session(session_path) {

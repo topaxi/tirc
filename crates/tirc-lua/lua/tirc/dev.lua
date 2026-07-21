@@ -28,14 +28,46 @@ local irc = {
   metadata = { label = 'dev-irc' },
 }
 
---- Conduit, the classic-`/sync` homeserver (see dev/matrix/docker-compose.yml).
+--- Throwaway CA (see dev/matrix/tls/) both dev homeservers' TLS certs are
+--- signed by, needed because Matrix federation is always HTTPS. The two
+--- homeservers federate with each other; see dev/matrix/README.md.
+local dev_matrix_ca_pem = [[
+-----BEGIN CERTIFICATE-----
+MIIDGzCCAgOgAwIBAgIUD8wcWUuQX+DphFFXDq2NwTf/f4QwDQYJKoZIhvcNAQEL
+BQAwHTEbMBkGA1UEAwwSdGlyYy1kZXYtbWF0cml4LWNhMB4XDTI2MDcyMTA5NDQ0
+MloXDTM2MDcxODA5NDQ0MlowHTEbMBkGA1UEAwwSdGlyYy1kZXYtbWF0cml4LWNh
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAs4a71vDBH4bcxQxA1gQh
+wlb0bOA7Fsiy4iMSUoeNv9tEAh4QjPRN8k6n5k1N5o8vUkt8GvaH6injQiKCV5tj
+GV8n5ROyt6IkAoBv5VC5PyofU5akaGRXaB24UbijxXNyXtyXGtUQrYtzi/2+B9Gl
+MzfvGKKXttecobLgICgKDuX0NdIb4TIMHQIgRztGN1zmcVOfjzk0UriPYoelAx4f
+ayj96Z8ko/jJw1RTsfs50C/Q8DHg6jnykwneEBREO3m48RMQNQXW1MufzXXF70Kb
+Th0TmtofvnudbyJbBWq3C5aozDY3X53DQX+cKPGWfdb4EbWH/c9EQCjOL0CE+U8p
+gwIDAQABo1MwUTAdBgNVHQ4EFgQUWVURIW3A/+wxpi64rxP5G/1Jd6YwHwYDVR0j
+BBgwFoAUWVURIW3A/+wxpi64rxP5G/1Jd6YwDwYDVR0TAQH/BAUwAwEB/zANBgkq
+hkiG9w0BAQsFAAOCAQEAbG4ajFwT8v+nTO3pstBqe2veEbkbUmpLLyW3+voEORzc
+pmgQ+Vqpopgqap6RrDUz2U/zb2yyK9u47h5Kq3NRx5Ue2fkK7XDim7xJA9srwOlk
+hPlPBWjBGs2+eixE1zQzcAeHBgz8Q4C+Dux4zs39uM7wgc7GlNVu+CBl/Sjof82Y
+wFhelnOLG89cKLDBLqMsRF7FaydtVOsOIQ8ay3OYNVN187ifF30ruX00rdQ0cSyl
++HpFHifmmoNAvyN5tv9ATlfrJlJIeOX/2fnJ60raE47aWpRmeRtuHjMEdk8xUyLf
+4dKUG4cinXeISrHCfIncN4DnVr8zSSCg4EEgWq7GWg==
+-----END CERTIFICATE-----
+]]
+
+--- Rooms set up by dev/matrix/setup-rooms.sh once both alice accounts exist
+--- (see dev/matrix/README.md): one local room per homeserver, plus one
+--- shared room federated between both.
+local dev_matrix_shared_room = '#tirc-dev:continuwuity.local'
+
+--- Dendrite, the classic-`/sync` homeserver (see dev/matrix/docker-compose.yml).
 ---@type TircMatrixServer
 local matrix = {
   protocol = 'matrix',
-  homeserver = 'http://localhost:6167',
-  user_id = '@alice:localhost',
+  homeserver = 'https://localhost:8448',
+  user_id = '@alice:dendrite.local',
   password = 'alicepassword',
   sliding_sync = 'off',
+  root_ca_pem = dev_matrix_ca_pem,
+  autojoin = { '#tirc-local:dendrite.local', dev_matrix_shared_room },
   metadata = { label = 'dev-matrix' },
 }
 
@@ -43,10 +75,12 @@ local matrix = {
 ---@type TircMatrixServer
 local matrix_sliding = {
   protocol = 'matrix',
-  homeserver = 'http://localhost:6168',
-  user_id = '@alice:localhost',
+  homeserver = 'https://localhost:8449',
+  user_id = '@alice:continuwuity.local',
   password = 'alicepassword',
   sliding_sync = 'on',
+  root_ca_pem = dev_matrix_ca_pem,
+  autojoin = { '#tirc-local:continuwuity.local', dev_matrix_shared_room },
   metadata = { label = 'dev-matrix-sliding' },
 }
 

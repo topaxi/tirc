@@ -3,7 +3,7 @@
 # docker-compose.yml).
 #
 #   ./dev/matrix/register.sh <username> <password>
-#   HOMESERVER=http://localhost:6168 ./dev/matrix/register.sh <username> <password>
+#   HOMESERVER=https://localhost:8449 ./dev/matrix/register.sh <username> <password>
 #
 # Open registration must be enabled (it is, in the dev compose file). Conduit
 # completes registration with a plain `m.login.dummy` stage; continuwuity
@@ -17,12 +17,21 @@ set -euo pipefail
 
 USERNAME="${1:?usage: register.sh <username> <password>}"
 PASSWORD="${2:?usage: register.sh <username> <password>}"
-HOMESERVER="${HOMESERVER:-http://localhost:6167}"
+HOMESERVER="${HOMESERVER:-https://localhost:8448}"
 REGISTRATION_TOKEN="${REGISTRATION_TOKEN:-devtoken}"
+# Both dev homeservers serve TLS off a throwaway CA (see tls/README.md); trust
+# it explicitly rather than relying on the caller's system trust store. Falls
+# back to the repo-relative path when run directly from a checkout; the
+# `register` compose service overrides this to its mounted copy.
+CACERT="${CACERT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tls/ca.cert.pem}"
+CURL_CA_ARGS=()
+if [ -f "$CACERT" ]; then
+  CURL_CA_ARGS=(--cacert "$CACERT")
+fi
 
 echo "Waiting for ${HOMESERVER} ..."
 for i in $(seq 1 30); do
-  if curl -sf "${HOMESERVER}/_matrix/client/versions" >/dev/null 2>&1; then
+  if curl -sf "${CURL_CA_ARGS[@]}" "${HOMESERVER}/_matrix/client/versions" >/dev/null 2>&1; then
     break
   fi
   if [ "$i" -eq 30 ]; then
@@ -35,12 +44,12 @@ done
 # Discovering the required auth stage always 401s with the available flows
 # and a session id (User-Interactive Auth) - unless the user already exists,
 # which 400s immediately with no session (idempotent no-op in that case).
-flows=$(curl -sS -X POST "${HOMESERVER}/_matrix/client/v3/register" \
+flows=$(curl -sS "${CURL_CA_ARGS[@]}" -X POST "${HOMESERVER}/_matrix/client/v3/register" \
   -H 'Content-Type: application/json' \
   -d "{\"username\":\"${USERNAME}\",\"password\":\"${PASSWORD}\",\"inhibit_login\":true}")
 
 if echo "$flows" | grep -q 'M_USER_IN_USE'; then
-  echo "@${USERNAME}:localhost already registered, skipping"
+  echo "${USERNAME} already registered on ${HOMESERVER}, skipping"
   exit 0
 fi
 
@@ -52,7 +61,7 @@ else
   auth="{\"type\":\"m.login.dummy\",\"session\":\"${session}\"}"
 fi
 
-curl -fsSL -X POST "${HOMESERVER}/_matrix/client/v3/register" \
+curl -fsSL "${CURL_CA_ARGS[@]}" -X POST "${HOMESERVER}/_matrix/client/v3/register" \
   -H 'Content-Type: application/json' \
   -d "{\"username\":\"${USERNAME}\",\"password\":\"${PASSWORD}\",\"inhibit_login\":true,\"auth\":${auth}}" \
-  && echo "registered @${USERNAME}:localhost"
+  && echo "registered ${USERNAME} on ${HOMESERVER}"

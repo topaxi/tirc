@@ -17,6 +17,11 @@ continuwuity (the Matrix sliding-sync homeserver) gates its first account behind
 random one-time token it only ever prints to its own logs, so that one needs a single
 manual step - see [`matrix/README.md`](matrix/README.md#create-users).
 
+The two dev Matrix homeservers also federate with each other - after the manual
+continuwuity step above, run `dev/matrix/setup-rooms.sh` once to create a local room on
+each homeserver plus the shared federated room both `dev.lua` Matrix entries autojoin.
+See [`matrix/README.md`](matrix/README.md#create-the-dev-rooms).
+
 ## Pointing tirc at them
 
 `require('tirc.dev')` (bundled, no filesystem access needed) has a ready-made

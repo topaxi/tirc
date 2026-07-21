@@ -91,6 +91,11 @@ pub struct ServerConfig {
     #[serde(default)]
     pub sliding_sync: SlidingSync,
 
+    /// Extra CA certificate (PEM) to trust for this homeserver's TLS
+    /// connections, in addition to the system trust store. For homeservers
+    /// behind a private/self-signed CA (e.g. `dev/matrix`'s federated setup).
+    pub root_ca_pem: Option<String>,
+
     // Mattermost fields.
     pub url: Option<String>,
     pub token: Option<String>,
@@ -686,13 +691,14 @@ mod tests {
         assert!(!irc.use_tls);
 
         let matrix = &servers[1];
-        assert_eq!(matrix.homeserver.as_deref(), Some("http://localhost:6167"));
+        assert_eq!(matrix.homeserver.as_deref(), Some("https://localhost:8448"));
         assert_eq!(matrix.sliding_sync, SlidingSync::Off);
+        assert!(matrix.root_ca_pem.as_deref().unwrap().contains("BEGIN CERTIFICATE"));
 
         let matrix_sliding = &servers[2];
         assert_eq!(
             matrix_sliding.homeserver.as_deref(),
-            Some("http://localhost:6168")
+            Some("https://localhost:8449")
         );
         assert_eq!(matrix_sliding.sliding_sync, SlidingSync::On);
 

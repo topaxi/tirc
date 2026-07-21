@@ -1,105 +1,140 @@
 # Lightweight local Matrix homeservers for tirc development and testing.
 #
-# Two homeservers are provided so both sync drivers can be exercised:
+# Two homeservers run so both sync drivers can be exercised, and they federate
+# with each other so a room hosted on one is joinable from the other:
 #
-#   * `homeserver` (Conduit, port 6167) does NOT implement Simplified Sliding
-#     Sync (MSC4186), so tirc talks to it with the classic `/sync` driver.
-#   * `homeserver-sss` (continuwuity, port 6168) advertises
-#     `org.matrix.simplified_msc3575`, so tirc auto-selects the sliding-sync
-#     driver against it. Force it either way with the `sliding_sync` server
-#     option ('on' / 'off' / 'auto').
+#   * `homeserver` (Dendrite, server name dendrite.local, host port 8448) does
+#     NOT implement Simplified Sliding Sync (MSC4186), so tirc talks to it
+#     with the classic `/sync` driver.
+#   * `homeserver-sss` (continuwuity, server name continuwuity.local, host
+#     port 8449) advertises `org.matrix.simplified_msc3575`, so tirc
+#     auto-selects the sliding-sync driver against it. Force it either way
+#     with the `sliding_sync` server option ('on' / 'off' / 'auto').
 #
-# Both are single-binary homeservers that start quickly and support unencrypted
-# and E2E-encrypted rooms (encryption is client-side; the homeserver only relays
-# ciphertext). Open registration is enabled for convenience - these are
-# throwaway local instances, never expose them.
+# Both support unencrypted and E2E-encrypted rooms (encryption is
+# client-side; the homeserver only relays ciphertext). Open registration is
+# enabled for convenience - these are throwaway local instances, never
+# expose them.
+#
+# Federation between them requires real TLS (the Matrix federation API is
+# always HTTPS), so both serve their single combined client+federation port
+# over TLS using a throwaway CA committed under tls/. Point tirc's
+# `root_ca_pem` server option at that CA to trust it - dev.lua already does
+# this for you.
+#
+# (An earlier version of this file paired continuwuity with Conduit instead
+# of Dendrite. Conduit is unmaintained and rejects every federation request
+# signed by continuwuity with a deterministic signature-verification error -
+# reproduced with a fresh minimal room and a retried send, not a timing
+# fluke - so continuwuity users' messages could never reach it. Dendrite is
+# matrix.org's own actively maintained classic-sync implementation and
+# federates cleanly with continuwuity in both directions; see README.md for
+# how that was verified.)
 #
 #   docker compose -f dev/matrix/docker-compose.yml up -d
 #
-# `alice` (matching dev.lua) is registered on Conduit automatically, by the
+# `alice` (matching dev.lua) is registered on Dendrite automatically, by the
 # `register` service below (see register.sh). continuwuity has no equivalent -
 # its first account needs one manual step, since it gates it behind a random
 # one-time token printed to `docker logs tirc-homeserver-sss` (see README.md
 # for the exact command). Use register.sh yourself for any additional
 # accounts on either homeserver:
 #
-#   ./dev/matrix/register.sh bob bobpassword                            # Conduit
-#   HOMESERVER=http://localhost:6168 ./dev/matrix/register.sh bob bobpassword  # continuwuity
+#   ./dev/matrix/register.sh bob bobpassword                                     # Dendrite
+#   HOMESERVER=https://localhost:8449 ./dev/matrix/register.sh bob bobpassword   # continuwuity
 #
-# Then point an init.lua Matrix server entry at the chosen homeserver with
-# user_id '@alice:localhost'.
+# Once continuwuity's alice exists, ./dev/matrix/setup-rooms.sh creates a
+# local room on each homeserver plus the shared federated room dev.lua's
+# Matrix entries autojoin.
+#
+# Then point an init.lua Matrix server entry at the chosen homeserver; see
+# README.md for the exact `user_id`/`homeserver`/`root_ca_pem` values.
 
 services:
   homeserver:
-    # Fully-qualified so it also resolves under podman (no unqualified search).
-    image: docker.io/matrixconduit/matrix-conduit:latest
+    image: docker.io/matrixdotorg/dendrite-monolith:latest
     # Fixed name so `docker logs`/`docker exec` work the same whether this was
     # started standalone or via the root docker-compose.yml (which uses a
     # different compose project name, so `docker compose logs` wouldn't find
     # containers started the other way, but `docker logs <name>` always will).
     container_name: tirc-homeserver
     restart: unless-stopped
+    # Alias so continuwuity (and any other container) can resolve this server
+    # by its Matrix server_name for federation traffic.
+    networks:
+      default:
+        aliases:
+          - dendrite.local
     ports:
-      - "6167:6167"
-    environment:
-      # Empty path = configure purely from CONDUIT_* env vars (no toml file).
-      CONDUIT_CONFIG: ""
-      CONDUIT_SERVER_NAME: localhost
-      # Bind to all interfaces so the mapped port is reachable from the host.
-      CONDUIT_ADDRESS: 0.0.0.0
-      CONDUIT_DATABASE_BACKEND: rocksdb
-      CONDUIT_DATABASE_PATH: /var/lib/matrix-conduit/
-      CONDUIT_PORT: 6167
-      CONDUIT_MAX_REQUEST_SIZE: "20000000"
-      CONDUIT_ALLOW_REGISTRATION: "true"
-      # Local throwaway instance: permit open registration without a token.
-      CONDUIT_YES_I_AM_VERY_VERY_SURE_I_WANT_AN_OPEN_REGISTRATION_SERVER_PRONE_TO_ABUSE: "true"
-      CONDUIT_ALLOW_FEDERATION: "false"
-      CONDUIT_ALLOW_CHECK_FOR_UPDATES: "false"
-      CONDUIT_TRUSTED_SERVERS: '["matrix.org"]'
+      - "8448:8448"
+    command:
+      - "-config=/etc/dendrite/dendrite.yaml"
+      - "-https-bind-address=:8448"
+      - "-tls-cert=/tls/cert.pem"
+      - "-tls-key=/tls/key.pem"
+      # Local throwaway instance: permit open registration without captcha.
+      - "-really-enable-open-registration"
     volumes:
-      - conduit_data:/var/lib/matrix-conduit/
+      - dendrite_data:/var/dendrite
+      - ./dendrite.yaml:/etc/dendrite/dendrite.yaml:ro
+      - ./tls/dendrite_signing_key.pem:/var/dendrite/matrix_key.pem:ro
+      - ./tls/dendrite.cert.pem:/tls/cert.pem:ro
+      - ./tls/dendrite.key.pem:/tls/key.pem:ro
+      # Shadow the image's real trust bundle with our CA-only one so
+      # Dendrite's own outbound federation requests trust continuwuity's cert.
+      - ./tls/ca.cert.pem:/etc/ssl/certs/ca-certificates.crt:ro
 
   # continuwuity (a maintained conduwuit fork) implements Simplified Sliding
   # Sync, so it is the target for exercising tirc's sliding-sync driver. Its
   # config keys mirror Conduit's, under the CONTINUWUITY_ prefix.
   #
-  # Unlike Conduit, continuwuity always gates its *first* account (on a fresh
-  # database) behind a random one-time token printed to the container's own
-  # logs, regardless of the registration flags below - there is no way to
-  # automate that first account non-interactively. (An earlier version of
-  # this file tried creating it via `command: conduwuit --execute "users
-  # create-user ..."` at boot; that crash-loops instead, because the command
-  # is unconditional and fatal on every restart once the account already
-  # exists, and `--execute` has no idempotent/"skip if present" form. Do not
-  # reintroduce it.) So the first account is a one-time manual step - see
-  # README.md - after which the *configured* token (CONTINUWUITY_
-  # REGISTRATION_TOKEN, matching register.sh's REGISTRATION_TOKEN) takes over
-  # for any additional accounts (e.g. bob) via register.sh, same as Conduit.
+  # It always gates its *first* account (on a fresh database) behind a
+  # random one-time token printed to the container's own logs, regardless of
+  # the registration flags below - there is no way to automate that first
+  # account non-interactively. (An earlier version of this file tried
+  # creating it via `command: conduwuit --execute "users create-user ..."` at
+  # boot; that crash-loops instead, because the command is unconditional and
+  # fatal on every restart once the account already exists, and `--execute`
+  # has no idempotent/"skip if present" form. Do not reintroduce it.) So the
+  # first account is a one-time manual step - see README.md - after which the
+  # *configured* token (CONTINUWUITY_REGISTRATION_TOKEN, matching
+  # register.sh's REGISTRATION_TOKEN) takes over for any additional accounts
+  # (e.g. bob) via register.sh, same as Dendrite.
   homeserver-sss:
     image: forgejo.ellis.link/continuwuation/continuwuity:latest
     container_name: tirc-homeserver-sss
     restart: unless-stopped
+    networks:
+      default:
+        aliases:
+          - continuwuity.local
     ports:
-      - "6168:6168"
+      - "8449:8448"
     environment:
-      CONTINUWUITY_SERVER_NAME: localhost
+      CONTINUWUITY_SERVER_NAME: continuwuity.local
       CONTINUWUITY_ADDRESS: 0.0.0.0
-      CONTINUWUITY_PORT: 6168
+      CONTINUWUITY_PORT: 8448
+      # Nested TOML keys need a DOUBLE underscore over env vars ([global.tls]
+      # certs/key) - a single underscore is silently ignored.
+      CONTINUWUITY_TLS__CERTS: /tls/cert.pem
+      CONTINUWUITY_TLS__KEY: /tls/key.pem
       CONTINUWUITY_DATABASE_PATH: /var/lib/continuwuity/
       CONTINUWUITY_MAX_REQUEST_SIZE: "20000000"
       CONTINUWUITY_ALLOW_REGISTRATION: "true"
       CONTINUWUITY_YES_I_AM_VERY_VERY_SURE_I_WANT_AN_OPEN_REGISTRATION_SERVER_PRONE_TO_ABUSE: "true"
       CONTINUWUITY_REGISTRATION_TOKEN: devtoken
-      CONTINUWUITY_ALLOW_FEDERATION: "false"
+      CONTINUWUITY_ALLOW_FEDERATION: "true"
       CONTINUWUITY_ALLOW_CHECK_FOR_UPDATES: "false"
     volumes:
       - continuwuity_data:/var/lib/continuwuity/
+      - ./tls/continuwuity.cert.pem:/tls/cert.pem:ro
+      - ./tls/continuwuity.key.pem:/tls/key.pem:ro
+      - ./tls/ca.cert.pem:/etc/ssl/certs/ca-certificates.crt:ro
 
-  # Registers `alice` on Conduit so `docker compose up` alone gets that
+  # Registers `alice` on Dendrite so `docker compose up` alone gets that
   # dev.lua credential working, without a manual register.sh call. (No
   # equivalent is possible for continuwuity's `alice` - see the comment on
-  # homeserver-sss above.) One-shot: runs register.sh (which polls Conduit
+  # homeserver-sss above.) One-shot: runs register.sh (which polls Dendrite
   # until it's ready, then exits) and stops; `depends_on` here only waits for
   # the container to start, not for it to be ready to accept connections.
   register:
@@ -107,13 +142,15 @@ services:
     depends_on:
       - homeserver
     environment:
-      HOMESERVER: http://homeserver:6167
+      HOMESERVER: https://dendrite.local:8448
+      CACERT: /tls/ca.cert.pem
     volumes:
       - ./register.sh:/register.sh:ro
+      - ./tls/ca.cert.pem:/tls/ca.cert.pem:ro
     entrypoint: ["sh", "-c"]
     command:
       - apk add --no-cache bash curl >/dev/null && bash /register.sh alice alicepassword
 
 volumes:
-  conduit_data:
+  dendrite_data:
   continuwuity_data:

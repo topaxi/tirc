@@ -41,6 +41,7 @@
 ---@field password string
 ---@field device_id? string
 ---@field sliding_sync? 'auto' | 'on' | 'off' whether to use Simplified Sliding Sync (MSC4186); 'auto' (default) probes the homeserver
+---@field root_ca_pem? string extra CA certificate (PEM) to trust for this homeserver's TLS connections, on top of the system trust store - for a self-hosted homeserver behind a private CA
 ---@field autojoin? string[] room ids/aliases to join on connect
 ---@field aliases? table<string, string> display aliases for buffers on this server: raw target -> shown name
 ---@field buffer_order? string[] explicit tab order for this server's buffers; listed targets sort first, unlisted follow in arrival order. Include '(status)' to position the status buffer
