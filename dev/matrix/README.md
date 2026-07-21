@@ -26,16 +26,19 @@ Both listen with server name `localhost`, so user ids look like
 
 ## Create users
 
-Register on whichever homeserver you are testing (the script defaults to
-Conduit; set `HOMESERVER` for the sliding-sync one):
+`alice` is created automatically on continuwuity (the sliding-sync homeserver) when
+its container boots - continuwuity gates the *first* account on a fresh database
+behind a random one-time token printed to its logs, so `docker-compose.yml` creates
+that one via the admin CLI instead of registration. Register on Conduit (the script
+defaults to it) and any additional users on either homeserver:
 
 ```bash
 chmod +x dev/matrix/register.sh
-./dev/matrix/register.sh alice alicepassword
-./dev/matrix/register.sh bob   bobpassword
+./dev/matrix/register.sh alice alicepassword    # Conduit
+./dev/matrix/register.sh bob   bobpassword      # Conduit
 
-# continuwuity (sliding sync):
-HOMESERVER=http://localhost:6168 ./dev/matrix/register.sh alice alicepassword
+# continuwuity (sliding sync) - only needed for accounts beyond `alice`:
+HOMESERVER=http://localhost:6168 ./dev/matrix/register.sh bob bobpassword
 ```
 
 ## Point tirc at it

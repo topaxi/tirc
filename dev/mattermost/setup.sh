@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Creates a test team and user on the local Mattermost preview server.
+# Creates the admin account, a test team and a test user on the local
+# Mattermost preview server. The image has no env-var-based admin bootstrap
+# (despite some older docs suggesting MM_ADMIN_* vars do this - they don't:
+# Mattermost auto-promotes the very first account on a fresh instance to
+# system admin instead), so this script creates that first account itself.
 #
-# Run after the container is up and healthy:
+# Run after the container is up and healthy, against a fresh instance:
 #
 #   docker compose -f dev/mattermost/docker-compose.yml up -d
 #   ./dev/mattermost/setup.sh
@@ -17,6 +21,7 @@ set -euo pipefail
 MM_URL="${MM_URL:-http://localhost:8065}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-adminpassword1!}"
+ADMIN_EMAIL="${ADMIN_EMAIL:-admin@example.com}"
 TEAM_NAME="${TEAM_NAME:-testteam}"
 TEAM_DISPLAY="${TEAM_DISPLAY:-Test Team}"
 TEST_USER="${TEST_USER:-alice}"
@@ -36,6 +41,16 @@ for i in $(seq 1 30); do
   sleep 2
 done
 echo "Server is up."
+
+# Create the admin account (idempotent - ignore failure if it already
+# exists). Only works as the very first account on a fresh instance; if
+# other accounts already exist, create/promote one via `mmctl user create
+# --system-admin` (or the console) instead.
+echo "Creating admin '${ADMIN_USER}' ..."
+curl -sf -X POST "${MM_URL}/api/v4/users" \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASS}\",\"email\":\"${ADMIN_EMAIL}\"}" \
+  > /dev/null || echo "  (admin already exists, continuing)"
 
 # Log in as admin.
 echo "Logging in as ${ADMIN_USER} ..."

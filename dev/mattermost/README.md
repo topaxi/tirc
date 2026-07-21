@@ -10,6 +10,8 @@ docker compose -f dev/mattermost/docker-compose.yml up -d
 ```
 
 The setup script waits for the server to be ready, then creates:
+- Admin: `admin` / `adminpassword1!` (Mattermost auto-promotes the first account on a
+  fresh instance to system admin - there's no env-var-based admin bootstrap)
 - Team: `testteam`
 - User: `alice` / `alicepassword1!`
 

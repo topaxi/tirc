@@ -1,14 +1,16 @@
 # Mattermost preview server for tirc development and testing.
 #
-# mattermost-preview bundles a MySQL database in a single container,
-# making it convenient for local use. Admin credentials are seeded via
-# environment variables on first boot.
+# mattermost-preview bundles a Postgres database in a single container,
+# making it convenient for local use. It has no env-var-based admin
+# bootstrap; setup.sh creates the admin (and everything else) via the API -
+# Mattermost auto-promotes the very first account on a fresh instance to
+# system admin.
 #
 #   docker compose -f dev/mattermost/docker-compose.yml up -d
 #   ./dev/mattermost/setup.sh
 #
 # Then point an init.lua Mattermost server entry at http://localhost:8065
-# with user_id 'alice', password 'alicepassword', team 'testteam'.
+# with user_id 'alice', password 'alicepassword1!', team 'testteam'.
 
 services:
   mattermost:
@@ -18,10 +20,6 @@ services:
     restart: unless-stopped
     ports:
       - "8065:8065"
-    environment:
-      MM_ADMIN_USERNAME: admin
-      MM_ADMIN_PASSWORD: adminpassword1!
-      MM_ADMIN_EMAIL: admin@example.com
     volumes:
       - mattermost_data:/mm/mattermost-data
 
