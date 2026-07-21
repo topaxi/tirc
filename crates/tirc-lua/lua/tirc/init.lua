@@ -6,8 +6,10 @@
 ---@field id string opaque buffer identifier (matches `event:buffer_id()` and `tirc.focused_buffer`)
 ---@field name string display name (may differ from target for Matrix rooms)
 ---@field target string raw target identifier (IRC channel/nick or Matrix room id)
+---@field topic? string the buffer's current topic, when one is set
 ---@field backend_id integer id of the backend this buffer belongs to (for grouping)
 ---@field backend_name string human-readable backend name
+---@field home_server? string the user's own server name (a Matrix mxid's domain), when the backend has one
 ---@field backend_metadata? table<string, any> per-server metadata from the config (e.g. `{ label = 'topaxi' }`)
 ---@field has_unread boolean true when unseen messages are present
 ---@field has_mention boolean true when the user's nick was mentioned in an unseen message

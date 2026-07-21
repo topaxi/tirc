@@ -2077,8 +2077,12 @@ impl<'lua> InputHandler<'lua> {
         let backend = message.backend;
 
         match message.event {
-            BackendEvent::Ready { nickname } => {
+            BackendEvent::Ready {
+                nickname,
+                home_server,
+            } => {
                 state.set_nickname(backend, nickname);
+                state.set_home_server(backend, home_server);
                 state.set_connection_status(backend, ConnectionStatus::Connected);
             }
             BackendEvent::Synced => state.set_synced(backend),

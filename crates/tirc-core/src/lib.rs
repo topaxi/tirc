@@ -506,9 +506,13 @@ impl ChatEvent {
 /// Backend connection lifecycle and normalized events, as delivered to the core.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BackendEvent {
-    /// The connection is up and identified under `nickname`.
+    /// The connection is up and identified under `nickname`. `home_server` is
+    /// the user's own server name (the domain of a Matrix mxid), used to tell
+    /// federated rooms from local ones; `None` for protocols without the notion
+    /// (IRC, Mattermost).
     Ready {
         nickname: String,
+        home_server: Option<String>,
     },
     /// All initial history has been delivered. Events after this are live.
     /// IRC sends this immediately after Ready (no backfill); Matrix sends it

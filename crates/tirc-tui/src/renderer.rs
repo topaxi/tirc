@@ -893,22 +893,20 @@ impl Renderer {
         lines
     }
 
+    /// Builds the room-header spans. The theme's `buffer_title` formatter is
+    /// handed the same rich buffer table the buffer bar receives (so it can reach
+    /// `target`, `topic`, `backend_name`, ...) plus the local nickname, letting it
+    /// surface the room's homeserver for federated rooms and the topic.
     fn render_buffer_title(
         &self,
+        state: &State,
         lua: &mlua::Lua,
-        backend: &BackendInfo,
+        id: &BufferId,
+        buffer: &ChatBuffer,
         nickname: &str,
-        buffer_label: &str,
     ) -> Result<Vec<Span<'_>>, anyhow::Error> {
-        self.format_spans(
-            lua,
-            "buffer_title",
-            (
-                backend.name.clone(),
-                nickname.to_string(),
-                buffer_label.to_string(),
-            ),
-        )
+        let table = self.buffer_tab_table(state, lua, id, buffer)?;
+        self.format_spans(lua, "buffer_title", (nickname.to_string(), table))
     }
 
     /// Returns the cell size a decoded image occupies, or `None` when it is not
@@ -1018,7 +1016,7 @@ impl Renderer {
             .collect();
 
         let title = self
-            .render_buffer_title(lua, backend, nickname, target_name)
+            .render_buffer_title(state, lua, buffer_id, buffer, nickname)
             .unwrap_or_default();
 
         // Build the block up front so `list_area` can be derived from the exact
@@ -1665,6 +1663,9 @@ impl Renderer {
         t.set("id", format!("{}:{}", id.backend.0, id.target.as_str()))?;
         t.set("name", state.buffer_label(id, buffer))?;
         t.set("target", id.target.as_str())?;
+        if let Some(topic) = buffer.topic.as_deref() {
+            t.set("topic", topic)?;
+        }
         t.set("is_status", id.target.is_status())?;
         t.set(
             "is_system",
@@ -1679,6 +1680,9 @@ impl Renderer {
         t.set("has_mention", buffer.has_mention)?;
         if let Some(backend_state) = state.backends.get(&id.backend) {
             t.set("latency_ms", backend_state.latency_ms)?;
+            if let Some(home_server) = backend_state.home_server.as_deref() {
+                t.set("home_server", home_server)?;
+            }
             t.set(
                 "connection_status",
                 match backend_state.connection_status {
@@ -3243,6 +3247,75 @@ mod tests {
         assert!(hits[0]
             .iter()
             .all(|hit| matches!(hit, Some(BarHit::Backend { .. }))));
+        Ok(())
+    }
+
+    #[test]
+    fn default_theme_buffer_title_shows_federated_address_and_topic(
+    ) -> anyhow::Result<(), anyhow::Error> {
+        let lua = mlua::Lua::new();
+        tirc_lua::builtins::register_builtin_modules(&lua)?;
+        lua.load("require('tirc.tui.themes.default'):setup({})")
+            .exec()?;
+        let renderer = Renderer::new();
+
+        let title_text =
+            |target: &str, name: &str, home_server: Option<&str>, topic: Option<&str>| -> String {
+                let buffer = lua.create_table().unwrap();
+                buffer.set("name", name).unwrap();
+                buffer.set("target", target).unwrap();
+                buffer
+                    .set("backend_name", "https://localhost:8449")
+                    .unwrap();
+                if let Some(home_server) = home_server {
+                    buffer.set("home_server", home_server).unwrap();
+                }
+                if let Some(topic) = topic {
+                    buffer.set("topic", topic).unwrap();
+                }
+                let spans = renderer
+                    .format_spans(&lua, "buffer_title", ("bob".to_string(), buffer))
+                    .unwrap();
+                spans.iter().map(|s| s.content.as_ref()).collect()
+            };
+
+        // The `nick@server` server is the user's own home server (the mxid
+        // domain), not the raw connection address. A room on a *different*
+        // homeserver (federated) shows that server after the friendly name.
+        let text = title_text(
+            "!abc:other.example",
+            "tirc-dev",
+            Some("continuwuity.local"),
+            None,
+        );
+        assert_eq!(text, "bob@continuwuity.local in tirc-dev:other.example");
+
+        // A room on the user's own home server omits the redundant server.
+        let text = title_text(
+            "!abc:continuwuity.local",
+            "tirc-dev",
+            Some("continuwuity.local"),
+            None,
+        );
+        assert_eq!(text, "bob@continuwuity.local in tirc-dev");
+
+        // A topic trails the header when present.
+        let text = title_text(
+            "!abc:other.example",
+            "tirc-dev",
+            Some("continuwuity.local"),
+            Some("hello world"),
+        );
+        assert_eq!(
+            text,
+            "bob@continuwuity.local in tirc-dev:other.example  hello world"
+        );
+
+        // Without a known home server (IRC, or before Ready), the server falls
+        // back to the backend name and the room server is never suppressed.
+        let text = title_text("#tirc", "#tirc", None, None);
+        assert_eq!(text, "bob@https://localhost:8449 in #tirc");
+
         Ok(())
     }
 

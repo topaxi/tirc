@@ -353,6 +353,10 @@ pub enum ConnectionStatus {
 pub struct BackendState {
     pub info: BackendInfo,
     pub nickname: String,
+    /// The user's own server name (a Matrix mxid's domain), reported at `Ready`.
+    /// `None` for protocols without the notion (IRC, Mattermost). Used to tell
+    /// federated rooms from rooms on the user's own homeserver.
+    pub home_server: Option<String>,
     /// True once the backend has finished delivering initial history (Synced event).
     /// Unread/mention flags are only set after this point so backfill doesn't
     /// trigger activity indicators.
@@ -407,6 +411,7 @@ impl State {
             BackendState {
                 info,
                 nickname: String::new(),
+                home_server: None,
                 synced: false,
                 connection_status: ConnectionStatus::Connecting,
                 latency_ms: None,
@@ -458,6 +463,12 @@ impl State {
     pub fn set_nickname(&mut self, backend: BackendId, nickname: String) {
         if let Some(state) = self.backends.get_mut(&backend) {
             state.nickname = nickname;
+        }
+    }
+
+    pub fn set_home_server(&mut self, backend: BackendId, home_server: Option<String>) {
+        if let Some(state) = self.backends.get_mut(&backend) {
+            state.home_server = home_server;
         }
     }
 

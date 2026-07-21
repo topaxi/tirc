@@ -363,6 +363,7 @@ async fn connect_once(
         events,
         BackendEvent::Ready {
             nickname: username.clone(),
+            home_server: None,
         },
     );
 

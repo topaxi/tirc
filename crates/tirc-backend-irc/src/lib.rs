@@ -153,7 +153,7 @@ impl IrcBackend {
                         ready_received = true;
                         let _ = events.send(BackendMessage {
                             backend: id,
-                            event: BackendEvent::Ready { nickname: nickname.clone() },
+                            event: BackendEvent::Ready { nickname: nickname.clone(), home_server: None },
                         });
                         // IRC has no history backfill: live messages start immediately.
                         let _ = events.send(BackendMessage {

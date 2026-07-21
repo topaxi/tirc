@@ -22,7 +22,7 @@ local BarRow = require('tirc.tui.bar_row')
 --- ```lua
 --- tirc.ui = Default.new {
 ---   palette = { blue = theme.style { fg = 'cyan' } },
----   buffer_title = function(self, server, nickname, buffer_name) ... end,
+---   buffer_title = function(self, nickname, buffer) ... end,
 --- }
 --- ```
 ---
@@ -52,7 +52,7 @@ local BarRow = require('tirc.tui.bar_row')
 --- they replace.
 ---@class TircThemeOptions
 ---@field palette? table<string, TircThemeStyle> override individual colours
----@field buffer_title? fun(self: TircTheme, server: string, nickname: string, buffer: string): TircSpans
+---@field buffer_title? fun(self: TircTheme, nickname: string, buffer: TircBufferTab): TircSpans
 ---@field userlist_title? fun(self: TircTheme, buffer: string): TircSpans
 ---@field message_time? fun(self: TircTheme, date_time: TircDateTime, event: TircEvent): TircSpans
 ---@field message_text? fun(self: TircTheme, event: TircEvent, nickname: string): TircSpans?
@@ -411,18 +411,44 @@ function Theme:format_server_info(event)
   return utils.list_concat(self:server_notice_icon(), { event.text })
 end
 
----@param server string
+--- The room header, shown as `nick@server in <room>`. The `server` is the user's
+--- own home server when known (a Matrix mxid's domain, e.g. `continuwuity.local`)
+--- rather than the raw connection address; it falls back to the backend name for
+--- protocols without one (IRC). For federated rooms - those whose target carries a
+--- different homeserver (Matrix room ids look like `!id:server`) - that homeserver
+--- is appended so `tirc-dev` reads as `tirc-dev:server`; a room on the user's own
+--- home server is shown by its plain name. When the buffer has a topic it trails
+--- the header like a traditional IRC client.
 ---@param nickname string
----@param buffer_name string
-function Theme:buffer_title(server, nickname, buffer_name)
+---@param buffer TircBufferTab
+function Theme:buffer_title(nickname, buffer)
   local s = self.styles
-  return {
+  local home_server = buffer.home_server
+
+  -- Everything after the first `:` in the target is the room's homeserver
+  -- (kept verbatim, so a `host:port` server survives). IRC targets (`#channel`)
+  -- have no colon, so this is nil and the plain name is used. The server is
+  -- omitted when the room lives on the user's own home server.
+  local room_server = buffer.target:match(':(.+)$')
+  local room_label = buffer.name
+  if room_server and room_server ~= home_server then
+    room_label = buffer.name .. ':' .. room_server
+  end
+
+  local spans = {
     { nickname, s.blue },
     { '@', s.twhite },
-    { server, s.green },
+    { home_server or buffer.backend_name, s.green },
     { ' in ', s.twhite },
-    { buffer_name, s.green },
+    { room_label, s.green },
   }
+
+  if buffer.topic and buffer.topic ~= '' then
+    spans[#spans + 1] = { '  ', s.twhite }
+    spans[#spans + 1] = { utils.truncate(buffer.topic, 120), s.gray }
+  end
+
+  return spans
 end
 
 ---@param buffer_name string

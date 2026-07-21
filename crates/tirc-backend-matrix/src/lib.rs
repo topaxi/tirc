@@ -151,10 +151,12 @@ impl ChatBackend for MatrixBackend {
             .user_id()
             .map(|user| user.localpart().to_string())
             .unwrap_or_else(|| self.config.user_id.clone());
+        let home_server = client.user_id().map(|user| user.server_name().to_string());
         let _ = events.send(BackendMessage {
             backend: id,
             event: BackendEvent::Ready {
                 nickname: nickname.clone(),
+                home_server,
             },
         });
         // Unlike IRC there are no server numerics, so emit explicit connection
