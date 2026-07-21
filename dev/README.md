@@ -12,6 +12,11 @@ docker compose up -d
 
 Or start just one, e.g. `docker compose -f dev/irc/docker-compose.yml up -d`.
 
+All four `tirc.dev` accounts (see below) work right after that, with one exception:
+continuwuity (the Matrix sliding-sync homeserver) gates its first account behind a
+random one-time token it only ever prints to its own logs, so that one needs a single
+manual step - see [`matrix/README.md`](matrix/README.md#create-users).
+
 ## Pointing tirc at them
 
 `require('tirc.dev')` (bundled, no filesystem access needed) has a ready-made

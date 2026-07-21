@@ -24,6 +24,10 @@ services:
   unrealircd:
     # Fully-qualified so it also resolves under podman (no unqualified search).
     image: docker.io/ircd/unrealircd:latest
+    # Fixed name so `docker logs`/`docker exec` work the same whether this was
+    # started standalone or via the root docker-compose.yml (different
+    # compose project names otherwise generate different container names).
+    container_name: tirc-unrealircd
     command: ["/app/unrealircd/bin/unrealircd", "-F"]
     restart: unless-stopped
     ports:

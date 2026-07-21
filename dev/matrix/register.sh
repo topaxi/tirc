@@ -20,13 +20,31 @@ PASSWORD="${2:?usage: register.sh <username> <password>}"
 HOMESERVER="${HOMESERVER:-http://localhost:6167}"
 REGISTRATION_TOKEN="${REGISTRATION_TOKEN:-devtoken}"
 
+echo "Waiting for ${HOMESERVER} ..."
+for i in $(seq 1 30); do
+  if curl -sf "${HOMESERVER}/_matrix/client/versions" >/dev/null 2>&1; then
+    break
+  fi
+  if [ "$i" -eq 30 ]; then
+    echo "${HOMESERVER} did not become ready in time" >&2
+    exit 1
+  fi
+  sleep 2
+done
+
 # Discovering the required auth stage always 401s with the available flows
-# and a session id (User-Interactive Auth), on both homeservers.
+# and a session id (User-Interactive Auth) - unless the user already exists,
+# which 400s immediately with no session (idempotent no-op in that case).
 flows=$(curl -sS -X POST "${HOMESERVER}/_matrix/client/v3/register" \
   -H 'Content-Type: application/json' \
   -d "{\"username\":\"${USERNAME}\",\"password\":\"${PASSWORD}\",\"inhibit_login\":true}")
 
-session=$(echo "$flows" | python3 -c 'import sys,json; print(json.load(sys.stdin)["session"])')
+if echo "$flows" | grep -q 'M_USER_IN_USE'; then
+  echo "@${USERNAME}:localhost already registered, skipping"
+  exit 0
+fi
+
+session=$(echo "$flows" | sed -n 's/.*"session":"\([^"]*\)".*/\1/p')
 
 if echo "$flows" | grep -q 'm.login.registration_token'; then
   auth="{\"type\":\"m.login.registration_token\",\"token\":\"${REGISTRATION_TOKEN}\",\"session\":\"${session}\"}"

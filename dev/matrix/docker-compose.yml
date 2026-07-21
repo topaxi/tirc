@@ -15,13 +15,16 @@
 # throwaway local instances, never expose them.
 #
 #   docker compose -f dev/matrix/docker-compose.yml up -d
-#   ./dev/matrix/register.sh alice alicepassword                       # Conduit
 #
-# continuwuity (port 6168) auto-creates its `alice` account at boot (see the
-# `command` override below), so it needs no register.sh call for that user;
-# use register.sh for any additional accounts there:
+# `alice` (matching dev.lua) is registered on Conduit automatically, by the
+# `register` service below (see register.sh). continuwuity has no equivalent -
+# its first account needs one manual step, since it gates it behind a random
+# one-time token printed to `docker logs tirc-homeserver-sss` (see README.md
+# for the exact command). Use register.sh yourself for any additional
+# accounts on either homeserver:
 #
-#   HOMESERVER=http://localhost:6168 ./dev/matrix/register.sh bob bobpassword
+#   ./dev/matrix/register.sh bob bobpassword                            # Conduit
+#   HOMESERVER=http://localhost:6168 ./dev/matrix/register.sh bob bobpassword  # continuwuity
 #
 # Then point an init.lua Matrix server entry at the chosen homeserver with
 # user_id '@alice:localhost'.
@@ -30,6 +33,11 @@ services:
   homeserver:
     # Fully-qualified so it also resolves under podman (no unqualified search).
     image: docker.io/matrixconduit/matrix-conduit:latest
+    # Fixed name so `docker logs`/`docker exec` work the same whether this was
+    # started standalone or via the root docker-compose.yml (which uses a
+    # different compose project name, so `docker compose logs` wouldn't find
+    # containers started the other way, but `docker logs <name>` always will).
+    container_name: tirc-homeserver
     restart: unless-stopped
     ports:
       - "6167:6167"
@@ -56,19 +64,22 @@ services:
   # Sync, so it is the target for exercising tirc's sliding-sync driver. Its
   # config keys mirror Conduit's, under the CONTINUWUITY_ prefix.
   #
-  # Unlike Conduit, continuwuity always gates registration behind a token,
-  # even with the "open registration" flags below: the *first* account on a
-  # fresh database can only be created with a random one-time token printed
-  # to the container's logs, and a *configured* token (CONTINUWUITY_
-  # REGISTRATION_TOKEN, matching register.sh's REGISTRATION_TOKEN) only takes
-  # over for accounts after that. So `command` below creates the first
-  # account (alice, matching dev.lua/matrix README) directly via the admin
-  # CLI at boot, sidestepping the one-time token entirely; register.sh
-  # handles the configured-token flow for any additional accounts (e.g. bob).
+  # Unlike Conduit, continuwuity always gates its *first* account (on a fresh
+  # database) behind a random one-time token printed to the container's own
+  # logs, regardless of the registration flags below - there is no way to
+  # automate that first account non-interactively. (An earlier version of
+  # this file tried creating it via `command: conduwuit --execute "users
+  # create-user ..."` at boot; that crash-loops instead, because the command
+  # is unconditional and fatal on every restart once the account already
+  # exists, and `--execute` has no idempotent/"skip if present" form. Do not
+  # reintroduce it.) So the first account is a one-time manual step - see
+  # README.md - after which the *configured* token (CONTINUWUITY_
+  # REGISTRATION_TOKEN, matching register.sh's REGISTRATION_TOKEN) takes over
+  # for any additional accounts (e.g. bob) via register.sh, same as Conduit.
   homeserver-sss:
     image: forgejo.ellis.link/continuwuation/continuwuity:latest
+    container_name: tirc-homeserver-sss
     restart: unless-stopped
-    command: ["/sbin/conduwuit", "--execute", "users create-user alice alicepassword"]
     ports:
       - "6168:6168"
     environment:
@@ -84,6 +95,24 @@ services:
       CONTINUWUITY_ALLOW_CHECK_FOR_UPDATES: "false"
     volumes:
       - continuwuity_data:/var/lib/continuwuity/
+
+  # Registers `alice` on Conduit so `docker compose up` alone gets that
+  # dev.lua credential working, without a manual register.sh call. (No
+  # equivalent is possible for continuwuity's `alice` - see the comment on
+  # homeserver-sss above.) One-shot: runs register.sh (which polls Conduit
+  # until it's ready, then exits) and stops; `depends_on` here only waits for
+  # the container to start, not for it to be ready to accept connections.
+  register:
+    image: docker.io/library/alpine:3.20
+    depends_on:
+      - homeserver
+    environment:
+      HOMESERVER: http://homeserver:6167
+    volumes:
+      - ./register.sh:/register.sh:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - apk add --no-cache bash curl >/dev/null && bash /register.sh alice alicepassword
 
 volumes:
   conduit_data:

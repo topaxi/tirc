@@ -2,15 +2,16 @@
 #
 # mattermost-preview bundles a Postgres database in a single container,
 # making it convenient for local use. It has no env-var-based admin
-# bootstrap; setup.sh creates the admin (and everything else) via the API -
-# Mattermost auto-promotes the very first account on a fresh instance to
-# system admin.
+# bootstrap; the `setup` service below creates the admin (and everything
+# else) via the API automatically - Mattermost auto-promotes the very first
+# account on a fresh instance to system admin.
 #
 #   docker compose -f dev/mattermost/docker-compose.yml up -d
-#   ./dev/mattermost/setup.sh
 #
 # Then point an init.lua Mattermost server entry at http://localhost:8065
-# with user_id 'alice', password 'alicepassword1!', team 'testteam'.
+# with user_id 'alice', password 'alicepassword1!', team 'testteam'. Rerun
+# `./dev/mattermost/setup.sh` yourself (e.g. with TEST_USER/TEST_PASS set) for
+# additional accounts.
 
 services:
   mattermost:
@@ -22,6 +23,22 @@ services:
       - "8065:8065"
     volumes:
       - mattermost_data:/mm/mattermost-data
+
+  # Runs setup.sh so `docker compose up` alone gets dev.lua's mattermost
+  # credentials working, without a manual setup.sh call. One-shot: setup.sh
+  # polls Mattermost until it's ready, does its thing, then exits; `depends_on`
+  # here only waits for the container to start, not for it to be ready.
+  setup:
+    image: docker.io/library/alpine:3.20
+    depends_on:
+      - mattermost
+    environment:
+      MM_URL: http://mattermost:8065
+    volumes:
+      - ./setup.sh:/setup.sh:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - apk add --no-cache bash curl >/dev/null && bash /setup.sh
 
 volumes:
   mattermost_data:

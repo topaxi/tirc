@@ -26,19 +26,32 @@ Both listen with server name `localhost`, so user ids look like
 
 ## Create users
 
-`alice` is created automatically on continuwuity (the sliding-sync homeserver) when
-its container boots - continuwuity gates the *first* account on a fresh database
-behind a random one-time token printed to its logs, so `docker-compose.yml` creates
-that one via the admin CLI instead of registration. Register on Conduit (the script
-defaults to it) and any additional users on either homeserver:
+`alice` (matching `tirc.dev`) is registered on Conduit automatically, by the `up`d
+`register` service in docker-compose.yml.
+
+continuwuity has no equivalent: it gates the *first* account on a fresh database
+behind a random one-time token, which it only ever prints to its own logs - there is
+no way to script around this. So that one account needs a manual step once, right
+after `docker compose up`:
+
+```bash
+# strip ANSI color codes (the logs have them even though this isn't a tty)
+TOKEN=$(docker logs tirc-homeserver-sss 2>&1 | sed -r 's/\x1b\[[0-9;]*m//g' \
+  | grep -oP 'using the registration token \K\S+')
+
+curl -s -X POST http://localhost:6168/_matrix/client/v3/register \
+  -H 'Content-Type: application/json' \
+  -d "{\"username\":\"alice\",\"password\":\"alicepassword\",\"inhibit_login\":true,\"auth\":{\"type\":\"m.login.registration_token\",\"token\":\"${TOKEN}\"}}"
+```
+
+After that, `register.sh` works normally on continuwuity too (it uses the *configured*
+token, `CONTINUWUITY_REGISTRATION_TOKEN` in docker-compose.yml, which only takes over
+once the first account exists). Use it for any additional users on either homeserver:
 
 ```bash
 chmod +x dev/matrix/register.sh
-./dev/matrix/register.sh alice alicepassword    # Conduit
-./dev/matrix/register.sh bob   bobpassword      # Conduit
-
-# continuwuity (sliding sync) - only needed for accounts beyond `alice`:
-HOMESERVER=http://localhost:6168 ./dev/matrix/register.sh bob bobpassword
+./dev/matrix/register.sh bob bobpassword                                    # Conduit
+HOMESERVER=http://localhost:6168 ./dev/matrix/register.sh bob bobpassword   # continuwuity
 ```
 
 ## Point tirc at it
@@ -77,6 +90,16 @@ an over-qualified id (`!abc...:localhost`) will not resolve.
 ```bash
 docker compose -f dev/matrix/docker-compose.yml down        # stop
 docker compose -f dev/matrix/docker-compose.yml down -v     # stop + wipe data
+```
+
+After `down -v` (or otherwise recreating an account on the same homeserver URL), also
+clear tirc's own local state for it - it persists login session and E2E crypto state
+keyed by `user id + homeserver` under `~/.local/share/tirc/matrix/`, and a wiped
+account gets a new server-side identity that the old local crypto store won't match
+(surfaces as `failed to read or write to the crypto store` on connect):
+
+```bash
+rm -rf ~/.local/share/tirc/matrix/_alice_localhost@*
 ```
 
 E2E-encrypted rooms work: the SDK persists its crypto state in the per-account

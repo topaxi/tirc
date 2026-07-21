@@ -78,7 +78,7 @@ curl -sf -X POST "${MM_URL}/api/v4/teams" \
 
 # Look up the team id.
 team_id=$(curl -sf "${MM_URL}/api/v4/teams/name/${TEAM_NAME}" \
-  -H "${auth_header}" | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+  -H "${auth_header}" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 echo "Team id: ${team_id}"
 
 # Create the test user (idempotent).
@@ -91,7 +91,7 @@ curl -sf -X POST "${MM_URL}/api/v4/users" \
 
 # Look up the user id.
 user_id=$(curl -sf "${MM_URL}/api/v4/users/username/${TEST_USER}" \
-  -H "${auth_header}" | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+  -H "${auth_header}" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 echo "User id: ${user_id}"
 
 # Add the user to the team.

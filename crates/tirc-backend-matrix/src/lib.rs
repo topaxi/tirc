@@ -75,21 +75,29 @@ impl MatrixBackend {
 
     /// Per-account SQLite store directory, so sync tokens and (later) crypto
     /// state persist across runs.
+    ///
+    /// Keyed by user id *and* homeserver, not user id alone: two distinct
+    /// homeservers can otherwise share an MXID (e.g. two local test servers
+    /// both named `localhost`, as tirc's own dev/matrix setup does), and
+    /// reusing one store for both corrupts the crypto state - the SDK errors
+    /// with "the account in the store doesn't match the account in the
+    /// constructor" as soon as the second backend opens the shared store.
     fn store_path(&self) -> anyhow::Result<std::path::PathBuf> {
         if let Some(dir) = &self.config.store_dir {
             std::fs::create_dir_all(dir)?;
             return Ok(dir.clone());
         }
 
-        let sanitized: String = self
-            .config
-            .user_id
-            .chars()
-            .map(|c| if c.is_alphanumeric() { c } else { '_' })
-            .collect();
+        let sanitize = |s: &str| -> String {
+            s.chars()
+                .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                .collect()
+        };
+        let user = sanitize(&self.config.user_id);
+        let homeserver = sanitize(&self.config.homeserver);
 
         Ok(xdg::BaseDirectories::with_prefix("tirc")
-            .create_data_directory(format!("matrix/{sanitized}"))?)
+            .create_data_directory(format!("matrix/{user}@{homeserver}"))?)
     }
 
     /// Path of the persisted auth session, alongside the SQLite store. The SDK
