@@ -1,0 +1,13 @@
+# Starts every local dev server under dev/ (Matrix homeservers, Mattermost
+# preview, UnrealIRCd) in one shot. Each service's own compose file remains
+# the source of truth; see dev/matrix/README.md, dev/mattermost/README.md and
+# dev/irc/README.md for credentials and setup scripts.
+#
+#   docker compose up -d
+#   docker compose down        # stop
+#   docker compose down -v     # stop + wipe all data
+
+include:
+  - dev/matrix/docker-compose.yml
+  - dev/mattermost/docker-compose.yml
+  - dev/irc/docker-compose.yml

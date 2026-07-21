@@ -1,0 +1,35 @@
+# Local UnrealIRCd server for tirc development and testing.
+#
+# Open registration, plaintext by default - a throwaway local instance,
+# never expose it.
+#
+#   docker compose -f dev/irc/docker-compose.yml up -d
+#
+# Then point an init.lua IRC server entry at it, e.g.:
+#
+#   config.servers = {
+#     {
+#       protocol = 'irc',
+#       host = 'localhost',
+#       port = 6667,
+#       use_tls = false,
+#       nickname = { 'alice' },
+#     },
+#   }
+#
+# Or use the TLS listener with the bundled throwaway self-signed cert
+# (port 6697, use_tls = true, accept_invalid_cert = true).
+
+services:
+  unrealircd:
+    # Fully-qualified so it also resolves under podman (no unqualified search).
+    image: docker.io/ircd/unrealircd:latest
+    command: ["/app/unrealircd/bin/unrealircd", "-F"]
+    restart: unless-stopped
+    ports:
+      - "6667:6667"
+      - "6697:6697"
+    volumes:
+      - ./unrealircd.conf:/ircd/unrealircd.conf:ro
+      - ./tls/server.cert.pem:/ircd/tls/server.cert.pem:ro
+      - ./tls/server.key.pem:/ircd/tls/server.key.pem:ro
