@@ -3,8 +3,8 @@ use crossterm::event::{
     EnableFocusChange, EnableMouseCapture,
 };
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, Clear, ClearType,
-    EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
+    LeaveAlternateScreen,
 };
 use crossterm::{execute, queue};
 use mlua::Lua;
@@ -265,9 +265,8 @@ impl Tui {
     /// that races the async input reader and fails with "cursor position could not
     /// be read".
     ///
-    /// Exposed as the manual `:redraw` command and Ctrl-L. These are now largely
-    /// redundant since [`Self::render`] repaints fully every frame, but kept as an
-    /// explicit escape hatch.
+    /// Exposed as the manual `:redraw` command and Ctrl-L, as an explicit escape
+    /// hatch for a terminal whose screen has visibly desynced from our buffer.
     pub fn redraw(&mut self) -> Result<(), anyhow::Error> {
         queue!(self.terminal.backend_mut(), Clear(ClearType::All))?;
         self.terminal.swap_buffers();
@@ -280,23 +279,9 @@ impl Tui {
         state: &State,
         view: &mut ViewState,
     ) -> Result<(), anyhow::Error> {
-        // Workaround for https://github.com/ratatui/ratatui/issues/2357: ratatui's
-        // incremental buffer diff mis-renders lines containing wide graphemes
-        // (notably emoji-presentation sequences with U+FE0F), leaving stale cells
-        // and spurious spacing. Forcing a full repaint every frame sidesteps the
-        // buggy incremental path entirely, but a full erase+repaint flickers, so
-        // wrap the frame in a synchronized update (terminal mode 2026): the
-        // terminal buffers the erase and the repaint and swaps to them atomically.
-        // Terminals without support ignore these escapes and just fall back to the
-        // (flickering) erase+repaint. Remove once the upstream bug is fixed.
-        queue!(self.terminal.backend_mut(), BeginSynchronizedUpdate)?;
-
-        self.redraw()?;
-
-        // Clone the freshly rendered cell buffer before ending the synchronized
-        // update: `draw` swaps and resets the terminal's internal buffers, so
-        // this is the only point the rendered cells are readable. The clone ends
-        // the immutable terminal borrow before `backend_mut` below.
+        // Clone the freshly rendered cell buffer: `draw` swaps and resets the
+        // terminal's internal buffers, so this is the only point the rendered
+        // cells are readable.
         let frame = self
             .terminal
             .draw(|f| {
@@ -305,8 +290,6 @@ impl Tui {
             .buffer
             .clone();
         self.last_frame = Some(frame);
-
-        execute!(self.terminal.backend_mut(), EndSynchronizedUpdate)?;
 
         Ok(())
     }

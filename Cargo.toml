@@ -77,3 +77,12 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 emojis = "0.9.0"
 nucleo-matcher = "0.3.1"
 twox-hash = { version = "2", default-features = false, features = ["xxhash3_64"] }
+
+# Pinned past ratatui/ratatui#2721 and #2735 (fix cursor-position tracking
+# after wide/VS16-emoji cells), which fixes
+# https://github.com/ratatui/ratatui/issues/2357. Patched rather than pointed
+# at directly so ratatui-image's own "^0.30" dependency resolves to the same
+# copy. Not yet in a crates.io release - drop this patch once one ships with
+# the fix.
+[patch.crates-io]
+ratatui = { git = "https://github.com/ratatui/ratatui", rev = "a1b0b9cad9d3033f0ab20d368f8b37dace933149" }
